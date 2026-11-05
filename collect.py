@@ -124,7 +124,10 @@ def get_app_icon_path():
     return None
 def set_window_icon_safe(window):
     ico_path = get_app_icon_path()
-    if ico_path:
+    if not ico_path:
+        return
+
+    def _apply():
         try:
             window.iconbitmap(ico_path)
         except Exception:
@@ -132,9 +135,18 @@ def set_window_icon_safe(window):
                 if ImageTk is not None:
                     img = Image.open(ico_path)
                     photo = ImageTk.PhotoImage(img)
+                    window._a2r_icon_ref = photo
                     window.wm_iconphoto(True, photo)
             except Exception:
                 pass
+
+    _apply()
+    try:
+        # customtkinter يعيد وضع أيقونته الافتراضية بعد لحظات، فنعيد تطبيق أيقونتنا
+        window.after(300, _apply)
+        window.after(1000, _apply)
+    except Exception:
+        pass
 def setup_windows_autostart():
     if not WINREG_AVAILABLE or sys.platform != "win32":
         return
@@ -2101,7 +2113,7 @@ class CustomTkinterApp(ctk.CTk):
         ico_path = get_app_icon_path()
         if ico_path:
             try:
-                return Image.open(ico_path)
+                return Image.open(ico_path).convert("RGBA")
             except Exception:
                 pass
         img = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
