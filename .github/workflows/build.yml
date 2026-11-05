@@ -1,0 +1,64 @@
+name: Build A2R Console (Windows exe)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify required files
+        shell: pwsh
+        run: |
+          foreach ($f in 'collect.py','app.ico','pdftotext.exe') {
+            if (-not (Test-Path $f)) { Write-Error "Missing required file: $f"; exit 1 }
+          }
+
+      - name: Syntax check
+        run: python -m py_compile collect.py
+
+      - name: Build exe with PyInstaller
+        shell: pwsh
+        run: |
+          $args = @(
+            '--clean','--noconsole','--onefile',
+            '--icon=app.ico',
+            '--add-binary','pdftotext.exe;.',
+            '--collect-all','customtkinter',
+            '--collect-all','reportlab',
+            '--collect-all','arabic_reshaper',
+            '--collect-all','bidi',
+            '--collect-all','pystray',
+            '--collect-all','PIL',
+            '--hidden-import','pystray._win32',
+            '--name','A2R_Console'
+          )
+          if (Test-Path 'SumatraPDF.exe') { $args += @('--add-binary','SumatraPDF.exe;.') }
+          $args += 'collect.py'
+          python -m PyInstaller @args
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: A2R_Console
+          path: dist/A2R_Console.exe
