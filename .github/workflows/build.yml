@@ -33,6 +33,9 @@ jobs:
           foreach ($f in 'collect.py','app.ico','pdftotext.exe') {
             if (-not (Test-Path $f)) { Write-Error "Missing required file: $f"; exit 1 }
           }
+          if (-not (Test-Path 'SumatraPDF.exe')) {
+            Write-Warning "SumatraPDF.exe not found: silent 57x90 printing will fall back to default printing."
+          }
 
       - name: Syntax check
         run: python -m py_compile collect.py
@@ -44,6 +47,7 @@ jobs:
             '--clean','--noconsole','--onefile',
             '--icon=app.ico',
             '--add-binary','pdftotext.exe;.',
+            '--add-data','app.ico;.',
             '--collect-all','customtkinter',
             '--collect-all','reportlab',
             '--collect-all','arabic_reshaper',
@@ -57,8 +61,14 @@ jobs:
           $args += 'collect.py'
           python -m PyInstaller @args
 
-      - name: Upload exe
+      - name: Upload exe (Actions artifact)
         uses: actions/upload-artifact@v4
         with:
           name: A2R_Console
           path: dist/A2R_Console.exe
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/A2R_Console.exe
