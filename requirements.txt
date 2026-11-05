@@ -1,0 +1,9 @@
+customtkinter
+pillow
+pystray
+reportlab
+arabic-reshaper
+python-bidi
+openpyxl
+pypdf
+pyinstaller
