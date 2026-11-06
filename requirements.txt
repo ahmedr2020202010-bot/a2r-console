@@ -10,3 +10,5 @@ pyinstaller
 opencv-python-headless
 numpy
 pytesseract
+rapidocr_onnxruntime
+pypdfium2
