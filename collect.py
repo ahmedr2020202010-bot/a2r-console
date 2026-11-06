@@ -233,7 +233,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.66.0"
+APP_VERSION = "v4.67.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -567,7 +567,7 @@ LANGUAGES = {
         "cut": "Cut", "copy": "Copy", "paste": "Paste", "select_all": "Select All",
         "restricted_admin": "This feature is restricted to administrator only!", "done": "Done",
         "status_void": "Voided ❌", "status_dup": "Duplicate ×{n} ⚠️", "status_wrong": "Other Unit", "status_missing": "Missing: ", "status_manual": "Manual Receipt", "status_ok": "Valid Receipt",
-        "btn_admin_panel": "⚙️ Admin Panel", "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Admin Control Panel", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
+        "btn_admin_panel": "⚙️ Admin Panel", "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Advanced Batching & Receipts", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
@@ -623,7 +623,7 @@ LANGUAGES = {
         "cut": "قص", "copy": "نسخ", "paste": "لصق", "select_all": "تحديد الكل",
         "restricted_admin": "هذه الصلاحية متاحة للمشرف فقط!", "done": "تم",
         "status_void": "ملغي ❌", "status_dup": "مكرر ×{n} ⚠️", "status_wrong": "وحدة مختلفة", "status_missing": "ناقص: ", "status_manual": "معاملة يدوية", "status_ok": "إيصال سليم",
-        "btn_admin_panel": "⚙️ لوحة المشرف", "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "لوحة تحكم المشرف (Admin Panel)", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
+        "btn_admin_panel": "⚙️ لوحة المشرف", "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "أدوات التقفيل وإيصالات الدفع", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
@@ -2434,56 +2434,64 @@ class AdvancedLoginGate(ctk.CTkToplevel):
             try: winsound.MessageBeep(winsound.MB_ICONHAND)
             except: pass
 
-class AdminControlPanelWindow(ctk.CTkToplevel):
+class AdvancedToolsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_app = parent
-        self.title(tr("adv_win_title"))
+        self.title("Admin Control Panel")
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 640, 420)
+        center_window_relative(self, parent, 620, 390)
         
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(self, text=tr("adv_win_title"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(18, 12))
+        ctk.CTkLabel(self, text="⚙️ لوحة تحكم المشرف (Admin Control Panel)", font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(14, 10))
 
-        # Admin Sections Container
-        f_sections = ctk.CTkFrame(self, fg_color="transparent")
-        f_sections.pack(fill="both", expand=True, padx=20)
+        # Section 1: Data & Archives
+        f_data = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+        f_data.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(f_data, text="التقارير وسجل الأرشيف", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
         
-        # Section 1: Data & Reports
-        f_sec1 = ctk.CTkFrame(f_sections, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        f_sec1.pack(fill="x", pady=6)
-        ctk.CTkLabel(f_sec1, text="📂 قسم التقارير والبيانات (Data & Reports)", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 2))
-        f_btns1 = ctk.CTkFrame(f_sec1, fg_color="transparent")
-        f_btns1.pack(fill="x", padx=12, pady=(4, 10))
-        btn_excel = ctk.CTkButton(f_btns1, text=tr("open_excel"), height=35, font=FONT_BTN_SUB, fg_color="#059669", hover_color="#047857", text_color="#FFFFFF", command=parent.open_excel)
-        btn_excel.pack(side="left", fill="x", expand=True, padx=2)
-        btn_arch_hist = ctk.CTkButton(f_btns1, text=tr("arch_hist_btn"), height=35, font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", command=parent.open_archive_history)
-        btn_arch_hist.pack(side="left", fill="x", expand=True, padx=2)
+        f_data_btns = ctk.CTkFrame(f_data, fg_color="transparent")
+        f_data_btns.pack(fill="x", padx=10, pady=(6, 12))
         
-        # Section 2: Advanced Computer Vision & AI
-        f_sec2 = ctk.CTkFrame(f_sections, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        f_sec2.pack(fill="x", pady=6)
-        ctk.CTkLabel(f_sec2, text="🧠 قسم المعالجة الذكية والتقفيل (Computer Vision & OCR)", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 2))
+        btn_excel = ctk.CTkButton(f_data_btns, text=tr("open_excel"), font=FONT_BTN_SUB, fg_color="#059669", hover_color="#047857", text_color="#FFFFFF", height=32, command=self.parent_app.open_excel_direct)
+        btn_excel.pack(side="left", fill="x", expand=True, padx=(4, 4))
         
-        f_dir = ctk.CTkFrame(f_sec2, fg_color="transparent")
-        f_dir.pack(fill="x", padx=12, pady=(4, 8))
-        self.e_path = ctk.CTkEntry(f_dir, placeholder_text=tr("adv_pick_folder"), font=FONT_ENTRY, height=30, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        btn_arch_hist = ctk.CTkButton(f_data_btns, text=tr("arch_hist_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=32, command=self.parent_app.open_archive_history)
+        btn_arch_hist.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        
+        btn_clean = ctk.CTkButton(f_data_btns, text=tr("clean_downloads"), font=FONT_BTN_SUB, fg_color="#1E293B", hover_color="#334155", border_width=1, border_color="#38BDF8", text_color="#FFFFFF", height=32, command=self.parent_app.open_downloads_archiver_dialog)
+        btn_clean.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+        # Section 2: Smart Processing (Batching & Receipts)
+        f_smart = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+        f_smart.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(f_smart, text="المعالجة الذكية والتقفيل (OCR & OpenCV)", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
+
+        f_dir = ctk.CTkFrame(f_smart, fg_color="transparent")
+        f_dir.pack(fill="x", padx=10, pady=(6, 6))
+        ctk.CTkLabel(f_dir, text=tr("adv_pick_folder"), font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", pady=(0, 2))
+        
+        f_in = ctk.CTkFrame(f_dir, fg_color="transparent")
+        f_in.pack(fill="x")
+        self.e_path = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=30, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        btn_browse = ctk.CTkButton(f_dir, text=tr("browse"), width=70, height=30, font=FONT_BTN_SUB, fg_color=t["primary"], command=self.browse_folder)
+        btn_browse = ctk.CTkButton(f_in, text=tr("browse"), width=70, height=30, font=FONT_BTN_SUB, fg_color=t["primary"], command=self.browse_folder)
         btn_browse.pack(side="left")
 
-        f_btns2 = ctk.CTkFrame(f_sec2, fg_color="transparent")
-        f_btns2.pack(fill="x", padx=12, pady=(0, 10))
-        btn_batch = ctk.CTkButton(f_btns2, text=tr("adv_btn_batch"), height=35, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
-        btn_batch.pack(side="right", fill="x", expand=True, padx=(2, 0))
-        btn_receipts = ctk.CTkButton(f_btns2, text=tr("adv_btn_receipts"), height=35, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
-        btn_receipts.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        f_smart_btns = ctk.CTkFrame(f_smart, fg_color="transparent")
+        f_smart_btns.pack(fill="x", padx=10, pady=(0, 12))
+        
+        btn_receipts = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_receipts"), height=36, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
+        btn_receipts.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        
+        btn_batch = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_batch"), height=36, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
+        btn_batch.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
-        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"], wraplength=500)
-        self.lbl_status.pack(pady=(4, 12))
+        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], wraplength=580)
+        self.lbl_status.pack(pady=(0, 10))
 
     def browse_folder(self):
         f = filedialog.askdirectory()
@@ -2882,25 +2890,27 @@ class CustomTkinterApp(ctk.CTk):
         AdvancedLoginGate(self, self.open_advanced_window)
 
     def open_advanced_window(self):
-        AdminControlPanelWindow(self)
+        AdvancedToolsWindow(self)
 
     def unlock_full_console(self, is_supervisor):
         self.is_supervisor = is_supervisor
 
+        # كل الصلاحيات متاحة للجميع (مستخدم أو مشرف) ما عدا زر الإكسل: حصري للمشرف
         for w in (self.cb_d, self.cb_m, self.cb_y):
             w.configure(state="normal")
         for w in (self.btn_yesterday, self.btn_browse, self.btn_open_f):
             w.configure(state="normal")
 
+        self.btn_excel.pack_forget()
+        self.btn_arch_hist.pack_forget()
+        self.btn_chrome.pack_forget()
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
-            self.btn_admin_panel.pack(side="left", padx=2)
-            self.btn_admin_panel.configure(text=tr("btn_admin_panel"))
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
-            self.btn_admin_panel.pack_forget()
+        self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
         # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
@@ -2976,10 +2986,11 @@ class CustomTkinterApp(ctk.CTk):
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
-        self.body_full.pack_forget()
-        self.b_bar.pack_forget()
-        self.btn_back_to_mini.pack_forget()
-        self.f_role_btn.pack_forget()
+        if hasattr(self, 'body_full'): self.body_full.pack_forget()
+        if hasattr(self, 'b_bar'): self.b_bar.pack_forget()
+        if hasattr(self, 'btn_back_to_mini'): self.btn_back_to_mini.pack_forget()
+        if hasattr(self, 'f_role_btn'): self.f_role_btn.pack_forget()
+        if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.pack_forget()
         
         self.btn_elevate.pack(side="right", padx=(6, 0))
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
@@ -3010,8 +3021,8 @@ class CustomTkinterApp(ctk.CTk):
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 590, 485
-        self.minsize(590, 485)
+        width, height = 590, 500
+        self.minsize(590, 500)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -3145,12 +3156,14 @@ class CustomTkinterApp(ctk.CTk):
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
         self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
 
-        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=36)
-        self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(4, 0))
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
+        self.b_bar.pack_propagate(False)
+        
+        self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF")
+        self.lbl_foot.pack(side="left", padx=14, pady=8)
 
-        lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        lbl_foot.pack(anchor="center", pady=(0, 2))
+        self.btn_admin_panel = ctk.CTkButton(self.b_bar, text=tr("btn_admin_panel"), font=FONT_BTN_SUB, fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF", width=130, height=28, command=self.request_advanced_tools)
+        self.btn_admin_panel.pack(side="right", padx=14, pady=7)
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
@@ -3273,8 +3286,8 @@ class CustomTkinterApp(ctk.CTk):
         self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
         self.card_actions.pack(fill="x", pady=(0, 2))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=34, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=10, pady=(6, 4))
+        self.btn_run = ctk.CTkButton(self.card_actions, text=tr("start"), font=FONT_BTN_MAIN, height=36, text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=10, pady=(6, 2))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
         f_prog.pack(fill="x", padx=10, pady=(0, 2))
@@ -3289,50 +3302,38 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
         self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 2))
 
+        # Reorganized Grid Actions
         f_grid = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_grid.pack(fill="x", padx=10, pady=(4, 6))
+        f_grid.pack(fill="x", padx=10, pady=(0, 4))
         
-        # Row 1: Review, Summary, PDF
-        f_row1 = ctk.CTkFrame(f_grid, fg_color="transparent")
-        f_row1.pack(fill="x", pady=2)
+        self.btn_view_rec = ctk.CTkButton(f_grid, text=tr("view_records"), font=FONT_BTN_SUB, fg_color="#0284C7", hover_color="#0369A1", text_color="#FFFFFF", height=30, command=self.open_records_viewer)
+        self.btn_view_rec.grid(row=0, column=0, sticky="ew", padx=3, pady=3)
         
-        self.btn_view_rec = ctk.CTkButton(f_row1, width=115, height=28, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1", command=self.open_records_viewer)
-        self.btn_view_rec.pack(side="left", fill="x", expand=True, padx=2)
+        self.btn_summary_reopen = ctk.CTkButton(f_grid, text=tr("summary_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=30, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.grid(row=0, column=1, sticky="ew", padx=3, pady=3)
         
-        self.btn_summary_reopen = ctk.CTkButton(f_row1, width=115, height=28, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", command=self.reopen_summary_modal)
-        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=2)
-        
-        self.btn_pdf_export = ctk.CTkButton(f_row1, width=115, height=28, font=FONT_BTN_SUB, fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
-        self.btn_pdf_export.pack(side="left", fill="x", expand=True, padx=2)
-        
-        # Row 2: Manual, Cash, Slip, Chrome
-        f_row2 = ctk.CTkFrame(f_grid, fg_color="transparent")
-        f_row2.pack(fill="x", pady=2)
-        
-        self.btn_manual = ctk.CTkButton(f_row2, height=28, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", command=self.open_manual)
-        self.btn_manual.pack(side="left", fill="x", expand=True, padx=2)
-        
-        self.btn_cash = ctk.CTkButton(f_row2, height=28, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", command=self.open_cash_counter)
-        self.btn_cash.pack(side="left", fill="x", expand=True, padx=2)
-        
-        self.btn_print_slip = ctk.CTkButton(f_row2, height=28, font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309", text_color="#FFFFFF", command=self.print_slip)
-        self.btn_print_slip.pack(side="left", fill="x", expand=True, padx=2)
-        
-        self.btn_chrome = ctk.CTkButton(f_row2, height=28, font=FONT_BTN_SUB, fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF", command=self.open_chrome_browser)
-        self.btn_chrome.pack(side="left", fill="x", expand=True, padx=2)
-        
-        # Row 3: Admin trigger, Reset
-        f_row3 = ctk.CTkFrame(f_grid, fg_color="transparent")
-        f_row3.pack(fill="x", pady=2)
+        self.btn_pdf_export = ctk.CTkButton(f_grid, text=tr("export_pdf"), font=FONT_BTN_SUB, fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", height=30, command=self.export_pdf_summary)
+        self.btn_pdf_export.grid(row=0, column=2, sticky="ew", padx=3, pady=3)
 
-        self.btn_admin_panel = ctk.CTkButton(f_row3, height=28, font=FONT_BTN_SUB, fg_color="#4F46E5", hover_color="#4338CA", text_color="#FFFFFF", command=self.request_advanced_tools)
-        self.btn_admin_panel.pack(side="left", padx=2)
+        self.btn_manual = ctk.CTkButton(f_grid, text=tr("manual"), font=FONT_BTN_SUB, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", height=30, command=self.open_manual)
+        self.btn_manual.grid(row=1, column=0, sticky="ew", padx=3, pady=3)
         
-        self.btn_reset = ctk.CTkButton(f_row3, height=28, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent", hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right", padx=2)
+        self.btn_cash = ctk.CTkButton(f_grid, text=tr("cash_btn"), font=FONT_BTN_SUB, fg_color="#0D9488", hover_color="#0F766E", text_color="#FFFFFF", height=30, command=self.open_cash_counter)
+        self.btn_cash.grid(row=1, column=1, sticky="ew", padx=3, pady=3)
         
-        # Hide Admin panel initially
-        self.btn_admin_panel.pack_forget()
+        self.btn_print_slip = ctk.CTkButton(f_grid, text=tr("print_slip"), font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309", text_color="#FFFFFF", height=30, command=self.print_slip)
+        self.btn_print_slip.grid(row=1, column=2, sticky="ew", padx=3, pady=3)
+        
+        f_grid.grid_columnconfigure((0,1,2), weight=1)
+
+        f_bot = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_bot.pack(fill="x", padx=13, pady=(2, 8))
+        
+        self.btn_chrome = ctk.CTkButton(f_bot, text=tr("open_chrome"), font=FONT_BTN_SUB, fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF", height=28, width=110, command=self.open_chrome_browser)
+        self.btn_chrome.pack(side="left")
+        
+        self.btn_reset = ctk.CTkButton(f_bot, text=tr("reset"), font=FONT_BTN_SUB, fg_color="transparent", hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", text_color="#EF4444", height=28, width=70, command=self.confirm_and_reset)
+        self.btn_reset.pack(side="right")
 
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
@@ -3422,9 +3423,9 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
         self.btn_excel.configure(text=L["open_excel"])
-        self.btn_arch_hist.configure(text=L["arch_hist_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
+        if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.configure(text=L["btn_admin_panel"])
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
@@ -3973,14 +3974,15 @@ class CustomTkinterApp(ctk.CTk):
             if self.processing_lock.locked(): self.processing_lock.release()
             self.run_on_main(lambda: self.btn_run.configure(state="normal"))
 
-    def open_excel(self):
-        if not self.is_supervisor:
-            messagebox.showwarning("Restricted", tr("restricted_admin"))
-            return
+    def open_excel_direct(self):
         if self.last_generated_file and os.path.exists(self.last_generated_file):
             os.startfile(self.last_generated_file)
         else:
             messagebox.showinfo("Notice", "Run extraction first!")
+            
+    def open_excel(self):
+        # Kept for compatibility if called elsewhere, but Admin Panel uses direct
+        self.open_excel_direct()
 
     def refresh_after_void_change(self):
         recs = self.last_detailed_records
