@@ -59,6 +59,39 @@ try:
 except ImportError:
     ADVANCED_LIBS_OK = False
 
+
+def parse_pos_receipt(text):
+    tid = None
+    tid_match = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", text, re.IGNORECASE)
+    if tid_match:
+        raw_tid = re.sub(r'\D', '', tid_match.group(1).replace('/', '7'))
+        if len(raw_tid) >= 8:
+            tid = raw_tid[-8:]
+    if not tid:
+        loose_match = re.search(r"\b(503\d{5})\b", text)
+        if loose_match:
+            tid = loose_match.group(1)
+
+    amounts = []
+    for m in re.finditer(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)", text):
+        val_str = m.group(1).replace(',', '') + '.' + m.group(2)
+        try:
+            v = float(val_str)
+            if 0.5 <= v <= 5000000:
+                amounts.append(v)
+        except: pass
+
+    grand_total = 0.0
+    if amounts:
+        grand_total = max(amounts)
+
+    batch_no = "-"
+    b_match = re.search(r"BATCH\s*NO\D{0,6}(\d{4,7})", text, re.IGNORECASE)
+    if b_match:
+        batch_no = b_match.group(1)
+
+    return {"tid": tid, "total": grand_total, "batch": batch_no}
+
 def process_and_enhance_image(image_path, out_path):
     if not ADVANCED_LIBS_OK: return False
     try:
@@ -165,7 +198,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.61.0"
+APP_VERSION = "v4.62.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -2433,23 +2466,59 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
             out_dir = os.path.join(folder_path, "_Enhanced")
             os.makedirs(out_dir, exist_ok=True)
             
-            image_files = glob.glob(os.path.join(folder_path, "*.jpg")) + glob.glob(os.path.join(folder_path, "*.png"))
+            image_files = glob.glob(os.path.join(folder_path, "*.jpg")) + glob.glob(os.path.join(folder_path, "*.png")) + glob.glob(os.path.join(folder_path, "*.jpeg"))
             if not image_files:
-                self.after(0, lambda: self.lbl_status.configure(text="لا توجد صور JPG/PNG في المجلد المختار!", text_color="#EF4444"))
+                self.after(0, lambda: self.lbl_status.configure(text="لا توجد صور في المجلد المختار!", text_color="#EF4444"))
                 return
                 
             processed = 0
+            results_data = []
+            
             for i, img_path in enumerate(image_files):
                 filename = os.path.basename(img_path)
                 out_path = os.path.join(out_dir, "clean_" + filename)
                 
-                self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري تنظيف وتوضيح: {f}...", text_color="#38BDF8"))
+                self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري التنظيف: {f}...", text_color="#38BDF8"))
                 
                 if process_and_enhance_image(img_path, out_path):
-                    processed += 1
+                    self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري قراءة البيانات (OCR): {f}...", text_color="#F59E0B"))
+                    try:
+                        text = pytesseract.image_to_string(out_path, lang='eng')
+                        parsed = parse_pos_receipt(text)
+                        
+                        unit_name = "غير معروف"
+                        if parsed["tid"]:
+                            for u, t in UNIT_TERMINALS.items():
+                                if t == parsed["tid"]:
+                                    unit_name = u
+                                    break
+                                    
+                        results_data.append({
+                            "file": filename,
+                            "tid": parsed["tid"],
+                            "unit": unit_name,
+                            "total": parsed["total"],
+                            "batch": parsed["batch"]
+                        })
+                        processed += 1
+                    except Exception as e:
+                        log_exception(f"ocr_error: {filename}", e)
             
-            # Pytesseract OCR logic will be fully tied here in the next step
-            msg = f"تم بنجاح تنظيف وقص {processed} صورة (CamScanner) وحفظها في مجلد _Enhanced"
+            if results_data:
+                report_path = os.path.join(out_dir, "Review_Report.txt")
+                with open(report_path, "w", encoding="utf-8") as rf:
+                    rf.write("=== تقرير مراجعة إيصالات الدفع ===\n\n")
+                    grand_sum = 0.0
+                    for r in results_data:
+                        rf.write(f"الملف: {r['file']}\n")
+                        rf.write(f"الماكينة: {r['tid'] or 'غير مقروء'} ({r['unit']})\n")
+                        rf.write(f"رقم الباتش: {r['batch']}\n")
+                        rf.write(f"الإجمالي: {r['total']:,.2f} ج.م\n")
+                        rf.write("-" * 40 + "\n")
+                        grand_sum += r['total']
+                    rf.write(f"\nالإجمالي العام المقروء: {grand_sum:,.2f} ج.م\n")
+                    
+            msg = f"تم بنجاح معالجة وقراءة {processed} صورة وإنشاء التقرير"
             self.after(0, lambda: self.lbl_status.configure(text=msg, text_color="#10B981"))
             self.after(0, lambda: messagebox.showinfo("نجاح المعالجة", msg))
             
