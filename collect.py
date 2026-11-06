@@ -1535,19 +1535,18 @@ def _find_tesseract():
     return None
 
 def pos_ocr_init():
-    """يجهّز أول محرك متاح. يرجّع اسمه أو None."""
-    if _OCR["tried"]: return _OCR["name"]
+    """يجهّز أول محرك متاح. يرجّع اسمه أو None (والسبب في _OCR['err'])."""
+    if _OCR["tried"] and _OCR["name"]: return _OCR["name"]
     _OCR["tried"] = True
-    try:
+    errs = []
+    for mod, tag in (("rapidocr_onnxruntime", "rapidocr1"), ("rapidocr", "rapidocr3")):
         try:
-            from rapidocr_onnxruntime import RapidOCR as _R
-            _OCR["engine"], _OCR["name"] = _R(), "rapidocr1"
-        except ImportError:
-            from rapidocr import RapidOCR as _R
-            _OCR["engine"], _OCR["name"] = _R(), "rapidocr3"
-        return _OCR["name"]
-    except Exception as e:
-        _OCR["err"] = f"rapidocr: {e}"
+            _R = __import__(mod, fromlist=["RapidOCR"]).RapidOCR
+            _OCR["engine"], _OCR["name"] = _R(), tag
+            _OCR["err"] = ""
+            return tag
+        except Exception as e:
+            errs.append(f"{mod}: {type(e).__name__}: {e}")
     try:
         import pytesseract
         exe = _find_tesseract()
@@ -1555,10 +1554,14 @@ def pos_ocr_init():
             pytesseract.pytesseract.tesseract_cmd = exe
             pytesseract.get_tesseract_version()
             _OCR["engine"], _OCR["name"] = pytesseract, "tesseract"
+            _OCR["err"] = ""
             return "tesseract"
-        _OCR["err"] += " | tesseract.exe not found"
+        errs.append("tesseract.exe not found")
     except Exception as e:
-        _OCR["err"] += f" | pytesseract: {e}"
+        errs.append(f"pytesseract: {type(e).__name__}: {e}")
+    _OCR["err"] = "\n".join(errs)
+    try: log_exception("pos_ocr_init", Exception(_OCR["err"]))
+    except Exception: pass
     return None
 
 def pos_prepare_image(img, enhance=False):
@@ -4848,8 +4851,9 @@ class CustomTkinterApp(ctk.CTk):
     def _pos_need_ocr(self):
         if pos_ocr_init(): return True
         messagebox.showerror(T2("محرك OCR غير متاح", "OCR engine missing"),
-                             T2("مفيش محرك قراءة صور. ثبّت واحد من:\n\n• pip install rapidocr_onnxruntime   (مُوصى به)\n• أو Tesseract-OCR + pip install pytesseract\n\nومعاهم: pip install pypdfium2",
-                                "No OCR engine found. Install one of:\n\n• pip install rapidocr_onnxruntime (recommended)\n• or Tesseract-OCR + pip install pytesseract\n\nand: pip install pypdfium2"))
+                             T2("مفيش محرك قراءة صور شغّال.\n\nالسبب الفعلي:\n", "No working OCR engine.\n\nActual reason:\n") + (_OCR.get("err") or "-") +
+                             T2("\n\nالحل: pip install rapidocr onnxruntime pypdfium2\n(لو بتشغّل exe لازم يتبني من جديد بالمكتبات دي)",
+                                "\n\nFix: pip install rapidocr onnxruntime pypdfium2\n(for an exe, rebuild it with these packages)"))
         return False
 
     def _pos_picker_bar(self, parent, t, st, exts, filetypes, on_change):
