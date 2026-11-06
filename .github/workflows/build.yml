@@ -92,6 +92,10 @@ jobs:
             '--name','A2R_Console'
           )
           if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
+          # قالب إكسيل التقفيل (الاسكندريه 00.xlsx): لو موجود في الريبو بيتضم جوه الـ exe تلقائياً
+          $tpl = Get-ChildItem -File -Filter '*00.xlsx' | Where-Object { $_.Name -notlike '~*' } | Select-Object -First 1
+          if ($tpl) { Write-Host "Bundling template: $($tpl.Name)"; $pyArgs += @('--add-data', ($tpl.Name + ';.')) }
+          else { Write-Warning "Closing template (*00.xlsx) not found in repo root: users must pick it from the Closing window." }
           $pyArgs += 'collect.py'
           python -m PyInstaller @pyArgs
 
