@@ -387,7 +387,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 عربي", "dir_path": "DIRECTORY PATH", "browse": "Browse", "open": "Open",
         "date_lbl": "REPORT DATE", "today": "Today", "yesterday": "Yesterday",
         "start": "⚡ START EXTRACTION", "reset": "Reset",
-        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "view_records": "🔍 Records Viewer",
+        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "view_records": "🔍 Records Viewer",
         "export_pdf": "📄 PDF Summary", "kpi1": "OPERATIONS", "kpi2": "TOTAL SUM",
         "open_excel": "📊 Open Excel", "currency": "EGP", "open_chrome": "🌐 Traffic Portal",
         "cash_btn": "💵 Cash", "clean_downloads": "📦 Archive", "autosync_on": "Auto Sync ON", "autosync_off": "Auto Sync OFF",
@@ -442,7 +442,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 English", "dir_path": "مسار مجلد الإيصالات", "browse": "تحديد", "open": "فتح",
         "date_lbl": "تاريخ التقرير", "today": "اليوم", "yesterday": "أمس",
         "start": "⚡ بدء استخراج ومعالجة البيانات", "reset": "تصفير",
-        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "view_records": "🔍 عرض السجلات",
+        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "view_records": "🔍 عرض السجلات",
         "export_pdf": "📄 تقرير PDF", "kpi1": "عدد العمليات", "kpi2": "إجمالي مبالغ السيستم",
         "open_excel": "📊 فتح الإكسيل", "currency": "ج.م", "open_chrome": "🌐 بوابة المرور",
         "cash_btn": "💵 حاسبة الكاش", "clean_downloads": "📦 أرشفة", "autosync_on": "مزامنة تلقائية: مفعل", "autosync_off": "مزامنة تلقائية: معطل",
@@ -682,6 +682,29 @@ UNITS_LIST = [
     "القبارى", "مصطفى كامل", "مديرية الأمن", "ميناء الإسكندرية", "مجمع خدمات مصر"
 ]
 
+# قاعدة بيانات: الوحدة -> رقم الماكينة (Terminal ID)
+UNIT_TERMINALS = {
+    "ابيس 1": "50335710",
+    "ابيس 2": "50335993",
+    "ابيس 3": "50335987",
+    "برج العرب 1": "50325716",
+    "برج العرب 2": "50335998",
+    "برج العرب 3": "50335994",
+    "برج العرب 4": "50335711",
+    "المنتزة 1": "50382298",
+    "المنتزة 2": "50382315",
+    "المنتزة 3": "50383712",
+    "محرم بك 1": "50382306",
+    "محرم بك 2": "50382316",
+    "العجمي 1": "50382308",
+    "العجمي 2": "50383706",
+    "القبارى": "50382300",
+    "مصطفى كامل": "50383702",
+    "مديرية الأمن": "50382312",
+    "ميناء الإسكندرية": "50383699",
+    "مجمع خدمات مصر": "50383700",
+}
+
 EMPLOYEES_LIST = [
     "خالد محمد", "محمد السيد", "محمد زكريا", "احمد مصطفى", "زياد أحمد",
     "مصطفى محمد", "ادهم ماهر", "احمد وليد", "عبدالله محمد", "محمد مجدى",
@@ -817,7 +840,7 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
-def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str):
+def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
     if not REPORTLAB_AVAILABLE:
         return False
     PAGE_W, PAGE_H = 160, 95
@@ -837,17 +860,327 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str):
 
     c.setFillColorRGB(0, 0, 0)
     c.setFont(font_name, 17)
-    y = PAGE_H - 24
+    y = PAGE_H - 20
     c.drawCentredString(PAGE_W / 2, y, _ar(emp_name))
     if unit_name:
-        y -= 22
+        y -= 20
         c.setFont(font_name, 14)
         c.drawCentredString(PAGE_W / 2, y, _ar(unit_name))
-    y -= 22
+    if terminal_id:
+        y -= 17
+        c.setFont("Helvetica-Bold", 12)
+        c.drawCentredString(PAGE_W / 2, y, f"TID: {terminal_id}")
+    y -= 19
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString(PAGE_W / 2, y, date_str)
     c.save()
     return True
+
+# ================= فهرس الأرشيف + النسخة الاحتياطية المخفية + البحث العام =================
+ARCHIVE_BACKUP_DIR = os.path.join(DOCUMENTS_DIR, ".archive_backup")
+_ARCHIVE_LOCK = threading.Lock()
+
+def T2(ar, en):
+    return ar if CURRENT_LANG == "ar" else en
+
+def _hide_path(p):
+    """إخفاء المجلد على ويندوز (Hidden) — الاسم نفسه يبدأ بنقطة كمان."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(p), 0x02)
+    except Exception as e:
+        log_exception("hide_path", e)
+
+def _ensure_archive_index():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS archive_index (
+            path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
+            insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
+            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER
+        )
+    ''')
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
+    conn.commit()
+    return conn
+
+def _archive_day_from_path(root, path):
+    try:
+        parts = os.path.relpath(path, root).split(os.sep)
+        if len(parts) < 4: return None
+        y, m, d = int(parts[0]), int(parts[1].split("-")[0]), int(parts[2])
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except Exception:
+        return None
+
+def archive_index_update(folder_path, progress=None):
+    """يفهرس إيصالات الأرشيف الجديدة فقط (الباقي يتخطاه) ويشيل المحذوف ويحدّث حالة الإلغاء."""
+    root = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    if not os.path.isdir(root): return 0
+    load_void_map()
+    manual_map = load_manual_map()
+    files = []
+    for dp, _dn, fns in os.walk(root):
+        for f in fns:
+            if not f.lower().endswith((".pdf", ".txt")): continue
+            if f.startswith("Samary_") or f.endswith("_cropped.pdf") or f.endswith("_Summary.pdf"): continue
+            p = os.path.join(dp, f)
+            day = _archive_day_from_path(root, p)
+            if day: files.append((p, day))
+
+    conn = _ensure_archive_index()
+    done_new = 0
+    try:
+        existing = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT path, mtime, size FROM archive_index")}
+        current = {p for p, _ in files}
+        stale = [(p,) for p in existing if p not in current]
+        if stale:
+            conn.executemany("DELETE FROM archive_index WHERE path = ?", stale)
+
+        todo = []
+        for p, day in files:
+            try: st = os.stat(p)
+            except OSError: continue
+            old = existing.get(p)
+            if old and abs(old[0] - st.st_mtime) < 1 and old[1] == st.st_size: continue
+            todo.append((p, day, st))
+
+        total = len(todo)
+        for i, (p, day, st) in enumerate(todo, 1):
+            rec = None
+            try:
+                if p.lower().endswith(".txt"): rec = read_txt_record(p, datetime.date.fromisoformat(day))
+                else: rec = read_pdf_record(p, manual_map)
+            except Exception as e: log_exception(f"archive_index:{os.path.basename(p)}", e)
+            fname = os.path.basename(p)
+            if rec:
+                row = (p, day, fname, rec["unit"], rec["plate"], rec["insured"], float(rec["amount"]),
+                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size)
+            else:
+                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size)
+            conn.execute("INSERT OR REPLACE INTO archive_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            done_new += 1
+            if i % 40 == 0:
+                conn.commit()
+                if progress: progress(i, total)
+        conn.commit()
+        if progress and total: progress(total, total)
+
+        # تحديث حالة الإلغاء (ممكن تتغير بعد الأرشفة)
+        upd = []
+        for p, fname, cur in conn.execute("SELECT path, file, is_void FROM archive_index WHERE is_receipt = 1").fetchall():
+            v = int(fname.startswith("_") or fname.lstrip("_") in _VOID_KEYS)
+            if v != cur: upd.append((v, p))
+        if upd:
+            conn.executemany("UPDATE archive_index SET is_void = ? WHERE path = ?", upd)
+        conn.commit()
+    finally:
+        conn.close()
+    return done_new
+
+def archive_backup(folder_path):
+    """نسخة احتياطية تراكمية للأرشيف في فولدر مخفي جوه فولدر تقارير البرنامج. مفيش حاجة بتتمسح من النسخة."""
+    src = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    if not os.path.isdir(src): return 0
+    os.makedirs(ARCHIVE_BACKUP_DIR, exist_ok=True)
+    _hide_path(ARCHIVE_BACKUP_DIR)
+    copied = 0
+    for dp, _dn, fns in os.walk(src):
+        rel = os.path.relpath(dp, src)
+        dst_dir = ARCHIVE_BACKUP_DIR if rel == "." else os.path.join(ARCHIVE_BACKUP_DIR, rel)
+        for f in fns:
+            s, d = os.path.join(dp, f), os.path.join(dst_dir, f)
+            try:
+                ss = os.stat(s)
+                if os.path.exists(d):
+                    ds = os.stat(d)
+                    if ds.st_size == ss.st_size and abs(ds.st_mtime - ss.st_mtime) < 2: continue
+                os.makedirs(dst_dir, exist_ok=True)
+                shutil.copy2(s, d)
+                copied += 1
+            except Exception as e:
+                log_exception(f"archive_backup:{f}", e)
+    # نسخة من قاعدة البيانات (الإلغاءات/اليدوي/الفهرس) جنب الأرشيف
+    try:
+        db_dir = os.path.join(ARCHIVE_BACKUP_DIR, "_db")
+        os.makedirs(db_dir, exist_ok=True)
+        s_conn = sqlite3.connect(DB_FILE)
+        d_conn = sqlite3.connect(os.path.join(db_dir, "a2r_vault_backup.db"))
+        try: s_conn.backup(d_conn)
+        finally:
+            d_conn.close(); s_conn.close()
+    except Exception as e:
+        log_exception("archive_backup_db", e)
+    return copied
+
+def archive_maintenance(folder_path, progress=None):
+    """فهرسة + نسخ احتياطي. لو في عملية شغالة بالفعل بترجع None ومش بتتكرر."""
+    if not _ARCHIVE_LOCK.acquire(blocking=False): return None
+    try:
+        n = archive_index_update(folder_path, progress)
+        b = archive_backup(folder_path)
+        return n, b
+    except Exception as e:
+        log_exception("archive_maintenance", e)
+        return None
+    finally:
+        _ARCHIVE_LOCK.release()
+
+def archive_load_rows():
+    conn = _ensure_archive_index()
+    try:
+        return conn.execute(
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
+            "FROM archive_index WHERE is_receipt = 1").fetchall()
+    finally:
+        conn.close()
+
+def archive_day_stats(rows):
+    days = {}
+    for path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void in rows:
+        d = days.setdefault(day, {"day": day, "ops": 0, "total": 0.0, "manual": 0, "void": 0,
+                                  "dup": 0, "missing": 0, "_keys": Counter()})
+        if is_void:
+            d["void"] += 1
+            continue
+        d["ops"] += 1
+        d["total"] += amount
+        if is_manual: d["manual"] += 1
+        if amount <= 0 or (not is_manual and (plate in ("-", "") or unit in (UNSPEC, ""))):
+            d["missing"] += 1
+        if plate not in ("-", ""):
+            d["_keys"][(plate, rtime, round(amount, 2))] += 1
+    out = []
+    for d in days.values():
+        d["dup"] = sum(c - 1 for c in d["_keys"].values() if c > 1)
+        d.pop("_keys", None)
+        out.append(d)
+    out.sort(key=lambda x: x["day"], reverse=True)
+    return out
+
+def _norm_search(s):
+    s = clean_arabic(str(s or "")).lower()
+    for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+        s = s.replace(a, b)
+    return re.sub(r"[\s\-_]+", "", s)
+
+def archive_search(query, include_void=True, limit=3000):
+    q = _norm_search(query)
+    if not q: return []
+    amt = None
+    try: amt = float(str(query).strip().replace(",", ""))
+    except Exception: pass
+    out = []
+    for r in archive_load_rows():
+        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
+        if is_void and not include_void: continue
+        hit = q in _norm_search(plate) or q in _norm_search(insured) or q in _norm_search(fname)
+        if not hit and amt is not None and abs(amount - amt) < 0.005: hit = True
+        if hit: out.append(r)
+    out.sort(key=lambda r: (r[1], r[7]), reverse=True)
+    return out[:limit]
+
+def parse_flex_date(s):
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try: return datetime.datetime.strptime(s, fmt).date()
+        except Exception: pass
+    return None
+
+# ================= كنس الأرشيف: أي ملف مش بتاع النهارده يتنقل للأرشيف =================
+_SWEEP_CACHE = {}
+_SWEEP_LOCK = threading.Lock()
+
+def _unique_dest(dest):
+    """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
+    if not os.path.exists(dest): return dest
+    base, ext = os.path.splitext(dest)
+    n = 1
+    while os.path.exists(f"{base} ({n}){ext}"): n += 1
+    return f"{base} ({n}){ext}"
+
+def _sweep_file_date(path, fname, manual_map, mdate):
+    if fname.lower().endswith(".txt"):
+        rec = read_txt_record(path, mdate)
+        return rec["actual_date"] if rec else None      # txt مش إيصال → نسيبه
+    if MANUAL_NAME_RE.match(fname):
+        row = manual_map.get(fname)
+        if row:
+            dt_m = parse_vault_dt(row[4])
+            return dt_m.date() if dt_m else mdate
+        return mdate
+    raw = run_pdftotext(path)
+    if is_receipt_text(raw):
+        f = parse_receipt(path, raw)
+        return f["dt"].date() if f["dt"] else mdate
+    return extract_date_from_text(raw) or mdate
+
+def archive_sweep(folder_path, progress=None):
+    """ينقل كل ملف (PDF/TXT) تاريخه مش النهارده إلى الأرشيف، لأي سبب:
+    تاريخ مستقبلي غلط ← بنستخدم تاريخ الملف، خطأ قراءة ← تاريخ الملف، اسم مكرر ← بنزود رقم.
+    يرجّع (عدد المنقول، فولدرات الأيام اللي اتغيّرت)."""
+    ensure_archive_root(folder_path)
+    manual_map = load_manual_map()
+    load_void_map()
+    today = datetime.date.today()
+    cands = [f for f in glob.glob(os.path.join(folder_path, "*.pdf"))
+             if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+    cands += [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
+    total, moved, touched = len(cands), 0, set()
+
+    for idx, path in enumerate(cands, 1):
+        fname = os.path.basename(path)
+        if progress: progress(idx, total, fname)
+        try: stt = os.stat(path)
+        except OSError: continue
+        mdate = datetime.date.fromtimestamp(stt.st_mtime)
+        ck = (path, stt.st_mtime, stt.st_size)
+        file_date = _SWEEP_CACHE.get(ck)
+        if file_date is None:
+            try: file_date = _sweep_file_date(path, fname, manual_map, mdate)
+            except Exception as e:
+                log_exception(f"sweep_date:{fname}", e)
+                file_date = mdate
+            if file_date is None: continue
+            _SWEEP_CACHE[ck] = file_date
+        if file_date > today:                  # تاريخ مستقبلي = غالبًا قراءة غلط
+            file_date = mdate
+        if file_date >= today: continue        # بتاع النهارده يفضل مكانه
+
+        day_folder = archive_day_dir(folder_path, file_date)
+        try:
+            os.makedirs(day_folder, exist_ok=True)
+            shutil.move(path, _unique_dest(os.path.join(day_folder, fname)))
+            moved += 1
+            touched.add(day_folder)
+            if fname.lower().endswith(".pdf"):
+                cropped = path[:-4] + "_cropped.pdf"
+                if os.path.exists(cropped):
+                    try: os.remove(cropped)
+                    except Exception: pass
+        except Exception as e:
+            log_exception(f"sweep_move:{fname}", e)   # هيتحاول تاني في الكنسة الجاية
+    return moved, touched
+
+def archive_day_records(day_folder):
+    """كل سجلات اليوم من الفولدر نفسه (عشان الملخص يبقى لليوم كله مش للملفات الجديدة بس)."""
+    manual_map = load_manual_map()
+    load_void_map()
+    recs = []
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.pdf"))):
+        b = os.path.basename(f)
+        if b.startswith("Samary_") or b.endswith("_cropped.pdf"): continue
+        try: rec = read_pdf_record(f, manual_map)
+        except Exception as e:
+            log_exception(f"day_records:{b}", e); rec = None
+        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": rec["is_manual"], "is_void": rec["is_void"]})
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.txt"))):
+        try: rec = read_txt_record(f, datetime.date.today())
+        except Exception as e:
+            log_exception(f"day_records_txt:{os.path.basename(f)}", e); rec = None
+        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": True, "is_void": rec["is_void"]})
+    return recs
 
 SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
 EMPLOYEE_PASSWORDS = [
@@ -1512,6 +1845,8 @@ def collect_records(folder_path, target_date, progress=None):
                 pdf_files.append(f)
 
     txt_files = [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
+    if os.path.isdir(arch_day):
+        txt_files += [f for f in glob.glob(os.path.join(arch_day, "*.txt"))]
     total = len(pdf_files) + len(txt_files)
     manual_map = load_manual_map()
     records = []
@@ -2023,68 +2358,39 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception("trigger_daily_full_archive_once", e)
 
-    def _silent_archive_all_historical(self, folder_path):
+    def _run_archive_sweep(self, folder_path, progress=None):
+        """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان."""
+        if not _SWEEP_LOCK.acquire(blocking=False): return 0
+        moved = 0
         try:
-            archive_root = ensure_archive_root(folder_path)
-            manual_map = load_manual_map()
-            all_pdf_files = [f for f in glob.glob(os.path.join(folder_path, "*.pdf")) if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-            today_date = datetime.date.today()
-            days_records_map = {}
-            load_void_map()
-            _void = lambda n: n.startswith("_") or n.lstrip("_") in _VOID_KEYS
-
-            for pdf in all_pdf_files:
-                fname = os.path.basename(pdf)
-                try: mdate = datetime.date.fromtimestamp(os.path.getmtime(pdf))
-                except Exception: mdate = today_date
-
-                file_date = None
-                rec_info = None
-                if MANUAL_NAME_RE.match(fname):
-                    row = manual_map.get(fname)
-                    clean_b = fname.lstrip("_")
-                    m_amt = re.match(r"^(\d+(?:\.\d{2})?)", clean_b)
-                    if row:
-                        dt_m = parse_vault_dt(row[4])
-                        file_date = dt_m.date() if dt_m else mdate
-                        rec_info = {"unit": detect_unit_from_text(row[0]) or UNSPEC, "amount": float(row[3]), "is_manual": True, "is_void": _void(fname)}
-                    else:
-                        file_date = mdate
-                        rec_info = {"unit": UNSPEC, "amount": float(m_amt.group(1)) if m_amt else 0.0, "is_manual": True, "is_void": _void(fname)}
-                else:
-                    raw_txt = run_pdftotext(pdf)
-                    if is_receipt_text(raw_txt):
-                        f = parse_receipt(pdf, raw_txt)
-                        file_date = f["dt"].date() if f["dt"] else mdate
-                        rec_info = {"unit": f["unit"], "amount": f["amount"], "is_manual": False, "is_void": _void(fname)}
-                    else:
-                        file_date = extract_date_from_text(raw_txt) or mdate
-
-                if file_date and file_date < today_date:
-                    year_folder = os.path.join(archive_root, str(file_date.year))
-                    month_folder = os.path.join(year_folder, f"{file_date.month:02d}-{file_date.strftime('%B')}")
-                    day_folder = os.path.join(month_folder, f"{file_date.day:02d}")
-                    os.makedirs(day_folder, exist_ok=True)
-                    target_dest = os.path.join(day_folder, fname)
-                    try:
-                        shutil.move(pdf, target_dest)
-                        cropped_version = pdf.replace(".pdf", "_cropped.pdf")
-                        if os.path.exists(cropped_version):
-                            try: os.remove(cropped_version)
-                            except Exception: pass
-                        if rec_info:
-                            days_records_map.setdefault(day_folder, []).append(rec_info)
-                    except Exception:
-                        pass
-
-            for d_folder, recs in days_records_map.items():
+            moved, touched = archive_sweep(folder_path, progress)
+            for d_folder in touched:
                 d_name = os.path.basename(d_folder)
                 parent_m = os.path.basename(os.path.dirname(d_folder))
                 parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
-                date_str_tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
-                self._generate_day_summary_pdf(d_folder, date_str_tag, recs)
-        except Exception as ex:
-            log_exception("silent_archive_historical", ex)
+                tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
+                self._generate_day_summary_pdf(d_folder, tag, archive_day_records(d_folder))
+        except Exception as e:
+            log_exception("run_archive_sweep", e)
+        finally:
+            _SWEEP_LOCK.release()
+        if moved: self._start_archive_maintenance(folder_path)
+        return moved
+
+    def _archive_tick(self):
+        """كل 10 دقايق: أي ملف مش بتاع النهارده يتأرشف (يغطي تغيير اليوم والملفات اللي فشلت قبل كده)."""
+        try:
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            if folder and os.path.isdir(folder) and not self.processing_lock.locked():
+                threading.Thread(target=self._run_archive_sweep, args=(folder,), daemon=True).start()
+        except Exception as e:
+            log_exception("archive_tick", e)
+        finally:
+            self.after(600000, self._archive_tick)
+
+    def _silent_archive_all_historical(self, folder_path):
+        self._run_archive_sweep(folder_path)
+        self._start_archive_maintenance(folder_path)
 
     def _cancel_auto_minimize(self):
         if self._auto_minimize_timer:
@@ -2217,11 +2523,13 @@ class CustomTkinterApp(ctk.CTk):
             w.configure(state="normal")
 
         self.btn_excel.pack_forget()
+        self.btn_arch_hist.pack_forget()
         self.btn_chrome.pack_forget()
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
             self.btn_excel.pack(side="left", padx=2)
+            self.btn_arch_hist.pack(side="left", padx=2)
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
@@ -2230,6 +2538,9 @@ class CustomTkinterApp(ctk.CTk):
         self.switch_to_full_view()
         # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
         self.after(400, self.auto_archive_on_login)
+        if not getattr(self, "_archive_tick_started", False):
+            self._archive_tick_started = True
+            self.after(600000, self._archive_tick)
 
     def _archive_done_today(self):
         today_tag = datetime.date.today().strftime("%Y-%m-%d")
@@ -2489,6 +2800,9 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
 
+        self.btn_arch_hist = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
+                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
+
         self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
                                         height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
 
@@ -2741,6 +3055,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
         self.btn_excel.configure(text=L["open_excel"])
+        self.btn_arch_hist.configure(text=L["arch_hist_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
@@ -3180,86 +3495,14 @@ class CustomTkinterApp(ctk.CTk):
             log_exception("generate_day_summary_pdf", e)
 
     def _process_archive_worker(self, archive_all, win, p_bar, p_lbl, s_lbl, folder_path, auto=False):
-        archive_root = ensure_archive_root(folder_path)
-        manual_map = load_manual_map()
-
-        all_pdf_files = [f for f in glob.glob(os.path.join(folder_path, "*.pdf")) if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-        total_f = len(all_pdf_files)
-        if total_f == 0:
-            self.run_on_main(lambda: s_lbl.configure(text="No PDF files found to archive!"))
-            time.sleep(1.5)
-            if auto: self._mark_archive_done_today()
-            self.run_on_main(lambda: win.destroy() if win.winfo_exists() else None)
-            return
-
-        today_date = datetime.date.today()
-        moved_count = 0
-        days_records_map = {}
-        load_void_map()
-        _void = lambda n: n.startswith("_") or n.lstrip("_") in _VOID_KEYS
-
-        for idx, pdf in enumerate(all_pdf_files, 1):
-            fname = os.path.basename(pdf)
-            pct = int((idx / total_f) * 100)
+        def prog(i, n, fname):
+            pct = int((i / n) * 100) if n else 100
             self.run_on_main(lambda p=pct, f=fname: [
-                p_bar.set(p / 100.0),
-                p_lbl.configure(text=f"{p}%"),
-                s_lbl.configure(text=f"Processing: {f}")
-            ])
+                p_bar.set(p / 100.0), p_lbl.configure(text=f"{p}%"), s_lbl.configure(text=f"Processing: {f}")])
 
-            try: mdate = datetime.date.fromtimestamp(os.path.getmtime(pdf))
-            except Exception: mdate = today_date
-
-            file_date = None
-            rec_info = None
-            if MANUAL_NAME_RE.match(fname):
-                row = manual_map.get(fname)
-                clean_b = fname.lstrip("_")
-                m_amt = re.match(r"^(\d+(?:\.\d{2})?)", clean_b)
-                if row:
-                    dt_m = parse_vault_dt(row[4])
-                    file_date = dt_m.date() if dt_m else mdate
-                    rec_info = {"unit": detect_unit_from_text(row[0]) or UNSPEC, "amount": float(row[3]), "is_manual": True, "is_void": _void(fname)}
-                else:
-                    file_date = mdate
-                    rec_info = {"unit": UNSPEC, "amount": float(m_amt.group(1)) if m_amt else 0.0, "is_manual": True, "is_void": _void(fname)}
-            else:
-                raw_txt = run_pdftotext(pdf)
-                if is_receipt_text(raw_txt):
-                    f = parse_receipt(pdf, raw_txt)
-                    file_date = f["dt"].date() if f["dt"] else mdate
-                    rec_info = {"unit": f["unit"], "amount": f["amount"], "is_manual": False, "is_void": _void(fname)}
-                else:
-                    file_date = extract_date_from_text(raw_txt) or mdate
-
-            if file_date == today_date: continue
-
-            if archive_all or (file_date < today_date):
-                year_folder = os.path.join(archive_root, str(file_date.year))
-                month_folder = os.path.join(year_folder, f"{file_date.month:02d}-{file_date.strftime('%B')}")
-                day_folder = os.path.join(month_folder, f"{file_date.day:02d}")
-                os.makedirs(day_folder, exist_ok=True)
-
-                target_dest = os.path.join(day_folder, fname)
-                try:
-                    shutil.move(pdf, target_dest)
-                    moved_count += 1
-                    cropped_version = pdf.replace(".pdf", "_cropped.pdf")
-                    if os.path.exists(cropped_version):
-                        try: os.remove(cropped_version)
-                        except Exception: pass
-                    if rec_info:
-                        days_records_map.setdefault(day_folder, []).append(rec_info)
-                except Exception as ex_m: log_exception(f"archive_move:{fname}", ex_m)
-
-        for d_folder, recs in days_records_map.items():
-            d_name = os.path.basename(d_folder)
-            parent_m = os.path.basename(os.path.dirname(d_folder))
-            parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
-            date_str_tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
-            self._generate_day_summary_pdf(d_folder, date_str_tag, recs)
-
+        moved_count = self._run_archive_sweep(folder_path, prog)
         if auto: self._mark_archive_done_today()
+        self._start_archive_maintenance(folder_path)
 
         def _complete():
             if auto:
@@ -3272,7 +3515,7 @@ class CustomTkinterApp(ctk.CTk):
             try: win.destroy()
             except: pass
             play_sound_matched()
-            messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nCreated Samary PDF summaries for all archived days.")
+            messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nSummary PDFs updated for all affected days.")
 
         self.run_on_main(_complete)
 
@@ -3457,6 +3700,302 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception("unvoid_record", e)
             messagebox.showerror("Error", f"Restore failed: {str(e)}")
+
+    def _start_archive_maintenance(self, folder):
+        """فهرسة + نسخ احتياطي مخفي في الخلفية (بدون تعطيل الواجهة)."""
+        try:
+            if folder and os.path.isdir(folder):
+                threading.Thread(target=archive_maintenance, args=(folder,), daemon=True).start()
+        except Exception as e:
+            log_exception("start_archive_maintenance", e)
+
+    def open_archive_history(self):
+        if not getattr(self, "is_supervisor", False):
+            messagebox.showwarning(T2("غير مسموح", "Not allowed"), T2("هذه الأداة للمشرف فقط.", "Supervisor only."))
+            return
+        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", tr("dir_missing"))
+            return
+
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(T2("📚 سجل الأرشيف", "📚 Archive History"))
+        win.resizable(True, True)
+        set_window_icon_safe(win)
+        center_window_relative(win, self, 1100, 650)
+        win.configure(fg_color=t["bg"])
+        try: win.lift(); win.focus_force()
+        except Exception: pass
+
+        ALL = T2("الكل", "All")
+        st = {"stats": [], "debounce": None}
+
+        # ---------- شريط الحالة والأدوات ----------
+        bar = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        bar.pack(fill="x", padx=14, pady=(12, 6))
+        status_lbl = ctk.CTkLabel(bar, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"])
+        status_lbl.pack(side="left", padx=12, pady=8)
+
+        def _set_status(txt):
+            try:
+                if win.winfo_exists(): status_lbl.configure(text=txt)
+            except Exception: pass
+
+        def run_maintenance(manual=False):
+            def prog(i, n):
+                self.after(0, lambda: _set_status(T2(f"جاري فهرسة الأرشيف... {i}/{n}", f"Indexing archive... {i}/{n}")))
+            def work():
+                res = archive_maintenance(folder, prog)
+                def fin():
+                    if not win.winfo_exists(): return
+                    if res is None:
+                        _set_status(T2("عملية الفهرسة/النسخ شغالة بالفعل، استنى شوية.", "Maintenance already running."))
+                    else:
+                        _set_status(T2(f"تم ✓ — جديد: {res[0]} | منسوخ للنسخة الاحتياطية: {res[1]}",
+                                       f"Done ✓ — new: {res[0]} | backed up: {res[1]}"))
+                    load_days()
+                self.after(0, fin)
+            _set_status(T2("جاري الفحص...", "Scanning..."))
+            threading.Thread(target=work, daemon=True).start()
+
+        def open_backup_folder():
+            if os.path.isdir(ARCHIVE_BACKUP_DIR): os.startfile(ARCHIVE_BACKUP_DIR)
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."))
+
+        ctk.CTkButton(bar, text=T2("🔄 تحديث + نسخ احتياطي", "🔄 Refresh + Backup"), font=FONT_BTN_SUB, width=160, height=30,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
+        ctk.CTkButton(bar, text=T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open Backup"), font=FONT_BTN_SUB, width=160, height=30,
+                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF",
+                      command=open_backup_folder).pack(side="right", padx=4, pady=6)
+
+        # ---------- ستايل الجداول ----------
+        style = ttk.Style()
+        try: style.theme_use("clam")
+        except Exception: pass
+        style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
+                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
+        style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
+                        font=(FONT_FAMILY, 11, "bold"), relief="flat")
+        def _fixed(option):
+            try: return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
+            except Exception: return []
+        style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
+                  foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+
+        def make_tree(parent, columns, headers, widths):
+            fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            fr.pack(fill="both", expand=True, padx=2, pady=(4, 2))
+            tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
+            for c in columns:
+                tree.heading(c, text=headers[c])
+                tree.column(c, width=widths.get(c, 90), anchor="center")
+            for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
+                tree.tag_configure(kind, background=bg, foreground=fg)
+            vsb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview)
+            vsb.pack(side="right", fill="y", padx=2, pady=2)
+            tree.configure(yscrollcommand=vsb.set)
+            tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
+            return tree
+
+        tv = ctk.CTkTabview(win, fg_color=t["bg"])
+        tv.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        tab_days = tv.add(T2("📅 الأيام", "📅 Days"))
+        tab_search = tv.add(T2("🔎 بحث عام في الأرشيف", "🔎 Global Search"))
+
+        # ================= تبويب الأيام =================
+        f1 = ctk.CTkFrame(tab_days, fg_color="transparent")
+        f1.pack(fill="x", pady=(2, 2))
+        day_q = ctk.CTkEntry(f1, placeholder_text=T2("ابحث عن يوم (مثال: 15-10-2026 أو 2026-10)", "Find a day (e.g. 2026-10-15)"),
+                             width=270, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        day_q.pack(side="left", padx=(0, 6))
+        attach_context_menu(day_q)
+        ctk.CTkLabel(f1, text=T2("الشهر:", "Month:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(6, 2))
+        cb_month = ctk.CTkComboBox(f1, values=[ALL], width=110, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"],
+                                   command=lambda v: apply_days())
+        cb_month.set(ALL)
+        cb_month.pack(side="left", padx=2)
+        ctk.CTkLabel(f1, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(8, 2))
+        from_e = ctk.CTkEntry(f1, placeholder_text="YYYY-MM-DD", width=105, font=FONT_ENTRY, text_color=t["text"],
+                              fg_color=t["input"], border_color=t["border"])
+        from_e.pack(side="left", padx=2)
+        ctk.CTkLabel(f1, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(6, 2))
+        to_e = ctk.CTkEntry(f1, placeholder_text="YYYY-MM-DD", width=105, font=FONT_ENTRY, text_color=t["text"],
+                            fg_color=t["input"], border_color=t["border"])
+        to_e.pack(side="left", padx=2)
+
+        def clear_filters():
+            for e in (day_q, from_e, to_e): e.delete(0, "end")
+            cb_month.set(ALL)
+            apply_days()
+        ctk.CTkButton(f1, text=T2("مسح الفلاتر", "Clear"), width=80, height=28, font=FONT_BTN_SUB,
+                      fg_color="#64748B", hover_color="#475569", text_color="#FFFFFF",
+                      command=clear_filters).pack(side="left", padx=8)
+
+        day_cols = ("date", "ops", "total", "manual", "void", "dup", "missing")
+        day_hdr = {"date": T2("التاريخ", "Date"), "ops": T2("عدد المعاملات", "Transactions"),
+                   "total": T2("إجمالي المبلغ", "Total Amount"), "manual": T2("يدوي", "Manual"),
+                   "void": T2("ملغي", "Void"), "dup": T2("مكرر", "Duplicates"), "missing": T2("ناقص", "Incomplete")}
+        day_tree = make_tree(tab_days, day_cols, day_hdr,
+                             {"date": 140, "ops": 120, "total": 160, "manual": 80, "void": 80, "dup": 90, "missing": 90})
+        sum_lbl = ctk.CTkLabel(tab_days, text="", font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"])
+        sum_lbl.pack(anchor="w", padx=8, pady=(2, 0))
+        ctk.CTkLabel(tab_days, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص    •  دبل كليك لفتح ملخص اليوم",
+                                       "🟥 has duplicates   🟨 has incomplete  •  double-click to open day summary"),
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8)
+
+        sort_state = {"col": "date", "rev": True}
+        def sort_days(col):
+            sort_state["rev"] = (not sort_state["rev"]) if sort_state["col"] == col else (col != "date" and True)
+            sort_state["col"] = col
+            apply_days()
+        for c in day_cols:
+            day_tree.heading(c, command=lambda c=c: sort_days(c))
+
+        def apply_days(*_):
+            q = day_q.get().strip()
+            mval = cb_month.get()
+            d_from, d_to = parse_flex_date(from_e.get()), parse_flex_date(to_e.get())
+            items = []
+            for s in st["stats"]:
+                day = s["day"]
+                if mval != ALL and not day.startswith(mval): continue
+                if d_from and day < d_from.isoformat(): continue
+                if d_to and day > d_to.isoformat(): continue
+                if q:
+                    y, m, d = day.split("-")
+                    hay = f"{day} {d}-{m}-{y} {d}/{m}/{y}"
+                    if q.replace("/", "-") not in hay.replace("/", "-"): continue
+                items.append(s)
+            key = sort_state["col"]
+            items.sort(key=lambda s: s["day"] if key == "date" else s[key], reverse=sort_state["rev"])
+            day_tree.delete(*day_tree.get_children())
+            for s in items:
+                y, m, d = s["day"].split("-")
+                tag = "dup" if s["dup"] else ("missing" if s["missing"] else "")
+                day_tree.insert("", "end", iid=s["day"], tags=(tag,) if tag else (),
+                                values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}",
+                                        s["manual"], s["void"], s["dup"], s["missing"]))
+            tot_ops = sum(s["ops"] for s in items)
+            tot_amt = sum(s["total"] for s in items)
+            sum_lbl.configure(text=T2(f"الأيام: {len(items)}   |   إجمالي المعاملات: {tot_ops:,}   |   إجمالي المبلغ: {tot_amt:,.2f} جنيه",
+                                      f"Days: {len(items)}  |  Transactions: {tot_ops:,}  |  Total: {tot_amt:,.2f} EGP"))
+
+        def load_days():
+            try: st["stats"] = archive_day_stats(archive_load_rows())
+            except Exception as e:
+                log_exception("archive_history_load", e)
+                st["stats"] = []
+            months = sorted({s["day"][:7] for s in st["stats"]}, reverse=True)
+            cb_month.configure(values=[ALL] + months)
+            if cb_month.get() not in [ALL] + months: cb_month.set(ALL)
+            apply_days()
+
+        def open_selected_day(event=None, folder_only=False):
+            sel = day_tree.selection()
+            if not sel: return
+            try: dd = datetime.date.fromisoformat(sel[0])
+            except Exception: return
+            dfolder = archive_day_dir(folder, dd)
+            if not os.path.isdir(dfolder):
+                messagebox.showerror(T2("غير موجود", "Not found"), dfolder)
+                return
+            pdfs = sorted(glob.glob(os.path.join(dfolder, "Samary_*.pdf")))
+            if pdfs and not folder_only: os.startfile(pdfs[0])
+            else: os.startfile(dfolder)
+
+        day_tree.bind("<Double-1>", open_selected_day)
+        dmenu = tk.Menu(day_tree, tearoff=0)
+        dmenu.add_command(label=T2("📄 فتح ملخص اليوم", "📄 Open day summary"), command=open_selected_day)
+        dmenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_selected_day(folder_only=True))
+        def _dpop(ev):
+            it = day_tree.identify_row(ev.y)
+            if it:
+                day_tree.selection_set(it)
+                dmenu.tk_popup(ev.x_root, ev.y_root)
+        day_tree.bind("<Button-3>", _dpop)
+        for e in (day_q, from_e, to_e): e.bind("<KeyRelease>", apply_days)
+
+        # ================= تبويب البحث العام =================
+        f2 = ctk.CTkFrame(tab_search, fg_color="transparent")
+        f2.pack(fill="x", pady=(2, 2))
+        s_entry = ctk.CTkEntry(f2, placeholder_text=T2("اسم المؤمن له / رقم اللوحة / المبلغ...", "Insured name / plate / amount..."),
+                               width=380, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        s_entry.pack(side="left", padx=(0, 8))
+        attach_context_menu(s_entry)
+        inc_void = ctk.CTkCheckBox(f2, text=T2("إظهار الملغي", "Include void"), font=FONT_SECTION_LBL, text_color=t["text"])
+        inc_void.select()
+        inc_void.pack(side="left", padx=6)
+        s_count = ctk.CTkLabel(f2, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        s_count.pack(side="right", padx=8)
+
+        s_cols = ("date", "unit", "plate", "insured", "amount", "time", "status", "file")
+        s_hdr = {"date": T2("يوم الأرشيف", "Archive day"), "unit": T2("الوحدة", "Unit"), "plate": T2("اللوحة", "Plate"),
+                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"), "time": T2("الوقت", "Time"),
+                 "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
+        s_tree = make_tree(tab_search, s_cols, s_hdr,
+                           {"date": 105, "unit": 140, "plate": 100, "insured": 180, "amount": 90, "time": 120, "status": 80, "file": 170})
+        s_paths = {}
+
+        def do_search(*_):
+            q = s_entry.get().strip()
+            s_tree.delete(*s_tree.get_children())
+            s_paths.clear()
+            if not q:
+                s_count.configure(text="")
+                return
+            try: rows = archive_search(q, include_void=bool(inc_void.get()))
+            except Exception as e:
+                log_exception("archive_search", e)
+                rows = []
+            tot = 0.0
+            for i, (path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void) in enumerate(rows):
+                y, m, d = day.split("-")
+                if is_void: status, tag = T2("ملغي", "Void"), "void"
+                elif is_manual: status, tag = T2("يدوي", "Manual"), "manual"
+                else: status, tag = T2("سليم", "OK"), ""
+                if not is_void: tot += amount
+                iid = str(i)
+                s_paths[iid] = path
+                s_tree.insert("", "end", iid=iid, tags=(tag,) if tag else (),
+                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", rtime, status, fname))
+            s_count.configure(text=T2(f"النتائج: {len(rows):,}  |  الإجمالي (بدون الملغي): {tot:,.2f}",
+                                      f"Results: {len(rows):,}  |  Total (excl. void): {tot:,.2f}"))
+
+        def _debounced(*_):
+            if st["debounce"]:
+                try: win.after_cancel(st["debounce"])
+                except Exception: pass
+            st["debounce"] = win.after(300, do_search)
+        s_entry.bind("<KeyRelease>", _debounced)
+        s_entry.bind("<Return>", do_search)
+        inc_void.configure(command=do_search)
+
+        def open_result(event=None, folder_only=False):
+            sel = s_tree.selection()
+            if not sel: return
+            p = s_paths.get(sel[0], "")
+            if not p or not os.path.exists(p):
+                messagebox.showerror(T2("غير موجود", "Not found"), os.path.basename(p or ""))
+                return
+            if folder_only: os.startfile(os.path.dirname(p))
+            else: os.startfile(p)
+        s_tree.bind("<Double-1>", open_result)
+        smenu = tk.Menu(s_tree, tearoff=0)
+        smenu.add_command(label=T2("📄 فتح الإيصال", "📄 Open receipt"), command=open_result)
+        smenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_result(folder_only=True))
+        def _spop(ev):
+            it = s_tree.identify_row(ev.y)
+            if it:
+                s_tree.selection_set(it)
+                smenu.tk_popup(ev.x_root, ev.y_root)
+        s_tree.bind("<Button-3>", _spop)
+
+        # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين حدّث في الخلفية
+        load_days()
+        run_maintenance()
+        win.after(150, lambda: day_q.focus_set())
 
     def open_records_viewer(self):
         if not self.last_detailed_records:
@@ -3810,7 +4349,7 @@ class CustomTkinterApp(ctk.CTk):
         win = ctk.CTkToplevel(self)
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 340, 250)
+        center_window_relative(win, self, 340, 285)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkLabel(win, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(12, 2))
@@ -3827,13 +4366,24 @@ class CustomTkinterApp(ctk.CTk):
         cb_u.pack(fill="x", padx=16)
         attach_context_menu(cb_u)
 
+        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
+        lbl_tid.pack(anchor="w", padx=16, pady=(6, 0))
+
+        def _update_tid(*_):
+            tid = UNIT_TERMINALS.get(cb_u.get().strip(), "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else "")
+
+        cb_u._user_command = lambda raw: _update_tid()
+        cb_u.bind("<KeyRelease>", _update_tid)
+
         def do_p(event=None):
             emp_val = cb_employee.get().strip()
             unit_val = cb_u.get().strip()
+            tid_val = UNIT_TERMINALS.get(unit_val, "")
             date_val = datetime.date.today().strftime('%d/%m/%Y')
             
             pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
-            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val):
+            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
                 sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
                 if not os.path.exists(sumatra_path):
                     sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
@@ -3851,7 +4401,7 @@ class CustomTkinterApp(ctk.CTk):
                     if sys.platform == "win32": os.startfile(pdf_path, "print")
             else:
                 txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
-                lines = [l for l in [emp_val, unit_val, date_val] if l]
+                lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
                 with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
                 if sys.platform == "win32": os.startfile(txt_path, "print")
             win.destroy()
