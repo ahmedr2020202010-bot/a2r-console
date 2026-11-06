@@ -1729,6 +1729,12 @@ def _font():
     return getattr(sys.modules.get("__main__"), "FONT_FAMILY", "Segoe UI")
 
 
+# ألوان الأزرار: غامقة عشان الكتابة البيضا تبان (الأخضر الفسفوري كان بيخفي الكلام)
+_GREEN, _GREEN_H = "#15803D", "#166534"
+_AMBER, _AMBER_H = "#B45309", "#92400E"
+_SLATE, _SLATE_H = "#334155", "#1E293B"
+
+
 def _icon(win):
     try:
         f = getattr(sys.modules.get("__main__"), "set_window_icon_safe", None)
@@ -2013,17 +2019,26 @@ class _FeatureWindow(ctk.CTkToplevel):
     # --- عناصر مشتركة
     def _btn(self, parent, text, cmd, color=None, w=None, **kw):
         t = self.t
+        col, hov = color or t["primary"], t["hover"]
+        if col == t["success"]:          # الأخضر الفسفوري بيتبدل بأخضر غامق عشان الكتابة تبان
+            col, hov = _GREEN, _GREEN_H
+        elif col == t["warning"]:        # نفس الفكرة للأصفر/البرتقالي
+            col, hov = _AMBER, _AMBER_H
+        elif col == t["card"]:           # الأزرار العادية: رمادي-أزرق واضح على الخلفية
+            col, hov = _SLATE, _SLATE_H
+        kw.setdefault("height", 32)
         return ctk.CTkButton(parent, text=text, command=cmd, font=(self.F, 11, "bold"),
-                             fg_color=color or t["primary"], hover_color=t["hover"], width=w or 120, **kw)
+                             fg_color=col, hover_color=hov, text_color="#FFFFFF",
+                             text_color_disabled="#CBD5E1", width=w or 120, **kw)
 
     def _build_source_bar(self, parent):
         t, F = self.t, self.F
         bar = ctk.CTkFrame(parent, fg_color=t["card"], border_color=t["border"], border_width=1)
-        bar.pack(fill="x", padx=12, pady=(10, 4))
+        bar.pack(fill="x", padx=12, pady=(8, 4))
         r = ctk.CTkFrame(bar, fg_color="transparent")
-        r.pack(fill="x", padx=10, pady=8)
-        self._btn(r, "📁 اختيار مجلد", self.pick_folder, w=140).pack(side="right", padx=4)
-        self._btn(r, "🗂️ اختيار ملفات", self.pick_files, w=140).pack(side="right", padx=4)
+        r.pack(fill="x", padx=8, pady=6)
+        self._btn(r, "📁 اختيار مجلد", self.pick_folder, w=125).pack(side="right", padx=4)
+        self._btn(r, "🗂️ اختيار ملفات", self.pick_files, w=125).pack(side="right", padx=4)
         ctk.CTkCheckBox(r, text="يشمل المجلدات الفرعية", variable=self.recursive, font=(F, 10),
                         text_color=t["text"]).pack(side="right", padx=10)
         self.lbl_src = ctk.CTkLabel(r, text="لم يتم اختيار مصدر بعد", font=(F, 11, "bold"),
@@ -2057,9 +2072,9 @@ class _FeatureWindow(ctk.CTkToplevel):
         t, F = self.t, self.F
         fr = ctk.CTkFrame(parent, fg_color="transparent")
         fr.pack(fill="x", padx=12, pady=2)
-        self.btn_start = self._btn(fr, "▶ بدء القراءة", self.start, color=t["success"], w=150)
+        self.btn_start = self._btn(fr, "▶ بدء القراءة", self.start, color=t["success"], w=130)
         self.btn_start.pack(side="right", padx=4)
-        self.btn_stop = self._btn(fr, "⏹ إيقاف", self.stop, color=t["danger"], w=90, state="disabled")
+        self.btn_stop = self._btn(fr, "⏹ إيقاف", self.stop, color=t["danger"], w=85, state="disabled")
         self.btn_stop.pack(side="right", padx=4)
         self.bar = ctk.CTkProgressBar(fr, progress_color=t["accent"])
         self.bar.set(0)
@@ -2150,7 +2165,8 @@ class _EditClosingDialog(_Modal):
         self.e.insert(0, "%.2f" % item.amount if item.amount else "")
         self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
         self.lbl.pack()
-        ctk.CTkButton(self, text="حفظ", font=(F, 12, "bold"), fg_color=t["success"], command=self.save).pack(fill="x", padx=20, pady=8)
+        ctk.CTkButton(self, text="حفظ", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
+                      text_color="#FFFFFF", command=self.save).pack(fill="x", padx=20, pady=8)
 
     def save(self):
         tid = _tid_from_choice(self.cb.get())
@@ -2167,75 +2183,229 @@ class _EditClosingDialog(_Modal):
 
 
 class _ReceiptViewer(ctk.CTkToplevel):
-    """بيعرض صورة الإيصال المقروء عشان تقارنه بالمبلغ في الجدول."""
+    """بيعرض صورة الإيصال المقروء مع زوم (تكبير/تصغير) وتحريك، عشان تتأكد من المبلغ."""
+
+    MIN_Z, MAX_Z = 0.1, 8.0
 
     def __init__(self, parent, item):
         super().__init__(parent)
+        from PIL import Image as _Img, ImageTk as _ImgTk
+        self._Img, self._ImgTk = _Img, _ImgTk
         t, F = _theme(parent), _font()
+        self.t = t
         self.title("A2R - %s" % item.label)
         _icon(self)
         self.configure(fg_color=t["bg"])
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        mw, mh = min(620, int(sw * 0.45)), int(sh * 0.78)
-        self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 40))
+        mw, mh = min(720, int(sw * 0.5)), int(sh * 0.82)
+        self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 30))
+        self.minsize(420, 380)
         info = "%s  |  %s  |  المبلغ المقروء: %s" % (
             item.label, E.terminal_label(item.tid) if item.tid else "ماكينة غير محددة",
             "%.2f" % item.amount if item.amount else "—")
-        ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20).pack(pady=6)
+        ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20).pack(pady=(6, 2))
+
+        # الصور المتاحة: الإيصال المقصوص + الصورة الكاملة (لو مختلفين)
+        self._srcs = []
         try:
-            img = (item.crop if item.crop is not None else item.image).copy().convert("RGB")
-            img.thumbnail((mw - 30, mh - 90))
-            self._img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-            ctk.CTkLabel(self, text="", image=self._img).pack(padx=8, pady=4)
-        except Exception as e:
-            ctk.CTkLabel(self, text="مش قادر أعرض الصورة: %s" % e, text_color=t["danger"]).pack(pady=20)
+            if item.crop is not None:
+                self._srcs.append(("الإيصال", item.crop.copy().convert("RGB")))
+            if item.image is not None and (item.crop is None or item.image.size != item.crop.size):
+                self._srcs.append(("الصورة الكاملة", item.image.copy().convert("RGB")))
+        except Exception:
+            pass
+        self._src_i = 0
+        self._zoom, self._fit, self._ox, self._oy, self._iw, self._ih = 1.0, True, 0, 0, 1, 1
+        self._photo = None
+        self._tot_w = self._tot_h = 1
+
+        tb = ctk.CTkFrame(self, fg_color="transparent")
+        tb.pack(fill="x", padx=8, pady=2)
+        tb.grid_columnconfigure(tuple(range(6)), weight=1, uniform="v")
+
+        def vb(col, text, cmd, color=_SLATE):
+            b = ctk.CTkButton(tb, text=text, command=cmd, height=30, font=(F, 11, "bold"), fg_color=color,
+                              hover_color=_SLATE_H, text_color="#FFFFFF")
+            b.grid(row=0, column=col, padx=2, sticky="ew")
+            return b
+
+        vb(0, "➕ تكبير", lambda: self._step(1.25), "#0369A1")
+        vb(1, "➖ تصغير", lambda: self._step(0.8), "#0369A1")
+        vb(2, "⛶ مناسب", self.fit)
+        vb(3, "1:1 أصلي", lambda: self._set_zoom(1.0))
+        vb(4, "↻ تدوير", self.rotate)
+        self.b_swap = vb(5, "🔀 " + (self._srcs[1][0] if len(self._srcs) > 1 else "—"), self.swap)
+        if len(self._srcs) < 2:
+            self.b_swap.configure(state="disabled")
+        self.lbl_zoom = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["muted"])
+        self.lbl_zoom.pack()
+
+        fr = tk.Frame(self, bg=t["bg"])
+        fr.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+        fr.grid_rowconfigure(0, weight=1)
+        fr.grid_columnconfigure(0, weight=1)
+        self.cv = tk.Canvas(fr, bg="#0B1220", highlightthickness=0, cursor="fleur")
+        vs = ttk.Scrollbar(fr, orient="vertical", command=self.cv.yview)
+        hs = ttk.Scrollbar(fr, orient="horizontal", command=self.cv.xview)
+        self.cv.configure(xscrollcommand=hs.set, yscrollcommand=vs.set)
+        self.cv.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        self._img_id = self.cv.create_image(0, 0, anchor="nw")
+
+        self.cv.bind("<Configure>", lambda e: self._on_resize())
+        self.cv.bind("<ButtonPress-1>", lambda e: self.cv.scan_mark(e.x, e.y))
+        self.cv.bind("<B1-Motion>", lambda e: self.cv.scan_dragto(e.x, e.y, gain=1))
+        self.cv.bind("<MouseWheel>", self._wheel)
+        self.cv.bind("<Control-MouseWheel>", self._wheel_zoom)
+        self.cv.bind("<Shift-MouseWheel>", lambda e: self.cv.xview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.cv.bind("<Double-Button-1>", lambda e: self.fit())
+        self.bind("<KeyPress-plus>", lambda e: self._step(1.25))
+        self.bind("<KeyPress-equal>", lambda e: self._step(1.25))
+        self.bind("<KeyPress-minus>", lambda e: self._step(0.8))
+        self.bind("<Control-Key-0>", lambda e: self.fit())
+        if not self._srcs:
+            ctk.CTkLabel(self, text="مش قادر أعرض الصورة", text_color=t["danger"]).pack(pady=20)
+        self.after(80, self.fit)
+
+    # --- أدوات
+    def _src(self):
+        return self._srcs[self._src_i][1] if self._srcs else None
+
+    def _max_z(self):
+        im = self._src()
+        if im is None:
+            return self.MAX_Z
+        return max(1.0, min(self.MAX_Z, (30e6 / max(1, im.width * im.height)) ** 0.5))
+
+    def _cw(self):
+        return max(50, self.cv.winfo_width())
+
+    def _ch(self):
+        return max(50, self.cv.winfo_height())
+
+    def _on_resize(self):
+        if self._fit:
+            self.fit()
+        else:
+            self._render()
+
+    def fit(self):
+        im = self._src()
+        if im is None:
+            return
+        z = min(self._cw() / im.width, self._ch() / im.height)
+        self._fit = True
+        self._zoom = max(self.MIN_Z, min(self._max_z(), z))
+        self._render()
+
+    def _step(self, f):
+        self._set_zoom(self._zoom * f)
+
+    def _set_zoom(self, z, ax=None, ay=None):
+        im = self._src()
+        if im is None:
+            return
+        z = max(self.MIN_Z, min(self._max_z(), z))
+        ax = self._cw() / 2 if ax is None else ax
+        ay = self._ch() / 2 if ay is None else ay
+        fx = (self.cv.canvasx(ax) - self._ox) / max(1, self._iw)
+        fy = (self.cv.canvasy(ay) - self._oy) / max(1, self._ih)
+        self._fit = False
+        self._zoom = z
+        self._render()
+        tw, th = self._tot_w, self._tot_h
+        nx = self._ox + fx * self._iw - ax
+        ny = self._oy + fy * self._ih - ay
+        self.cv.xview_moveto(max(0.0, nx) / max(1, tw))
+        self.cv.yview_moveto(max(0.0, ny) / max(1, th))
+
+    def _render(self):
+        im = self._src()
+        if im is None:
+            return
+        w, h = max(1, int(im.width * self._zoom)), max(1, int(im.height * self._zoom))
+        try:
+            res = self._Img.LANCZOS if self._zoom < 1 else self._Img.BICUBIC
+            disp = im.resize((w, h), res)
+            self._photo = self._ImgTk.PhotoImage(disp)
+        except Exception:
+            return
+        self._iw, self._ih = w, h
+        self._tot_w, self._tot_h = max(w, self._cw()), max(h, self._ch())
+        self._ox, self._oy = (self._tot_w - w) // 2, (self._tot_h - h) // 2
+        self.cv.itemconfigure(self._img_id, image=self._photo)
+        self.cv.coords(self._img_id, self._ox, self._oy)
+        self.cv.configure(scrollregion=(0, 0, self._tot_w, self._tot_h))
+        self.lbl_zoom.configure(text="التكبير: %d%%   (Ctrl + عجلة الماوس للزوم • اسحب بالماوس للتحريك • دبل كليك = مناسب)"
+                                % round(self._zoom * 100))
+
+    def _wheel(self, e):
+        self.cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+    def _wheel_zoom(self, e):
+        self._set_zoom(self._zoom * (1.15 if e.delta > 0 else 1 / 1.15), e.x, e.y)
+        return "break"
+
+    def rotate(self):
+        if not self._srcs:
+            return
+        nm, im = self._srcs[self._src_i]
+        self._srcs[self._src_i] = (nm, im.rotate(-90, expand=True))
+        self.fit()
+
+    def swap(self):
+        if len(self._srcs) > 1:
+            self._src_i = (self._src_i + 1) % len(self._srcs)
+            self.b_swap.configure(text="🔀 " + self._srcs[(self._src_i + 1) % len(self._srcs)][0])
+            self.fit()
 
 
 class ClosingWindow(_FeatureWindow):
     TITLE = "التقفيل"
 
     def __init__(self, parent):
-        super().__init__(parent, 880, 600)
+        super().__init__(parent, 780, 520)
+        self.minsize(700, 440)
         t, F = self.t, self.F
         self.raw_all, self.kept, self.warnings, self.outputs = [], [], [], None
         _st = _load_settings()
         self.out_dir = _st.get("closing_out") or os.path.join(_documents_dir(), "Closing")
         self.template = _st.get("closing_template") if os.path.exists(_st.get("closing_template") or "") else None
-        ctk.CTkLabel(self, text="📑 التقفيل - قراءة باتشات الماكينات", font=(F, 16, "bold"),
-                     text_color=t["accent"]).pack(pady=(10, 0))
+        ctk.CTkLabel(self, text="📑 التقفيل - قراءة باتشات الماكينات", font=(F, 15, "bold"),
+                     text_color=t["accent"]).pack(pady=(8, 0))
         self._build_source_bar(self)
-        # مكان الناتج + القالب
-        fr = ctk.CTkFrame(self, fg_color="transparent")
-        fr.pack(fill="x", padx=12, pady=2)
-        self._btn(fr, "📂 مكان الناتج", self.pick_out, color=t["card"], w=130).pack(side="right", padx=4)
-        self._btn(fr, "📊 قالب الإكسيل", self.pick_template, color=t["card"], w=130).pack(side="right", padx=4)
-        self.lbl_out = ctk.CTkLabel(fr, text="", font=(F, 10), text_color=t["muted"], anchor="w", justify="left", wraplength=560)
-        self.lbl_out.pack(side="left", fill="x", expand=True)
+        # سطر معلومات بس (الناتج + القالب) - الأزرار بتاعتهم اتشالت، وفتح مكان الملفات من الشريط اللي تحت
+        self.lbl_out = ctk.CTkLabel(self, text="", font=(F, 9), text_color=t["muted"], anchor="w", justify="left",
+                                    wraplength=720)
+        self.lbl_out.pack(fill="x", padx=16, pady=(0, 2))
         self._refresh_out_label()
         self._build_progress(self)
         # الشريط السفلي والملاحظات الأول (side=bottom) عشان الأزرار ماتختفيش في الشاشات الصغيرة
         bt = ctk.CTkFrame(self, fg_color="transparent")
-        bt.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
-        self.txt = ctk.CTkTextbox(self, height=80, font=(F, 10), fg_color=t["input"], text_color=t["text"])
+        bt.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
+        self.txt = ctk.CTkTextbox(self, height=70, font=(F, 10), fg_color=t["input"], text_color=t["text"])
         self.txt.pack(side="bottom", fill="x", padx=12, pady=4)
         self.txt.configure(state="disabled")
         cols = [("n", "م"), ("file", "الملف"), ("tid", "الماكينة"), ("unit", "الوحدة"), ("amount", "المبلغ"),
                 ("status", "الحالة")]
-        self.tv = self._tree(self, cols, [40, 200, 100, 120, 90, 280], height=7)
+        self.tv = self._tree(self, cols, [40, 190, 90, 110, 85, 230], height=6)
         self.tv.bind("<Double-1>", lambda e: self.edit_selected())
-        self.b_edit = self._btn(bt, "✏️ تعديل", self.edit_selected, color=t["warning"], w=90)
-        self.b_view = self._btn(bt, "👁 عرض الإيصال", self.view_selected, color=t["card"], w=120)
-        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=110)
-        self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=120)
-        self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=115)
-        self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=120)
-        for b in (self.b_xlsx, self.b_pdf, self.b_folder, self.b_rebuild, self.b_view, self.b_edit):
-            b.pack(side="right", padx=3)
+        self.b_edit = self._btn(bt, "✏️ تعديل", self.edit_selected, color=t["warning"], w=10)
+        self.b_view = self._btn(bt, "🔍 عرض الإيصال", self.view_selected, color=t["card"], w=10)
+        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=10)
+        self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=10)
+        self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=10)
+        self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=10)
+        # صف واحد، أعمدة متساوية، مرتبين من اليمين لليسار
+        bt.grid_columnconfigure(tuple(range(6)), weight=1, uniform="cb")
+        for i, b in enumerate((self.b_edit, self.b_view, self.b_rebuild, self.b_folder, self.b_pdf, self.b_xlsx)):
+            b.grid(row=0, column=5 - i, padx=3, sticky="ew")
 
     def _refresh_out_label(self):
         tpl = self.template or E.find_template([self.out_dir])
         self._tpl_eff = tpl
-        self.lbl_out.configure(text="الناتج: %s\nالقالب: %s" % (
+        self.lbl_out.configure(text="الناتج: %s   |   القالب: %s" % (
             self.out_dir, tpl if tpl else "مش موجود - هيتعمل إكسيل بسيط بنفس الترتيب"))
 
     def pick_out(self):
@@ -2442,7 +2612,8 @@ class _EditPayDialog(_Modal):
             self.ents.append(e)
         self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
         self.lbl.pack()
-        ctk.CTkButton(self, text="حفظ وإعادة التسمية", font=(F, 12, "bold"), fg_color=t["success"],
+        ctk.CTkButton(self, text="حفظ وإعادة التسمية", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
+                      text_color="#FFFFFF",
                       command=self.save).pack(fill="x", padx=20, pady=8)
 
     def save(self):
