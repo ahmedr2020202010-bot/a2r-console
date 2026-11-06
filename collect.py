@@ -198,7 +198,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.62.0"
+APP_VERSION = "v4.63.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -2405,7 +2405,7 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
         self.title(tr("adv_win_title"))
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 460, 240)
+        center_window_relative(self, parent, 540, 300)
         
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
@@ -2429,13 +2429,13 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
         f_btns = ctk.CTkFrame(self, fg_color="transparent")
         f_btns.pack(fill="x", padx=20, pady=15)
         
-        btn_batch = ctk.CTkButton(f_btns, text=tr("adv_btn_batch"), height=40, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
+        btn_batch = ctk.CTkButton(f_btns, text=tr("adv_btn_batch"), height=35, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
         btn_batch.pack(side="right", fill="x", expand=True, padx=(5, 0))
         
-        btn_receipts = ctk.CTkButton(f_btns, text=tr("adv_btn_receipts"), height=40, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
+        btn_receipts = ctk.CTkButton(f_btns, text=tr("adv_btn_receipts"), height=35, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
         btn_receipts.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"])
+        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"], wraplength=500)
         self.lbl_status.pack(pady=(0, 10))
 
     def browse_folder(self):
@@ -2466,7 +2466,11 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
             out_dir = os.path.join(folder_path, "_Enhanced")
             os.makedirs(out_dir, exist_ok=True)
             
-            image_files = glob.glob(os.path.join(folder_path, "*.jpg")) + glob.glob(os.path.join(folder_path, "*.png")) + glob.glob(os.path.join(folder_path, "*.jpeg"))
+            image_files = []
+            for fname in os.listdir(folder_path):
+                if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    image_files.append(os.path.join(folder_path, fname))
+                    
             if not image_files:
                 self.after(0, lambda: self.lbl_status.configure(text="لا توجد صور في المجلد المختار!", text_color="#EF4444"))
                 return
