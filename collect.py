@@ -49,144 +49,7 @@ import html
 from collections import Counter
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk
-
-try:
-    import cv2
-    import numpy as np
-    import pytesseract
-    ADVANCED_LIBS_OK = True
-except ImportError:
-    ADVANCED_LIBS_OK = False
-
-
-def parse_pos_receipt(text):
-    up_text = text.upper()
-    
-    # 1. Classification (Batch/Summary/Copy vs Payment/Other)
-    is_batch = False
-    receipt_type = "غير معروف"
-    
-    batch_keywords = ["BATCH CLOS", "SUCCESSF", "GRAND TOTAL", "SUMMARY", "REPRINT", "DUPLICATE", "TOTAL NET", "THANK YOU FOR USING"]
-    if any(kw in up_text for kw in batch_keywords):
-        is_batch = True
-        receipt_type = "تقفيل/ملخص/نسخة"
-    else:
-        pay_score = sum(1 for kw in [r'R{1,2}N\W', r'APPROVED', r'AUTH\W', r'CLESS|CHIP'] if re.search(kw, up_text))
-        if pay_score >= 1:
-            receipt_type = "إيصال دفع (مستبعد)"
-            
-    # 2. Extract TID
-    tid = None
-    tid_match = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", up_text)
-    if tid_match:
-        raw_tid = re.sub(r'\D', '', tid_match.group(1).replace('/', '7'))
-        if len(raw_tid) >= 8:
-            tid = raw_tid[-8:]
-    if not tid:
-        loose_match = re.search(r"\b(503\d{5})\b", up_text)
-        if loose_match:
-            tid = loose_match.group(1)
-
-    # 3. Extract Amount (Grand Total)
-    amounts = []
-    for m in re.finditer(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)", text):
-        val_str = m.group(1).replace(',', '') + '.' + m.group(2)
-        try:
-            v = float(val_str)
-            if 0.5 <= v <= 5000000:
-                amounts.append(v)
-        except: pass
-    grand_total = max(amounts) if amounts else 0.0
-
-    # 4. Extract Batch No
-    batch_no = "-"
-    b_match = re.search(r"BATCH\s*NO\D{0,6}(\d{4,7})", up_text)
-    if b_match:
-        batch_no = b_match.group(1)
-        
-    # 5. Extract Date
-    date_val = "-"
-    date_match = re.search(r"DATE\s*:?\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})", up_text)
-    if date_match:
-        date_val = date_match.group(1).replace('/', '-')
-    else:
-        dates = re.findall(r"\b\d{2}[-/.]\d{2}[-/.]\d{4}\b|\b\d{4}[-/.]\d{2}[-/.]\d{2}\b", text)
-        if dates:
-            date_val = dates[0].replace('/', '-')
-
-    return {
-        "is_valid_batch": is_batch,
-        "type": receipt_type,
-        "tid": tid, 
-        "total": grand_total, 
-        "batch": batch_no,
-        "date": date_val
-    }
-
-def process_and_enhance_image(image_path, out_path):
-    if not ADVANCED_LIBS_OK: return False
-    try:
-        img_array = np.fromfile(image_path, np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        if image is None: return False
-        orig = image.copy()
-        ratio = image.shape[0] / 500.0
-        resized = cv2.resize(image, (int(image.shape[1] / ratio), 500))
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        edged = cv2.Canny(gray, 75, 200)
-        cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
-        screenCnt = None
-        for c in cnts:
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            if len(approx) == 4:
-                screenCnt = approx
-                break
-        
-        if screenCnt is not None:
-            pts = screenCnt.reshape(4, 2) * ratio
-            rect = np.zeros((4, 2), dtype="float32")
-            s = pts.sum(axis=1)
-            rect[0] = pts[np.argmin(s)]
-            rect[2] = pts[np.argmax(s)]
-            diff = np.diff(pts, axis=1)
-            rect[1] = pts[np.argmin(diff)]
-            rect[3] = pts[np.argmax(diff)]
-            
-            (tl, tr, br, bl) = rect
-            widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-            widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-            maxWidth = max(int(widthA), int(widthB))
-            heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-            heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-            maxHeight = max(int(heightA), int(heightB))
-            
-            dst = np.array([
-                [0, 0],
-                [maxWidth - 1, 0],
-                [maxWidth - 1, maxHeight - 1],
-                [0, maxHeight - 1]], dtype="float32")
-            
-            M = cv2.getPerspectiveTransform(rect, dst)
-            warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
-        else:
-            warped = orig
-
-        # تطبيق تحسين التباين (CamScanner Effect)
-        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(warped_gray)
-        is_success, im_buf_arr = cv2.imencode(".jpg", enhanced)
-        if is_success:
-            im_buf_arr.tofile(out_path)
-        return True
-    except Exception as e:
-        log_exception("process_image", e)
-        return False
-from tkinter import messagebox, filedialog, simpledialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 try:
     import winreg
@@ -233,7 +96,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.68.0"
+APP_VERSION = "v50"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -524,7 +387,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 عربي", "dir_path": "DIRECTORY PATH", "browse": "Browse", "open": "Open",
         "date_lbl": "REPORT DATE", "today": "Today", "yesterday": "Yesterday",
         "start": "⚡ START EXTRACTION", "reset": "Reset",
-        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "view_records": "🔍 Records Viewer",
+        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "pos_close_btn": "🧾 POS Closing", "pos_pay_btn": "💳 Payments", "view_records": "🔍 Records Viewer",
         "export_pdf": "📄 PDF Summary", "kpi1": "OPERATIONS", "kpi2": "TOTAL SUM",
         "open_excel": "📊 Open Excel", "currency": "EGP", "open_chrome": "🌐 Traffic Portal",
         "cash_btn": "💵 Cash", "clean_downloads": "📦 Archive", "autosync_on": "Auto Sync ON", "autosync_off": "Auto Sync OFF",
@@ -567,7 +430,7 @@ LANGUAGES = {
         "cut": "Cut", "copy": "Copy", "paste": "Paste", "select_all": "Select All",
         "restricted_admin": "This feature is restricted to administrator only!", "done": "Done",
         "status_void": "Voided ❌", "status_dup": "Duplicate ×{n} ⚠️", "status_wrong": "Other Unit", "status_missing": "Missing: ", "status_manual": "Manual Receipt", "status_ok": "Valid Receipt",
-        "btn_admin_panel": "⚙️ Admin Panel", "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Advanced Batching & Receipts", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
+        "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
@@ -579,7 +442,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 English", "dir_path": "مسار مجلد الإيصالات", "browse": "تحديد", "open": "فتح",
         "date_lbl": "تاريخ التقرير", "today": "اليوم", "yesterday": "أمس",
         "start": "⚡ بدء استخراج ومعالجة البيانات", "reset": "تصفير",
-        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "view_records": "🔍 عرض السجلات",
+        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "pos_close_btn": "🧾 تقفيل POS", "pos_pay_btn": "💳 إيصالات الدفع", "view_records": "🔍 عرض السجلات",
         "export_pdf": "📄 تقرير PDF", "kpi1": "عدد العمليات", "kpi2": "إجمالي مبالغ السيستم",
         "open_excel": "📊 فتح الإكسيل", "currency": "ج.م", "open_chrome": "🌐 بوابة المرور",
         "cash_btn": "💵 حاسبة الكاش", "clean_downloads": "📦 أرشفة", "autosync_on": "مزامنة تلقائية: مفعل", "autosync_off": "مزامنة تلقائية: معطل",
@@ -623,7 +486,7 @@ LANGUAGES = {
         "cut": "قص", "copy": "نسخ", "paste": "لصق", "select_all": "تحديد الكل",
         "restricted_admin": "هذه الصلاحية متاحة للمشرف فقط!", "done": "تم",
         "status_void": "ملغي ❌", "status_dup": "مكرر ×{n} ⚠️", "status_wrong": "وحدة مختلفة", "status_missing": "ناقص: ", "status_manual": "معاملة يدوية", "status_ok": "إيصال سليم",
-        "btn_admin_panel": "⚙️ لوحة المشرف", "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "أدوات التقفيل وإيصالات الدفع", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
+        "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
@@ -1319,9 +1182,817 @@ def archive_day_records(day_folder):
         if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": True, "is_void": rec["is_void"]})
     return recs
 
-SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
-ADVANCED_ADMIN_HASH = hashlib.sha256("Ahmed@A2r460".encode("utf-8")).hexdigest()
+# ================= أدوات POS (التقفيل + إيصالات الدفع) — بدون واتساب =================
+import hashlib as _hl, hmac as _hm
+import math as _math
 
+POS_TERMINALS = {  # tid: (orderNum, excelRow, unitName)
+    "50335710": (1, 2, "أبيس"), "50335993": (2, 2, "أبيس"), "50335987": (3, 2, "أبيس"),
+    "50325716": (4, 3, "برج العرب"), "50335998": (5, 3, "برج العرب"),
+    "50335994": (6, 3, "برج العرب"), "50335711": (7, 3, "برج العرب"),
+    "50382298": (8, 4, "المنتزه"), "50382315": (9, 4, "المنتزه"), "50383712": (10, 4, "المنتزه"),
+    "50382306": (11, 5, "محرم بك"), "50382316": (12, 5, "محرم بك"),
+    "50382308": (13, 6, "العجمي"), "50383706": (14, 6, "العجمي"),
+    "50382300": (15, 7, "القباري"), "50383702": (16, 8, "مصطفى كامل"),
+    "50382312": (17, 9, "مديرية الأمن"), "50383699": (18, 10, "ميناء الإسكندرية"),
+    "50383700": (19, 11, "خدمات مصر"),
+}
+POS_NUM_TO_TID = {v[0]: k for k, v in POS_TERMINALS.items()}
+POS_TID_FIX = {"50336994": "50335994", "50336711": "50335711", "50336998": "50335998",
+               "50302316": "50382316", "50382318": "50382315", "50330987": "50335987",
+               "60382308": "50382308"}
+POS_MERCHANT_CODE = {"22": 2, "23": 3, "24": 4, "25": 5, "26": 6, "27": 7, "28": 8, "29": 9, "30": 10, "31": 11}
+POS_NAME_HINTS = [
+    (["ABYSS", "ABIS"], 2), (["BURJ", "BORG"], 3), (["MONTZAH", "TOSUN"], 4),
+    (["MUHRAM", "MOHARAM"], 5), (["AJAMI", "AGAMI"], 6), (["KABBARY", "KABARY"], 7),
+    (["MUSTAFA", "KAMEL"], 8), (["MODRYT", "MODERYT"], 9),
+    (["ALEXANDRIA PORT", "ESMAT"], 10), (["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
+]
+POS_ROW_NAMES = {2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك", 6: "العجمي",
+                 7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن", 10: "ميناء الإسكندرية", 11: "خدمات مصر"}
+
+# ---------- الباسورد الإضافي (محفوظ كـ PBKDF2 hash مش نص ظاهر) ----------
+_POS_SALT = bytes.fromhex("a2b7c41d9e3f5a60718293a4b5c6d7e8")
+_POS_HASH = "22c4833cb10419941ea6389532d40d9f4a6d11b07cfcc87dd6ea7a57cb2b3670"
+_POS_STATE = {"until": 0.0, "fails": 0, "locked_until": 0.0}
+
+def _pos_hash(pw):
+    return _hl.pbkdf2_hmac("sha256", pw.encode("utf-8"), _POS_SALT, 200_000).hex()
+
+def pos_check_password(pw):
+    """يرجّع (ok, msg). 3 محاولات غلط = قفل 60 ثانية."""
+    now = time.time()
+    if now < _POS_STATE["locked_until"]:
+        return False, T2(f"مقفول مؤقتًا. حاول بعد {int(_POS_STATE['locked_until'] - now)} ثانية.",
+                         f"Locked. Try again in {int(_POS_STATE['locked_until'] - now)}s.")
+    if _hm.compare_digest(_pos_hash(pw or ""), _POS_HASH):
+        _POS_STATE["fails"] = 0
+        _POS_STATE["until"] = now + 15 * 60
+        return True, ""
+    _POS_STATE["fails"] += 1
+    if _POS_STATE["fails"] >= 3:
+        _POS_STATE["fails"] = 0
+        _POS_STATE["locked_until"] = now + 60
+        return False, T2("3 محاولات غلط — اتقفل لمدة دقيقة.", "3 wrong attempts — locked for 1 minute.")
+    return False, T2("الباسورد غلط.", "Wrong password.")
+
+def pos_is_unlocked():
+    return time.time() < _POS_STATE["until"]
+
+# ---------- مساعدات الأرقام ----------
+def _r2(v): return round(float(v) + 1e-9, 2)
+
+def _most_common(vals):
+    if not vals: return None
+    counts = {}
+    for v in vals: counts[v] = counts.get(v, 0) + 1
+    best = None
+    for k, c in counts.items():
+        if best is None or c > best[1]: best = (k, c)
+    return best
+
+class OcrLine:
+    __slots__ = ("text", "left", "right", "top", "bottom")
+    def __init__(self, text, left, right, top, bottom):
+        self.text, self.left, self.right, self.top, self.bottom = text, left, right, top, bottom
+    @property
+    def cy(self): return (self.top + self.bottom) / 2
+    @property
+    def h(self): return max(1.0, self.bottom - self.top)
+
+def pos_rows_text(lines):
+    ls = sorted(lines, key=lambda l: l.cy)
+    rows = []
+    for l in ls:
+        if rows:
+            last = rows[-1]
+            cy = sum(e.cy for e in last) / len(last)
+            h = sum(e.h for e in last) / len(last)
+            if abs(l.cy - cy) < h * 0.6:
+                last.append(l); continue
+        rows.append([l])
+    return "\n".join("  ".join(e.text for e in sorted(r, key=lambda e: e.left)) for r in rows) + "\n"
+
+def pos_reading_text(lines): return "\n".join(l.text for l in lines)
+
+_POS_MARKERS = [re.compile(p, re.I) for p in (
+    r"TERMINAL", r"GRAND|TOTALS?", r"NATIONAL\s*BANK|\bNBE\b", r"BATCH", r"MERCHANT",
+    r"SUCCESSF|CLOSED", r"\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ", r"THANK\s*YOU", r"NET\s*AMOUNT", r"\bSALE\b")]
+def pos_receipt_score(text): return sum(1 for r in _POS_MARKERS if r.search(text))
+
+def pos_split_columns(lines):
+    if len(lines) < 8: return [lines]
+    min_l = min(l.left for l in lines); max_r = max(l.right for l in lines)
+    w = max_r - min_l
+    if w <= 0: return [lines]
+    srt = sorted(lines, key=lambda l: l.left)
+    for tol in (0.03, 0.02, 0.01):
+        groups, cur_r = [], -1e18
+        for l in srt:
+            if not groups or l.left - cur_r > w * tol:
+                groups.append([l]); cur_r = l.right
+            else:
+                groups[-1].append(l); cur_r = max(cur_r, l.right)
+        big = [g for g in groups if (max(e.right for e in g) - min(e.left for e in g)) >= w * 0.12 and len(g) >= 6]
+        if 2 <= len(big) <= 4 and all(pos_receipt_score(pos_reading_text(g)) >= 3 for g in big):
+            return big
+    return [lines]
+
+_AMOUNT_RE = re.compile(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)")
+_BRAND_RE = re.compile(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", re.I)
+_CUT_RE = re.compile(r"THANK\s*YOU|Hotline|App\s*Version", re.I)
+
+def pos_amounts_in(raw):
+    text = re.sub(r"\bB(\d{2,3}[.,]\d{2})\b", lambda m: "8" + m.group(1), raw)
+    out = []
+    for m in _AMOUNT_RE.finditer(text):
+        try: v = float(m.group(1).replace(",", "") + "." + m.group(2))
+        except ValueError: continue
+        if 0.5 <= v <= 5_000_000: out.append(_r2(v))
+    return out
+
+def pos_parse_receipt(txt):
+    t = _CUT_RE.split(txt)[0]
+    gm = re.search(r"GRAND|TOTALS", t, re.I)
+    pre = t[:gm.start()] if gm else t
+    post = t[gm.start():] if gm else ""
+    bms = list(_BRAND_RE.finditer(pre))
+    sections = []
+    if bms:
+        for i, m in enumerate(bms):
+            end = bms[i + 1].start() if i + 1 < len(bms) else len(pre)
+            sections.append(pre[m.end():end])
+    else:
+        sm = re.search(r"SUCCESSFULL?Y|CLOSED", pre, re.I)
+        if sm: pre = pre[sm.end():]
+        sections.append(pre)
+    bvals = []
+    for sec in sections:
+        net = []
+        for ln in sec.split("\n"):
+            if re.search(r"NET\s*AMOUNT", ln, re.I): net += pos_amounts_in(ln)
+        mc = _most_common(net) or _most_common(pos_amounts_in(sec))
+        if mc: bvals.append(mc[0])
+    grand = pos_amounts_in(post)
+    bsum = _r2(sum(bvals)) if bvals else None
+    return {"grand": grand, "bsum": bsum, "bvals": bvals}
+
+def pos_decide(results):
+    for r in results:
+        b = r["bsum"]
+        if b and b > 0 and any(abs(g - b) < 0.005 for g in r["grand"]): return b, True
+    for r in results:
+        b = r["bsum"]
+        if b and b > 0 and len(r["bvals"]) >= 2:
+            for g in r["grand"]:
+                sa, sb = f"{g:.2f}", f"{b:.2f}"
+                if len(sa) == len(sb) and sum(1 for x, y in zip(sa, sb) if x != y) == 1:
+                    if r["grand"].count(g) >= 2: return g, True   # الإجمالي اتقرا أكتر من مرة بنفس القيمة = أوثق من مجموع الكروت
+                    return b, True
+    for r in results:
+        c = _most_common(r["grand"])
+        if c and c[1] >= 2 and r["bsum"] is None: return c[0], False
+    pool = []
+    for r in results:
+        pool.extend(r["grand"])
+        if r["bsum"] and r["bsum"] > 0: pool.append(r["bsum"])
+    c = _most_common(pool)
+    return (c[0], False) if c else (0.0, False)
+
+def pos_sum_closure(texts):
+    cnt = {}
+    for t in texts:
+        tt = _CUT_RE.split(t)[0]
+        local = {}
+        for a in pos_amounts_in(tt): local[a] = local.get(a, 0) + 1
+        for k, v in local.items():
+            if v > cnt.get(k, 0): cnt[k] = v
+    c = sorted(k for k, v in cnt.items() if v >= 2)
+    if len(c) < 3 or len(c) > 14: return None
+    for gi in range(len(c) - 1, 1, -1):
+        g, others = c[gi], c[:gi]
+        n = len(others)
+        for mask in range(1, 1 << n):
+            bits = 0; s = 0.0
+            for i in range(n):
+                if mask & (1 << i): bits += 1; s += others[i]
+            if bits >= 2 and abs(s - g) < 0.005: return g
+    return None
+
+def pos_ocr_piece(lines):
+    texts = [pos_rows_text(lines), pos_reading_text(lines)]
+    sc = pos_sum_closure(texts)
+    if sc is not None: return texts, sc, True
+    val, ok = pos_decide([pos_parse_receipt(t) for t in texts])
+    return texts, val, ok
+
+def pos_classify(text):
+    up = text.upper()
+    pay = sum(1 for p in (r"R{1,2}N\W{0,3}\d{9,}", r"\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}", r"APPROVED",
+                          r"AUTH\W{0,3}\d{6}", r"I\s*AUTHORI[SZ]E", r"MERCHANT\s*COPY", r"CLESS|CHIP\s*ONLINE")
+              if re.search(p, up))
+    batch = sum(1 for p in (r"BATCH\s*CLOS", r"SUCCESSF", r"GRAND\s*TOTAL", r"TOTAL\s*NET", r"THANK\s*YOU",
+                            r"NBE\s*NETWORK", r"HOTLINE") if re.search(p, up))
+    if pay >= 2 and batch < 2: return "payment"
+    if batch >= 1: return "batch"
+    return "other"
+
+def pos_batch_no(texts):
+    allv = []
+    for t in texts:
+        allv += [m.group(1) for m in re.finditer(r"BATCH\s*NO\D{0,6}(\d{4,7})", t, re.I)]
+    mc = _most_common(allv)
+    return mc[0] if mc else None
+
+# ---------- الماكينة / الوحدة / التاريخ ----------
+def _tid_labeled(t):
+    m = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", t, re.I)
+    if not m: return None
+    raw = re.sub(r"\D", "", m.group(1).replace("/", "7"))
+    if len(raw) < 8: return None
+    cands = [raw[-8:]] + [raw[i:i + 8] for i in range(len(raw) - 7)]
+    if len(raw) == 9: cands += [raw[:i] + raw[i + 1:] for i in range(9)]   # خانة زيادة من الـ OCR
+    for d in cands:
+        d = POS_TID_FIX.get(d, d)
+        if d in POS_TERMINALS: return d
+    return None
+
+def _tid_loose(t):
+    for tid in POS_TERMINALS:
+        if tid in t: return tid
+    for m in re.finditer(r"\b(503\d{5})\b", t):
+        c = POS_TID_FIX.get(m.group(1), m.group(1))
+        if c in POS_TERMINALS: return c
+    return None
+
+def pos_find_terminal(texts):
+    for t in texts:
+        r = _tid_labeled(t)
+        if r: return r
+    for t in texts:
+        r = _tid_loose(t)
+        if r: return r
+    return None
+
+def pos_find_terminal_fuzzy(texts, target_row=None):
+    pool = [k for k, v in POS_TERMINALS.items() if target_row is None or v[1] == target_row]
+    dist = {}
+    for t in texts:
+        for run in re.finditer(r"\d[\d /]{6,14}\d", t):
+            digits = re.sub(r"\D", "", run.group(0).replace("/", "7"))
+            for i in range(0, len(digits) - 7):
+                cand = digits[i:i + 8]
+                if not (cand.startswith("50") or cand.startswith("60")): continue
+                for tid in pool:
+                    d = sum(1 for a, b in zip(cand, tid) if a != b)
+                    if d < dist.get(tid, 99): dist[tid] = d
+    if not dist: return None
+    best = min(dist.values())
+    winners = [k for k, v in dist.items() if v == best]
+    return winners[0] if best <= 1 and len(winners) == 1 else None
+
+def pos_find_unit_extra(texts):
+    for t in texts:
+        m = re.search(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", t, re.I)
+        cands = []
+        if m: cands.append(re.sub(r"\D", "", m.group(1).replace("/", "7")))
+        cands.append(re.sub(r"\D", "", t))
+        for d in cands:
+            mm = re.search(r"11470?(2[2-9]|3[01])084", d)
+            if mm and mm.group(1) in POS_MERCHANT_CODE: return POS_MERCHANT_CODE[mm.group(1)]
+    for t in texts:
+        up = t.upper()
+        for words, row in POS_NAME_HINTS:
+            if any(w in up for w in words): return row
+    return None
+
+def pos_find_date(texts):
+    for t in texts:
+        m = re.search(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t, re.I)
+        if m: return f"{int(m.group(3))}.{int(m.group(2))}"
+    return None
+
+def pos_analyze_lines(all_lines):
+    pieces = pos_split_columns(all_lines)
+    multi = len(pieces) > 1
+    all_texts, batches, all_ok, seen = [], [], True, set()
+    for pc in pieces:
+        texts, val, ok = pos_ocr_piece(pc)
+        all_texts += texts
+        if val <= 0: all_ok = False; continue
+        b = pos_batch_no(texts)
+        key = (b, val)
+        if b is not None and key in seen: continue
+        seen.add(key); batches.append(val); all_ok = all_ok and ok
+    total = _r2(sum(batches)); ok = all_ok and bool(batches)
+    if multi and not ok:
+        texts, val, o2 = pos_ocr_piece(all_lines)
+        all_texts += texts
+        if val > 0 and (o2 or not batches):
+            total, ok, batches = val, o2, [val]
+    date = pos_find_date(all_texts)
+    tid = pos_find_terminal(all_texts); how = "terminal"; row = None; name = None
+    if tid is None:
+        u0 = pos_find_unit_extra(all_texts)
+        tid = pos_find_terminal_fuzzy(all_texts, u0); how = "fuzzy"
+    if tid is not None:
+        info = POS_TERMINALS[tid]; row, name = info[1], info[2]
+    else:
+        how = "none"; u = pos_find_unit_extra(all_texts)
+        if u is not None: row, name, how = u, POS_ROW_NAMES.get(u), "name/merchant"
+    return {"tid": tid, "how": how, "row": row, "unit": name, "val": total, "ok": ok,
+            "batches": batches, "date": date, "texts": all_texts}
+
+def pos_merge_second(a, b):
+    """يدمج القراءة التانية في الأولى. يرجّع قيمة تانية متعارضة (للمراجعة) أو None."""
+    if a["tid"] is None and b["tid"] is not None:
+        for k in ("tid", "row", "unit", "how"): a[k] = b[k]
+    elif a["row"] is None and b["row"] is not None:
+        for k in ("row", "unit", "how"): a[k] = b[k]
+    if not a["date"]: a["date"] = b["date"]
+    if b["val"] <= 0: return None
+    if a["val"] <= 0:
+        a["val"], a["ok"], a["batches"] = b["val"], b["ok"], list(b["batches"]); return None
+    if abs(a["val"] - b["val"]) < 0.005: return None
+    if not a["ok"] and b["ok"]:
+        a["val"], a["ok"], a["batches"] = b["val"], True, list(b["batches"]); return None
+    if a["ok"] and not b["ok"]: return None
+    a["ok"] = False
+    return b["val"]
+
+# ---------- محرك OCR (RapidOCR ← Tesseract) ----------
+_OCR = {"engine": None, "name": None, "tried": False, "err": ""}
+
+def _find_tesseract():
+    cands = []
+    for base in (os.path.dirname(os.path.abspath(sys.argv[0])), getattr(sys, "_MEIPASS", "")):
+        if base: cands += [os.path.join(base, "tesseract", "tesseract.exe"), os.path.join(base, "tesseract.exe")]
+    w = shutil.which("tesseract")
+    if w: cands.append(w)
+    cands += [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]
+    for c in cands:
+        if c and os.path.isfile(c): return c
+    return None
+
+def pos_ocr_init():
+    """يجهّز أول محرك متاح. يرجّع اسمه أو None (والسبب في _OCR['err'])."""
+    if _OCR["tried"] and _OCR["name"]: return _OCR["name"]
+    _OCR["tried"] = True
+    errs = []
+    # import ثابت (مش __import__) علشان PyInstaller يشوفه ويضمّه في الـ exe
+    try:
+        from rapidocr_onnxruntime import RapidOCR as _R1
+        _OCR["engine"], _OCR["name"], _OCR["err"] = _R1(), "rapidocr1", ""
+        return "rapidocr1"
+    except Exception as e:
+        errs.append(f"rapidocr_onnxruntime: {type(e).__name__}: {e}")
+    try:
+        from rapidocr import RapidOCR as _R3
+        _OCR["engine"], _OCR["name"], _OCR["err"] = _R3(), "rapidocr3", ""
+        return "rapidocr3"
+    except Exception as e:
+        errs.append(f"rapidocr: {type(e).__name__}: {e}")
+    try:
+        import pytesseract
+        exe = _find_tesseract()
+        if exe:
+            pytesseract.pytesseract.tesseract_cmd = exe
+            pytesseract.get_tesseract_version()
+            _OCR["engine"], _OCR["name"] = pytesseract, "tesseract"
+            _OCR["err"] = ""
+            return "tesseract"
+        errs.append("tesseract.exe not found")
+    except Exception as e:
+        errs.append(f"pytesseract: {type(e).__name__}: {e}")
+    _OCR["err"] = "\n".join(errs)
+    try: log_exception("pos_ocr_init", Exception(_OCR["err"]))
+    except Exception: pass
+    return None
+
+def pos_prepare_image(img, enhance=False):
+    from PIL import Image, ImageOps, ImageFilter
+    img = ImageOps.exif_transpose(img).convert("L")
+    w, h = img.size
+    mx = max(w, h)
+    if mx > 3200:
+        s = 3200 / mx; img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
+    elif w < 1000 and not enhance:
+        img = img.resize((w * 2, h * 2), Image.LANCZOS)
+    if enhance:
+        img = img.resize((int(img.width * 1.5), int(img.height * 1.5)), Image.LANCZOS)
+        img = ImageOps.autocontrast(img, cutoff=2).filter(ImageFilter.UnsharpMask(2, 150, 3))
+    else:
+        img = ImageOps.autocontrast(img, cutoff=1)
+    return img
+
+def pos_ocr_lines(pil_img, enhance=False):
+    """صورة PIL → قايمة OcrLine بمواقعها."""
+    name = pos_ocr_init()
+    if not name:
+        raise RuntimeError(T2("مفيش محرك OCR. ثبّت: pip install rapidocr_onnxruntime (أو Tesseract).",
+                              "No OCR engine. Install: pip install rapidocr_onnxruntime (or Tesseract)."))
+    from PIL import ImageOps
+    base = ImageOps.exif_transpose(pil_img)
+    img = pos_prepare_image(base, enhance)
+    sc = img.width / float(base.width)      # الإحداثيات بترجع بالنسبة للصورة الأصلية مش المكبّرة
+    out = []
+    if name.startswith("rapidocr"):
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        res = _OCR["engine"](arr)
+        if name == "rapidocr1":
+            items = res[0] or []
+            for box, txt, _sc in items:
+                xs = [p[0] for p in box]; ys = [p[1] for p in box]
+                if str(txt).strip(): out.append(OcrLine(str(txt).strip(), min(xs) / sc, max(xs) / sc, min(ys) / sc, max(ys) / sc))
+        else:
+            boxes = getattr(res, "boxes", None); txts = getattr(res, "txts", None)
+            if boxes is not None and txts is not None:
+                for box, txt in zip(boxes, txts):
+                    xs = [p[0] for p in box]; ys = [p[1] for p in box]
+                    if str(txt).strip(): out.append(OcrLine(str(txt).strip(), min(xs) / sc, max(xs) / sc, min(ys) / sc, max(ys) / sc))
+        return out
+    # tesseract
+    pt = _OCR["engine"]
+    psm = 6 if img.height > img.width * 1.4 else 3
+    d = pt.image_to_data(img, lang="eng", config=f"--oem 1 --psm {psm}", output_type=pt.Output.DICT)
+    groups = {}
+    for i, txt in enumerate(d["text"]):
+        txt = (txt or "").strip()
+        if not txt or float(d["conf"][i]) < 0: continue
+        k = (d["block_num"][i], d["par_num"][i], d["line_num"][i])
+        l, t, w, h = d["left"][i], d["top"][i], d["width"][i], d["height"][i]
+        g = groups.setdefault(k, {"w": [], "l": l, "r": l + w, "t": t, "b": t + h})
+        g["w"].append(txt); g["l"] = min(g["l"], l); g["r"] = max(g["r"], l + w)
+        g["t"] = min(g["t"], t); g["b"] = max(g["b"], t + h)
+    for g in groups.values():
+        out.append(OcrLine(" ".join(g["w"]), g["l"] / sc, g["r"] / sc, g["t"] / sc, g["b"] / sc))
+    return out
+
+def pos_pdf_pages(pdf_path, dpi=200, max_pages=400):
+    """صفحات PDF كصور PIL (pypdfium2)."""
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        raise RuntimeError(T2("محتاج: pip install pypdfium2", "Need: pip install pypdfium2"))
+    pdf = pdfium.PdfDocument(pdf_path)
+    try:
+        for i in range(min(len(pdf), max_pages)):
+            page = pdf[i]
+            w, h = page.get_size()
+            scale = dpi / 72.0
+            if max(w, h) * scale > 3000: scale = 3000 / max(w, h)
+            yield page.render(scale=scale).to_pil().convert("RGB")
+    finally:
+        try: pdf.close()
+        except Exception: pass
+
+POS_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
+
+def pos_collect_files(paths, exts):
+    """يقبل ملفات وفولدرات (مرتبة أو لأ). يرجّع قايمة ملفات."""
+    out = []
+    for p in paths:
+        if os.path.isdir(p):
+            for dp, _dn, fns in os.walk(p):
+                for f in fns:
+                    if f.lower().endswith(exts) and not f.startswith("."): out.append(os.path.join(dp, f))
+        elif os.path.isfile(p) and p.lower().endswith(exts):
+            out.append(p)
+    seen, res = set(), []
+    for f in sorted(out, key=lambda x: (os.path.dirname(x), os.path.basename(x).lower())):
+        if f not in seen: seen.add(f); res.append(f)
+    return res
+
+
+# ================= إيصالات الدفع: عدّ + تعريف الماكينة + التسمية =================
+_PDATE_RE = re.compile(r"(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})")
+
+def _pos_day_key(text):
+    for m in _PDATE_RE.finditer(text):
+        mo, d = int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31: return f"{d}.{mo}"
+    return None
+
+def _pos_anchor_of(t):
+    """None = مفيش RRN | 12 رقم = RRN كامل | 'P' = RRN ناقص."""
+    m = re.search(r"R{1,2}N\W{0,3}((?:\d\s?){9,12})", t, re.I) or re.search(r"(?<!\d)(63(?:\d\s?){7,10})(?!\d)", t)
+    if not m: return None
+    d = re.sub(r"\s", "", m.group(1))
+    if len(d) < 9: return None
+    if len(d) == 12 and d.startswith("63"): return d
+    return "P"
+
+class PosCollector:
+    def __init__(self):
+        self.pages, self.texts, self.page_h = [], [], 3000.0
+    def new_page(self, page_h):
+        self.pages.append([]); self.page_h = float(page_h)
+    def add(self, rrn, day, l, r, cy):
+        for a in self.pages[-1]:
+            if a["l"] < r and l < a["r"] and abs(a["cy"] - cy) < self.page_h * 0.012:
+                a["rrn"] = a["rrn"] or rrn; a["day"] = a["day"] or day; return
+        self.pages[-1].append({"rrn": rrn, "day": day, "l": l, "r": r, "cy": cy})
+    def collect(self, lines, x0=0.0, scale=1.0):
+        self.texts.append(pos_reading_text(lines))
+        dates = [l for l in lines if _pos_day_key(l.text)]
+        for l in lines:
+            a = _pos_anchor_of(l.text)
+            if a is None: continue
+            day = _pos_day_key(l.text)
+            if day is None:
+                best, bd = None, 1e18
+                for d in dates:
+                    dy = abs(d.cy - l.cy)
+                    if dy > l.h * 5: continue
+                    if not (d.left < l.right + 60 and l.left < d.right + 60): continue
+                    if dy < bd: bd, best = dy, d
+                if best: day = _pos_day_key(best.text)
+            self.add(None if a == "P" else a, day, x0 + l.left / scale, x0 + l.right / scale, l.cy / scale)
+    def finish(self):
+        r = {"full": 0, "partial": 0, "rrn_day": {}, "non_payment": False, "tid": None, "day": None,
+             "month": None, "other_day": [], "seq_min": None, "seq_max": None, "seq_missing": []}
+        seen, days, partial_days = set(), {}, []
+        for a in (x for p in self.pages for x in p):
+            if a["rrn"]:
+                if a["rrn"] not in seen:
+                    seen.add(a["rrn"]); r["full"] += 1; r["rrn_day"][a["rrn"]] = a["day"]
+                    if a["day"]: days[a["day"]] = days.get(a["day"], 0) + 1
+            else:
+                r["partial"] += 1
+                if a["day"]: partial_days.append(a["day"]); days[a["day"]] = days.get(a["day"], 0) + 1
+        allt = "\n".join(self.texts)
+        r["non_payment"] = bool(re.search(r"GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF", allt, re.I))
+        r["tid"] = pos_identify_tid(allt)
+        if not days:
+            for m in _PDATE_RE.finditer(allt):
+                k = _pos_day_key(m.group(0))
+                if k: days[k] = days.get(k, 0) + 1
+        if days:
+            best = max(days.items(), key=lambda kv: kv[1])[0]
+            r["day"], r["month"] = best.split(".")
+            for rrn, d in r["rrn_day"].items():
+                if d and d != best: r["other_day"].append(f"إيصال {rrn[6:]} بتاريخ {d}")
+            for d in partial_days:
+                if d != best: r["other_day"].append(f"إيصال (رقمه مش واضح) بتاريخ {d}")
+        nums = sorted(int(k[6:]) for k in r["rrn_day"])
+        if len(nums) >= 2:
+            best_start, best_len, start = 0, 1, 0
+            for i in range(1, len(nums) + 1):
+                if i == len(nums) or nums[i] - nums[i - 1] > 15:
+                    if i - start > best_len: best_len, best_start = i - start, start
+                    start = i
+            cl = nums[best_start:best_start + best_len]
+            r["seq_min"], r["seq_max"] = cl[0], cl[-1]
+            have = set(cl)
+            r["seq_missing"] = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
+        r["count"] = r["full"] + r["partial"]
+        return r
+
+def pos_identify_tid(text):
+    votes = {}
+    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
+        c = POS_TID_FIX.get(m.group(1), m.group(1))
+        if c in POS_TERMINALS: votes[c] = votes.get(c, 0) + 1
+    if votes: return max(votes.items(), key=lambda kv: kv[1])[0]
+    return pos_find_terminal([text]) or pos_find_terminal_fuzzy([text])
+
+def pos_machine_new_name(tid, day, month):
+    order, row, unit = POS_TERMINALS[tid]
+    same = sorted((v[0] for v in POS_TERMINALS.values() if v[1] == row))
+    k = same.index(order) + 1
+    parts = [str(order), re.sub(r"\s+", ".", unit.strip())]
+    if len(same) > 1: parts.append(str(k))
+    parts += ["يوم", str(day), str(month)]
+    return ".".join(parts)
+
+def pos_count_pdf(pdf_path, progress=None, stop=None):
+    """يعدّ إيصالات الدفع في PDF ويعرّف الماكينة واليوم. صفحة كاملة + 5 شرائح رأسية متداخلة."""
+    from PIL import Image
+    col = PosCollector()
+    n_pages = 0
+    for page in pos_pdf_pages(pdf_path):
+        if stop and stop(): break
+        n_pages += 1
+        if progress: progress(f"صفحة {n_pages}")
+        w, h = page.size
+        col.new_page(h)
+        col.collect(pos_ocr_lines(page), 0, 1.0)
+        n = 5; cw = w / n
+        for i in range(n):
+            x0 = max(0, int(round(i * cw - cw * 0.12))); x1 = min(w, int(round((i + 1) * cw + cw * 0.12)))
+            strip = page.crop((x0, 0, x1, h))
+            strip = strip.resize((int(strip.width * 1.5), int(strip.height * 1.5)), Image.LANCZOS)
+            col.collect(pos_ocr_lines(strip), x0, 1.5)
+    res = col.finish()
+    res["pages"] = n_pages
+    return res
+
+# ================= التقفيل: قراءة الصور → ترقيم → PDF + إكسيل =================
+def _pos_same_day(a, b): return a.get("date") == b.get("date") or a.get("date") is None or b.get("date") is None
+
+def pos_apply_tid(item, tid):
+    info = POS_TERMINALS[tid]
+    item["tid"], item["order"], item["row"], item["unit"] = tid, info[0], info[1], info[2]
+
+def pos_closing_scan(files, auto_rotate=True, progress=None, stop=None, work_dir=None):
+    """يقرا صور/صفحات PDF (من أي مكان وبأي ترتيب). يرجّع (items, warnings, excluded_names)."""
+    from PIL import Image, ImageOps
+    work_dir = work_dir or tempfile.mkdtemp(prefix="a2r_pos_")
+    os.makedirs(work_dir, exist_ok=True)
+    work = []
+    for f in files:
+        if f.lower().endswith(".pdf"):
+            n = 0
+            for pg in pos_pdf_pages(f):
+                n += 1
+                p = os.path.join(work_dir, f"src_{len(work)}_p{n}.png"); pg.save(p)
+                work.append((p, f"{os.path.basename(f)} (ص{n})"))
+        else:
+            work.append((f, os.path.basename(f)))
+    items, warnings, excluded = [], [], []
+    for i, (path, label) in enumerate(work):
+        if stop and stop(): break
+        if progress: progress(i, len(work), label)
+        try:
+            img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+            lines = pos_ocr_lines(img); text = pos_reading_text(lines)
+            is_rec = pos_receipt_score(text) >= 2 or pos_find_terminal([text]) is not None
+            skip_pay = False
+            if is_rec and pos_classify(text) == "payment": is_rec, skip_pay = False, True
+            cur = img
+            if not is_rec and not skip_pay and auto_rotate:
+                for deg in (90, 270, 180):
+                    im2 = img.rotate(deg, expand=True)
+                    l2 = pos_ocr_lines(im2); t2 = pos_reading_text(l2)
+                    if (pos_receipt_score(t2) >= 2 or pos_find_terminal([t2]) is not None) and pos_classify(t2) != "payment":
+                        lines, cur, is_rec = l2, im2, True; break
+            if not is_rec:
+                if skip_pay: excluded.append(label)
+                continue
+            a = pos_analyze_lines(lines)
+            alt = None
+            if (not a["ok"]) or a["tid"] is None or a["row"] is None or a["val"] <= 0:
+                try: alt = pos_merge_second(a, pos_analyze_lines(pos_ocr_lines(cur, enhance=True)))
+                except Exception as e: log_exception("pos_second_read", e)
+            if a["tid"] is None:                      # اسم الملف رقم الماكينة (1..19)؟
+                stem = os.path.splitext(os.path.basename(path))[0]
+                if stem.isdigit() and int(stem) in POS_NUM_TO_TID:
+                    ft = POS_NUM_TO_TID[int(stem)]
+                    if a["row"] is None or POS_TERMINALS[ft][1] == a["row"]:
+                        a["tid"], a["how"] = ft, "file-number"
+            outp = os.path.join(work_dir, f"rc_{len(items)}.jpg"); cur.save(outp, quality=92)
+            it = {"path": outp, "label": label, "tid": None, "order": None, "row": a["row"], "unit": a["unit"],
+                  "amount": a["val"], "date": a["date"], "ok": a["ok"], "how": a["how"], "alt": alt,
+                  "batches": a["batches"], "skip": False, "suffix": None, "conflict": False, "orig_tid": None, "include": True}
+            if a["tid"]: pos_apply_tid(it, a["tid"])
+            items.append(it)
+        except Exception as e:
+            log_exception(f"pos_closing:{label}", e)
+            warnings.append(f"{label}: فشلت القراءة")
+    return items, warnings, excluded
+
+def pos_closing_number(items, warnings):
+    """تكرار + ترقيم الماكينات + تحذيرات (نفس منطق التطبيق)."""
+    prio = {"manual": 0, "terminal": 0, "fuzzy": 1, "file-number": 2}
+    with_tid = sorted([r for r in items if r["tid"]], key=lambda r: (prio.get(r["how"], 3), items.index(r)))
+    taken = {}
+    for r in with_tid:
+        n = r["order"]; prev = taken.get(n)
+        if prev is None: taken[n] = r
+        elif r["amount"] > 0 and abs(prev["amount"] - r["amount"]) < 0.005 and _pos_same_day(prev, r):
+            r["skip"] = True
+            warnings.append(f"{r['label']}: نفس الماكينة {n} ونفس المبلغ {r['amount']:.2f} (إيصال مكرر) - تم استبعاده")
+        else:
+            r["orig_tid"], r["tid"], r["conflict"] = r["tid"], None, True
+    used = set()
+    def give_suffix(r):
+        k = 2
+        while (r["orig_tid"], k) in used: k += 1
+        used.add((r["orig_tid"], k))
+        pos_apply_tid(r, r["orig_tid"]); r["suffix"], r["how"] = k, "extra-batch"
+    for r in items:
+        if r["skip"] or r["tid"] or r["row"] is None: continue
+        if r["conflict"] and r["how"] in ("terminal", "fuzzy"): give_suffix(r); continue
+        free = [n for n in range(1, 20) if POS_TERMINALS[POS_NUM_TO_TID[n]][1] == r["row"] and n not in taken]
+        if free:
+            n = free[0]; pos_apply_tid(r, POS_NUM_TO_TID[n]); taken[n] = r
+            r["how"] = "conflict" if r["conflict"] else "auto-number"
+        elif r["orig_tid"]: give_suffix(r)
+    kept = [r for r in items if not r["skip"]]
+    votes = [r["date"] for r in kept if r["date"]]
+    main_date = _most_common(votes)[0] if votes else None
+    for r in kept:
+        nm = r["label"]
+        if main_date and r["date"] and r["date"] != main_date:
+            warnings.append(f"{nm}: تاريخ الإيصال {r['date']} بينما أغلب الإيصالات {main_date}")
+        if r["row"] is not None and r["amount"] > 0:
+            if not r["ok"]: warnings.append(f"{nm}: {r['unit']} = {r['amount']:.2f} (راجع المبلغ يدويًا)")
+            if r["alt"] is not None: warnings.append(f"{nm}: القراءة التانية للمبلغ {r['alt']:.2f} مختلفة عن {r['amount']:.2f} - راجع الصورة")
+            if r["how"] == "extra-batch": warnings.append(f"{nm}: الماكينة {r['order']} ظهرت بمبلغ مختلف - اتحسبت كباتش إضافي {r['suffix']}")
+            elif r["how"] in ("auto-number", "conflict"): warnings.append(f"{nm}: رقم الماكينة اتحدد تلقائيًا ({r['order']}) - اتأكد منه")
+            elif r["how"] not in ("terminal", "fuzzy", "manual"): warnings.append(f"{nm}: الوحدة اتحددت بالاسم/الميرشانت فقط")
+        else:
+            warnings.append(f"{nm}: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل")
+    return items
+
+def _pos_find_template(extra_dirs=()):
+    names = ("الاسكندريه 00.xlsx", "الاسكندريه_00.xlsx", "template.xlsx")
+    dirs = [os.path.dirname(os.path.abspath(sys.argv[0])), getattr(sys, "_MEIPASS", ""), DOCUMENTS_DIR, *extra_dirs]
+    for d in dirs:
+        for n in names:
+            if d and os.path.isfile(os.path.join(d, n)): return os.path.join(d, n)
+    return None
+
+def _pos_images_to_pdf(paths, out_pdf):
+    from PIL import Image
+    W, H, M = 1240, 1754, 60       # A4 @150dpi
+    pages = []
+    for p in paths:
+        try:
+            im = Image.open(p).convert("RGB")
+            s = min((W - 2 * M) / im.width, (H - 2 * M) / im.height)
+            im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))), Image.LANCZOS)
+            pg = Image.new("RGB", (W, H), "white"); pg.paste(im, ((W - im.width) // 2, (H - im.height) // 2))
+            pages.append(pg)
+        except Exception as e: log_exception(f"pos_pdf_page:{p}", e)
+    if not pages: return False
+    pages[0].save(out_pdf, "PDF", resolution=150.0, save_all=True, append_images=pages[1:])
+    return True
+
+def pos_closing_build(items, out_dir, template_path=None):
+    """يطلع: PDF مجمّع + صور مرقّمة + إكسيل من القالب. يرجّع dict بالنتايج."""
+    os.makedirs(out_dir, exist_ok=True)
+    kept = [r for r in items if not r["skip"] and r.get("include", True)]
+    cnt = {}
+    for r in kept:
+        if r["date"]: cnt[r["date"]] = cnt.get(r["date"], 0) + 1
+    report_date = max(cnt.items(), key=lambda kv: kv[1])[0] if cnt else "اليوم"
+    kept.sort(key=lambda r: (r["order"] if r["order"] is not None else 99, r["suffix"] or 1))
+    main = [r for r in kept if r["date"] is None or r["date"] == report_date]
+    others = {}
+    for r in kept:
+        if r["date"] and r["date"] != report_date: others.setdefault(r["date"], []).append(r)
+    res = {"report_date": report_date, "pdfs": [], "xlsx": None, "images_dir": None, "totals": {}, "notes": []}
+    img_dir = os.path.join(out_dir, "صور الإيصالات"); os.makedirs(img_dir, exist_ok=True)
+    res["images_dir"] = img_dir
+    used_names = set()
+    for r in kept:
+        if r["order"] is None: continue
+        sfx = f"_{r['suffix']}" if r["suffix"] else ""
+        nm, k = f"{r['order']}{sfx}", 2
+        while nm in used_names: nm = f"{r['order']}{sfx}_{k}"; k += 1     # تعديل يدوي ممكن يعمل نفس الرقم مرتين
+        used_names.add(nm)
+        dst = os.path.join(img_dir, nm + ".jpg")
+        try: shutil.copy2(r["path"], dst)
+        except Exception as e: log_exception("pos_copy_img", e)
+    main_pdf = os.path.join(out_dir, f"الاسكندريه {report_date}.pdf")
+    if _pos_images_to_pdf([r["path"] for r in main], main_pdf): res["pdfs"].append(main_pdf)
+    for d, lst in others.items():
+        f = os.path.join(out_dir, f"الاسكندريه {d}.pdf")
+        if _pos_images_to_pdf([r["path"] for r in lst], f): res["pdfs"].append(f)
+    totals = {r: 0.0 for r in range(2, 12)}
+    for r in main:
+        if r["row"] is not None and r["amount"] > 0: totals[r["row"]] += r["amount"]
+    res["totals"] = {k: _r2(v) for k, v in totals.items()}
+    tpl = template_path or _pos_find_template()
+    if not tpl or not os.path.isfile(tpl):
+        res["notes"].append("قالب الإكسيل (الاسكندريه 00.xlsx) مش موجود — الإكسيل متعملش.")
+    elif not OPENPYXL_AVAILABLE:
+        res["notes"].append("openpyxl مش متثبتة — الإكسيل متعملش.")
+    else:
+        try:
+            wb = openpyxl.load_workbook(tpl); ws = wb.worksheets[0]
+            for rw in range(2, 12):
+                ws[f"D{rw}"] = res["totals"][rw]
+                ws[f"F{rw}"] = f"=D{rw}+IF(ISBLANK(E{rw}),0,E{rw})"
+            try: wb.calculation.fullCalcOnLoad = True
+            except Exception: pass
+            xf = os.path.join(out_dir, f"الاسكندريه {report_date}.xlsx"); wb.save(xf); res["xlsx"] = xf
+        except Exception as e:
+            log_exception("pos_fill_template", e); res["notes"].append(f"فشل ملء القالب: {e}")
+    return res
+
+def pos_make_tree(parent, t, columns, headers, widths):
+    style = ttk.Style()
+    try: style.theme_use("clam")
+    except Exception: pass
+    style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
+                    font=(FONT_FAMILY, 10, "bold"), rowheight=28)
+    style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"], font=(FONT_FAMILY, 11, "bold"), relief="flat")
+    style.map("A2R.Treeview", background=[("selected", t["primary"])], foreground=[("selected", "#FFFFFF")])
+    fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+    fr.pack(fill="both", expand=True, padx=12, pady=(4, 2))
+    tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
+    for c in columns:
+        tree.heading(c, text=headers[c]); tree.column(c, width=widths.get(c, 90), anchor="center")
+    for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
+        tree.tag_configure(kind, background=bg, foreground=fg)
+    vsb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview); vsb.pack(side="right", fill="y", padx=2, pady=2)
+    tree.configure(yscrollcommand=vsb.set); tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
+    return tree
+
+SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
 EMPLOYEE_PASSWORDS = [
     "ahmedramadan", "a2r", "ahmed.r",
     "1531", "20262", "2026", "16061993", "1558", "1964",
@@ -2373,240 +3044,6 @@ class AdminPasswordDialog(ctk.CTkToplevel):
         self.e.bind("<Return>", _chk)
         ctk.CTkButton(self, text="Unlock", font=FONT_BTN_SUB, fg_color=t["primary"], command=_chk).pack(pady=8)
 
-class AdvancedLoginGate(ctk.CTkToplevel):
-    def __init__(self, parent, on_success):
-        super().__init__(parent)
-        self.parent = parent
-        self.on_success = on_success
-        self.title("Advanced Authorization")
-        self.resizable(False, False)
-        set_window_icon_safe(self)
-        center_window_relative(self, parent, 360, 205)
-
-        t = THEMES[parent.current_theme_name]
-        self.configure(fg_color=t["bg"])
-
-        ctk.CTkLabel(self, text="A2R ADVANCED TOOLS", font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 1))
-        ctk.CTkLabel(self, text=tr("adv_login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 6))
-
-        f_entry = ctk.CTkFrame(self, fg_color="transparent")
-        f_entry.pack(fill="x", padx=24, pady=4)
-
-        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", font=(FONT_FAMILY, 13, "bold"),
-                                  text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.e_pwd.bind("<Return>", lambda e: self.check_pwd())
-        attach_context_menu(self.e_pwd)
-
-        self.pwd_visible = False
-        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=35, command=self.toggle_eye, fg_color=t["card"], text_color=t["text"])
-        self.btn_eye.pack(side="right")
-
-        self.lbl_err = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_err.pack(pady=(1, 0))
-
-        btn_enter = ctk.CTkButton(self, text=tr("done"), font=FONT_BTN_MAIN,
-                                  fg_color="#4F46E5", hover_color="#4338CA", text_color="#FFFFFF", command=self.check_pwd)
-        btn_enter.pack(fill="x", padx=24, pady=(6, 4))
-
-        self.after(150, self.e_pwd.focus_set)
-
-    def toggle_eye(self):
-        if self.pwd_visible:
-            self.e_pwd.configure(show="•")
-            self.btn_eye.configure(text="👁️")
-            self.pwd_visible = False
-        else:
-            self.e_pwd.configure(show="")
-            self.btn_eye.configure(text="🙈")
-            self.pwd_visible = True
-
-    def check_pwd(self):
-        val = self.e_pwd.get().strip()
-        import hashlib
-        h_val = hashlib.sha256(val.encode('utf-8')).hexdigest()
-        if h_val == ADVANCED_ADMIN_HASH:
-            self.destroy()
-            self.on_success()
-        else:
-            self.lbl_err.configure(text=tr("access_denied"))
-            self.e_pwd.delete(0, 'end')
-            try: winsound.MessageBeep(winsound.MB_ICONHAND)
-            except: pass
-
-class AdvancedToolsWindow(ctk.CTkToplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent_app = parent
-        self.title("Admin Control Panel")
-        self.resizable(False, False)
-        set_window_icon_safe(self)
-        center_window_relative(self, parent, 620, 390)
-        
-        t = THEMES[parent.current_theme_name]
-        self.configure(fg_color=t["bg"])
-
-        ctk.CTkLabel(self, text="⚙️ لوحة تحكم المشرف (Admin Control Panel)", font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(14, 10))
-
-        # Section 1: Data & Archives
-        f_data = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
-        f_data.pack(fill="x", padx=20, pady=(0, 10))
-        ctk.CTkLabel(f_data, text="التقارير وسجل الأرشيف", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
-        
-        f_data_btns = ctk.CTkFrame(f_data, fg_color="transparent")
-        f_data_btns.pack(fill="x", padx=10, pady=(6, 12))
-        
-        btn_excel = ctk.CTkButton(f_data_btns, text=tr("open_excel"), font=FONT_BTN_SUB, fg_color="#059669", hover_color="#047857", text_color="#FFFFFF", height=32, command=self.parent_app.open_excel_direct)
-        btn_excel.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        
-        btn_arch_hist = ctk.CTkButton(f_data_btns, text=tr("arch_hist_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=32, command=self.parent_app.open_archive_history)
-        btn_arch_hist.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        
-        btn_clean = ctk.CTkButton(f_data_btns, text=tr("clean_downloads"), font=FONT_BTN_SUB, fg_color="#1E293B", hover_color="#334155", border_width=1, border_color="#38BDF8", text_color="#FFFFFF", height=32, command=self.parent_app.open_downloads_archiver_dialog)
-        btn_clean.pack(side="left", fill="x", expand=True, padx=(4, 4))
-
-        # Section 2: Smart Processing (Batching & Receipts)
-        f_smart = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
-        f_smart.pack(fill="x", padx=20, pady=(0, 10))
-        ctk.CTkLabel(f_smart, text="المعالجة الذكية والتقفيل (OCR & OpenCV)", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
-
-        f_dir = ctk.CTkFrame(f_smart, fg_color="transparent")
-        f_dir.pack(fill="x", padx=10, pady=(6, 6))
-        ctk.CTkLabel(f_dir, text=tr("adv_pick_folder"), font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", pady=(0, 2))
-        
-        f_in = ctk.CTkFrame(f_dir, fg_color="transparent")
-        f_in.pack(fill="x")
-        self.e_path = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=30, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        btn_browse = ctk.CTkButton(f_in, text=tr("browse"), width=70, height=30, font=FONT_BTN_SUB, fg_color=t["primary"], command=self.browse_folder)
-        btn_browse.pack(side="left")
-
-        f_smart_btns = ctk.CTkFrame(f_smart, fg_color="transparent")
-        f_smart_btns.pack(fill="x", padx=10, pady=(0, 12))
-        
-        btn_receipts = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_receipts"), height=36, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
-        btn_receipts.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        
-        btn_batch = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_batch"), height=36, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
-        btn_batch.pack(side="left", fill="x", expand=True, padx=(4, 4))
-
-        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], wraplength=580)
-        self.lbl_status.pack(pady=(0, 10))
-
-    def browse_folder(self):
-        f = filedialog.askdirectory()
-        if f:
-            self.e_path.delete(0, 'end')
-            self.e_path.insert(0, f)
-
-    def run_action(self, action_type):
-        path = self.e_path.get().strip()
-        if not path or not os.path.exists(path):
-            self.lbl_status.configure(text=tr("adv_err_dir"), text_color="#EF4444")
-            try: winsound.MessageBeep(winsound.MB_ICONHAND)
-            except: pass
-            return
-            
-        if not ADVANCED_LIBS_OK:
-            messagebox.showerror("Missing Libraries", "عذراً، مكتبات معالجة الصور (OpenCV/Numpy) غير مثبتة. يرجى تحديث requirements.txt على جيت هاب لكي تعمل الميزة.")
-            return
-            
-        self.lbl_status.configure(text="جاري معالجة الصور وإصلاح المنظور...", text_color="#F59E0B")
-        self.update()
-        
-        threading.Thread(target=self._process_images_thread, args=(path, action_type), daemon=True).start()
-
-    def _process_images_thread(self, folder_path, action_type):
-        try:
-            out_dir = os.path.join(folder_path, "_Enhanced")
-            os.makedirs(out_dir, exist_ok=True)
-            
-            image_files = []
-            for fname in os.listdir(folder_path):
-                if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    image_files.append(os.path.join(folder_path, fname))
-                    
-            if not image_files:
-                self.after(0, lambda: self.lbl_status.configure(text="لا توجد صور في المجلد المختار!", text_color="#EF4444"))
-                return
-                
-            processed = 0
-            results_data = []
-            
-            for i, img_path in enumerate(image_files):
-                filename = os.path.basename(img_path)
-                out_path = os.path.join(out_dir, "clean_" + filename)
-                
-                self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري التنظيف: {f}...", text_color="#38BDF8"))
-                
-                if process_and_enhance_image(img_path, out_path):
-                    self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري قراءة البيانات (OCR): {f}...", text_color="#F59E0B"))
-                    try:
-                        img_for_ocr = Image.open(out_path)
-                        text = pytesseract.image_to_string(img_for_ocr, lang='eng')
-                        parsed = parse_pos_receipt(text)
-                        
-                        unit_name = "غير معروف"
-                        if parsed["tid"]:
-                            for u, t in UNIT_TERMINALS.items():
-                                if t == parsed["tid"]:
-                                    unit_name = u
-                                    break
-                                    
-                        results_data.append({
-                            "file": filename,
-                            "tid": parsed["tid"],
-                            "unit": unit_name,
-                            "total": parsed["total"],
-                            "batch": parsed["batch"],
-                            "date": parsed["date"],
-                            "is_valid": parsed["is_valid_batch"],
-                            "type": parsed["type"]
-                        })
-                        if parsed["is_valid_batch"]:
-                            processed += 1
-                    except Exception as e:
-                        log_exception(f"ocr_error: {filename}", e)
-            
-            if results_data:
-                report_path = os.path.join(out_dir, "Review_Report.txt")
-                with open(report_path, "w", encoding="utf-8") as rf:
-                    rf.write("=== تقرير مراجعة إيصالات الدفع والتقفيل ===\n\n")
-                    grand_sum = 0.0
-                    excluded_files = []
-                    
-                    for r in results_data:
-                        if not r['is_valid']:
-                            excluded_files.append(r)
-                            continue
-                            
-                        rf.write(f"الملف: {r['file']}\n")
-                        rf.write(f"التاريخ: {r['date']}\n")
-                        rf.write(f"الماكينة: {r['tid'] or 'غير مقروء'} ({r['unit']})\n")
-                        rf.write(f"النوع: {r['type']}\n")
-                        rf.write(f"رقم الباتش: {r['batch']}\n")
-                        rf.write(f"الإجمالي: {r['total']:,.2f} ج.م\n")
-                        rf.write("-" * 40 + "\n")
-                        grand_sum += r['total']
-                        
-                    rf.write(f"\nالإجمالي العام للتقفيلات الصحيحة: {grand_sum:,.2f} ج.م\n")
-                    
-                    if excluded_files:
-                        rf.write("\n\n=== الملفات المستبعدة (ليست إيصالات تقفيل/ملخص) ===\n")
-                        for ex in excluded_files:
-                            rf.write(f"- {ex['file']} (السبب: {ex['type']})\n")
-                    
-            msg = f"تم بنجاح معالجة وقراءة {processed} صورة وإنشاء التقرير"
-            self.after(0, lambda: self.lbl_status.configure(text=msg, text_color="#10B981"))
-            self.after(0, lambda: messagebox.showinfo("نجاح المعالجة", msg))
-            
-            if os.path.exists(out_dir):
-                os.startfile(out_dir)
-                
-        except Exception as e:
-            self.after(0, lambda: self.lbl_status.configure(text="حدث خطأ أثناء المعالجة!", text_color="#EF4444"))
-            log_exception("adv_thread", e)
-
 class CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
         if val == "": return True
@@ -2886,12 +3323,6 @@ class CustomTkinterApp(ctk.CTk):
         self._cancel_auto_minimize()
         ElevateLoginGate(self, self.unlock_full_console)
 
-    def request_advanced_tools(self):
-        AdvancedLoginGate(self, self.open_advanced_window)
-
-    def open_advanced_window(self):
-        AdvancedToolsWindow(self)
-
     def unlock_full_console(self, is_supervisor):
         self.is_supervisor = is_supervisor
 
@@ -2903,10 +3334,16 @@ class CustomTkinterApp(ctk.CTk):
 
         self.btn_excel.pack_forget()
         self.btn_arch_hist.pack_forget()
+        self.btn_pos_close.pack_forget()
+        self.btn_pos_pay.pack_forget()
         self.btn_chrome.pack_forget()
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
+            self.btn_excel.pack(side="left", padx=2)
+            self.btn_arch_hist.pack(side="left", padx=2)
+            self.btn_pos_close.pack(side="left", padx=2)
+            self.btn_pos_pay.pack(side="left", padx=2)
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
@@ -2986,11 +3423,10 @@ class CustomTkinterApp(ctk.CTk):
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
-        if hasattr(self, 'body_full'): self.body_full.pack_forget()
-        if hasattr(self, 'b_bar'): self.b_bar.pack_forget()
-        if hasattr(self, 'btn_back_to_mini'): self.btn_back_to_mini.pack_forget()
-        if hasattr(self, 'f_role_btn'): self.f_role_btn.pack_forget()
-        if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.pack_forget()
+        self.body_full.pack_forget()
+        self.b_bar.pack_forget()
+        self.btn_back_to_mini.pack_forget()
+        self.f_role_btn.pack_forget()
         
         self.btn_elevate.pack(side="right", padx=(6, 0))
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
@@ -3021,8 +3457,8 @@ class CustomTkinterApp(ctk.CTk):
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 590, 500
-        self.minsize(590, 500)
+        width, height = 590, 465
+        self.minsize(590, 465)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -3157,13 +3593,40 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
 
         self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
-        self.b_bar.pack_propagate(False)
-        
-        self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF")
-        self.lbl_foot.pack(side="left", padx=14, pady=8)
+        self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
+        self.btn_center_box.pack(anchor="center", pady=(2, 0))
 
-        self.btn_admin_panel = ctk.CTkButton(self.b_bar, text=tr("btn_admin_panel"), font=FONT_BTN_SUB, fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF", width=130, height=28, command=self.request_advanced_tools)
-        self.btn_admin_panel.pack(side="right", padx=14, pady=7)
+        self.btn_view_rec = ctk.CTkButton(
+            self.btn_center_box, width=115, height=25, font=(FONT_FAMILY, 10, "bold"),
+            text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
+            command=self.open_records_viewer
+        )
+        self.btn_view_rec.pack(side="left", padx=2)
+
+        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=25, font=FONT_BTN_SUB,
+                                           fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
+        self.btn_pdf_export.pack(side="left", padx=2)
+
+        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
+                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
+        self.btn_print_slip.pack(side="left", padx=2)
+
+        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
+                                       height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
+
+        self.btn_arch_hist = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
+                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
+        self.btn_pos_close = ctk.CTkButton(self.btn_center_box, fg_color="#0F766E", hover_color="#115E59", width=105,
+                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_pos_closing)
+        self.btn_pos_pay = ctk.CTkButton(self.btn_center_box, fg_color="#B45309", hover_color="#92400E", width=105,
+                                         height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_pos_payments)
+
+        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
+                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
+
+        lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+                                font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
+        lbl_foot.pack(anchor="center", pady=(0, 2))
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
@@ -3286,8 +3749,8 @@ class CustomTkinterApp(ctk.CTk):
         self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
         self.card_actions.pack(fill="x", pady=(0, 2))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, text=tr("start"), font=FONT_BTN_MAIN, height=36, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=10, pady=(6, 2))
+        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=10, pady=(4, 2))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
         f_prog.pack(fill="x", padx=10, pady=(0, 2))
@@ -3302,38 +3765,25 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
         self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 2))
 
-        # Reorganized Grid Actions
-        f_grid = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_grid.pack(fill="x", padx=10, pady=(0, 4))
-        
-        self.btn_view_rec = ctk.CTkButton(f_grid, text=tr("view_records"), font=FONT_BTN_SUB, fg_color="#0284C7", hover_color="#0369A1", text_color="#FFFFFF", height=30, command=self.open_records_viewer)
-        self.btn_view_rec.grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-        
-        self.btn_summary_reopen = ctk.CTkButton(f_grid, text=tr("summary_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=30, command=self.reopen_summary_modal)
-        self.btn_summary_reopen.grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-        
-        self.btn_pdf_export = ctk.CTkButton(f_grid, text=tr("export_pdf"), font=FONT_BTN_SUB, fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", height=30, command=self.export_pdf_summary)
-        self.btn_pdf_export.grid(row=0, column=2, sticky="ew", padx=3, pady=3)
+        f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_act.pack(fill="x", padx=10, pady=(0, 4))
 
-        self.btn_manual = ctk.CTkButton(f_grid, text=tr("manual"), font=FONT_BTN_SUB, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", height=30, command=self.open_manual)
-        self.btn_manual.grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-        
-        self.btn_cash = ctk.CTkButton(f_grid, text=tr("cash_btn"), font=FONT_BTN_SUB, fg_color="#0D9488", hover_color="#0F766E", text_color="#FFFFFF", height=30, command=self.open_cash_counter)
-        self.btn_cash.grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-        
-        self.btn_print_slip = ctk.CTkButton(f_grid, text=tr("print_slip"), font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309", text_color="#FFFFFF", height=30, command=self.print_slip)
-        self.btn_print_slip.grid(row=1, column=2, sticky="ew", padx=3, pady=3)
-        
-        f_grid.grid_columnconfigure((0,1,2), weight=1)
+        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=27, width=72, command=self.open_manual)
+        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 1))
 
-        f_bot = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_bot.pack(fill="x", padx=13, pady=(2, 8))
-        
-        self.btn_chrome = ctk.CTkButton(f_bot, text=tr("open_chrome"), font=FONT_BTN_SUB, fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF", height=28, width=110, command=self.open_chrome_browser)
-        self.btn_chrome.pack(side="left")
-        
-        self.btn_reset = ctk.CTkButton(f_bot, text=tr("reset"), font=FONT_BTN_SUB, fg_color="transparent", hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", text_color="#EF4444", height=28, width=70, command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right")
+        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=27, width=72, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=27, width=60, command=self.open_cash_counter)
+        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=27, width=68, command=self.open_downloads_archiver_dialog)
+        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
+                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
+                                       command=self.confirm_and_reset)
+        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
 
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
@@ -3412,7 +3862,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_manual.configure(text=L["manual"])
         self.btn_summary_reopen.configure(text=L["summary_btn"])
         self.btn_cash.configure(text=L["cash_btn"])
-        if hasattr(self, 'btn_archive_downloads'): self.btn_archive_downloads.configure(text=L["clean_downloads"])
+        self.btn_archive_downloads.configure(text=L["clean_downloads"])
         self.btn_mini_archive.configure(text=L["clean_downloads"])
         self.btn_reset.configure(text=L["reset"])
         self.lbl_kpi1_title.configure(text=L["kpi1"])
@@ -3422,10 +3872,12 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_view_rec.configure(text=L["view_records"])
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
-        if hasattr(self, 'btn_excel'): self.btn_excel.configure(text=L["open_excel"])
+        self.btn_excel.configure(text=L["open_excel"])
+        self.btn_arch_hist.configure(text=L["arch_hist_btn"])
+        self.btn_pos_close.configure(text=L["pos_close_btn"])
+        self.btn_pos_pay.configure(text=L["pos_pay_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
-        if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.configure(text=L["btn_admin_panel"])
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
@@ -3974,15 +4426,14 @@ class CustomTkinterApp(ctk.CTk):
             if self.processing_lock.locked(): self.processing_lock.release()
             self.run_on_main(lambda: self.btn_run.configure(state="normal"))
 
-    def open_excel_direct(self):
+    def open_excel(self):
+        if not self.is_supervisor:
+            messagebox.showwarning("Restricted", tr("restricted_admin"))
+            return
         if self.last_generated_file and os.path.exists(self.last_generated_file):
             os.startfile(self.last_generated_file)
         else:
             messagebox.showinfo("Notice", "Run extraction first!")
-            
-    def open_excel(self):
-        # Kept for compatibility if called elsewhere, but Admin Panel uses direct
-        self.open_excel_direct()
 
     def refresh_after_void_change(self):
         recs = self.last_detailed_records
@@ -4365,6 +4816,413 @@ class CustomTkinterApp(ctk.CTk):
         load_days()
         run_maintenance()
         win.after(150, lambda: day_q.focus_set())
+
+    # ================= أدوات POS للمشرف: التقفيل + إيصالات الدفع (بباسورد منفصل) =================
+    def _pos_gate(self):
+        if not getattr(self, "is_supervisor", False):
+            messagebox.showwarning(T2("غير مسموح", "Not allowed"), T2("هذه الأداة للمشرف فقط.", "Supervisor only."))
+            return False
+        if pos_is_unlocked(): return True
+        t = THEMES[self.current_theme_name]
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(T2("🔐 باسورد الأداة", "🔐 Tool password"))
+        dlg.resizable(False, False)
+        set_window_icon_safe(dlg)
+        center_window_relative(dlg, self, 360, 200)
+        dlg.configure(fg_color=t["bg"])
+        ok = {"v": False}
+        ctk.CTkLabel(dlg, text=T2("أدخل الباسورد الخاص بهذه الأداة", "Enter this tool's password"),
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(18, 8))
+        ent = ctk.CTkEntry(dlg, show="●", width=260, font=FONT_ENTRY, text_color=t["text"],
+                           fg_color=t["input"], border_color=t["border"])
+        ent.pack(pady=4)
+        msg = ctk.CTkLabel(dlg, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#EF4444")
+        msg.pack(pady=2)
+
+        def submit(event=None):
+            good, m = pos_check_password(ent.get())
+            if good:
+                ok["v"] = True; dlg.destroy()
+            else:
+                msg.configure(text=m); ent.delete(0, "end")
+        ent.bind("<Return>", submit)
+        ctk.CTkButton(dlg, text=T2("دخول", "Unlock"), width=120, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=submit).pack(pady=8)
+        try: dlg.lift(); dlg.grab_set(); ent.focus_set()
+        except Exception: pass
+        self.wait_window(dlg)
+        return ok["v"]
+
+    def _pos_need_ocr(self):
+        if pos_ocr_init(): return True
+        messagebox.showerror(T2("محرك OCR غير متاح", "OCR engine missing"),
+                             T2("مفيش محرك قراءة صور شغّال.\n\nالسبب الفعلي:\n", "No working OCR engine.\n\nActual reason:\n") + (_OCR.get("err") or "-") +
+                             T2("\n\nالحل: pip install rapidocr onnxruntime pypdfium2\n(لو بتشغّل exe لازم يتبني من جديد بالمكتبات دي)",
+                                "\n\nFix: pip install rapidocr onnxruntime pypdfium2\n(for an exe, rebuild it with these packages)"))
+        return False
+
+    def _pos_picker_bar(self, parent, t, st, exts, filetypes, on_change):
+        fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        fr.pack(fill="x", padx=12, pady=(10, 4))
+        r1 = ctk.CTkFrame(fr, fg_color="transparent"); r1.pack(fill="x", padx=8, pady=(8, 2))
+        r2 = ctk.CTkFrame(fr, fg_color="transparent"); r2.pack(fill="x", padx=8, pady=(2, 8))
+        lbl_src = ctk.CTkLabel(r1, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], anchor="w")
+        lbl_out = ctk.CTkLabel(r2, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], anchor="w")
+
+        def refresh():
+            files = pos_collect_files(st["sources"], exts)
+            lbl_src.configure(text=T2(f"المصدر: {len(st['sources'])} اختيار → {len(files)} ملف", f"Source: {len(st['sources'])} picks → {len(files)} files"))
+            lbl_out.configure(text=T2("الإخراج: ", "Output: ") + (st["out"] or T2("(لم يتم الاختيار)", "(not chosen)")))
+            on_change()
+
+        def add_folder():
+            d = filedialog.askdirectory(title=T2("اختر فولدر الصور / الـ PDF", "Choose folder"))
+            if d: st["sources"].append(d); refresh()
+        def add_files():
+            fs = filedialog.askopenfilenames(title=T2("اختر ملفات", "Choose files"), filetypes=filetypes)
+            if fs: st["sources"].extend(fs); refresh()
+        def clear_src():
+            st["sources"].clear(); refresh()
+        def pick_out():
+            d = filedialog.askdirectory(title=T2("اختر مكان الإخراج", "Choose output folder"))
+            if d: st["out"] = d; refresh()
+
+        for txt, cmd, col in ((T2("📁 اختيار فولدر", "📁 Add folder"), add_folder, t["primary"]),
+                              (T2("🖼️ اختيار ملفات", "🖼️ Add files"), add_files, t["primary"]),
+                              (T2("مسح", "Clear"), clear_src, "#64748B")):
+            ctk.CTkButton(r1, text=txt, width=130, height=30, font=FONT_BTN_SUB, fg_color=col, hover_color=t["primary_hover"],
+                          text_color="#FFFFFF", command=cmd).pack(side="left", padx=3)
+        lbl_src.pack(side="left", padx=10)
+        ctk.CTkButton(r2, text=T2("📂 مكان الإخراج", "📂 Output folder"), width=130, height=30, font=FONT_BTN_SUB,
+                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=pick_out).pack(side="left", padx=3)
+        lbl_out.pack(side="left", padx=10)
+        return refresh
+
+    # ---------------------------------------- التقفيل ----------------------------------------
+    def open_pos_closing(self):
+        if not self._pos_gate() or not self._pos_need_ocr(): return
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(T2("🧾 تقفيل POS", "🧾 POS Closing"))
+        set_window_icon_safe(win)
+        center_window_relative(win, self, 1100, 720)
+        win.configure(fg_color=t["bg"])
+        try: win.lift(); win.focus_force()
+        except Exception: pass
+        st = {"sources": [], "out": "", "items": [], "warnings": [], "excluded": [], "stop": False, "busy": False}
+        FT = [("Images / PDF", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf")]
+
+        status = ctk.CTkLabel(win, text=T2("اختر مكان الصور أو الـ PDF ومكان الإخراج، ثم اضغط بدء.", "Pick sources and output, then press Start."),
+                              font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w")
+        bar = ctk.CTkProgressBar(win, height=10); bar.set(0)
+
+        def update_buttons():
+            ready = bool(st["sources"]) and bool(st["out"]) and not st["busy"]
+            btn_run.configure(state="normal" if ready else "disabled")
+        refresh = self._pos_picker_bar(win, t, st, POS_IMG_EXT + (".pdf",), FT, lambda: update_buttons())
+
+        ctrl = ctk.CTkFrame(win, fg_color="transparent"); ctrl.pack(fill="x", padx=12, pady=2)
+        cb_rot = ctk.CTkCheckBox(ctrl, text=T2("تدوير الصور المقلوبة تلقائيًا", "Auto-rotate"), font=FONT_SECTION_LBL, text_color=t["text"])
+        cb_rot.select(); cb_rot.pack(side="left", padx=6)
+        btn_run = ctk.CTkButton(ctrl, text=T2("▶ بدء القراءة", "▶ Start"), width=140, height=32, font=FONT_BTN_SUB,
+                                fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", state="disabled")
+        btn_run.pack(side="left", padx=6)
+        refresh()
+        btn_stop = ctk.CTkButton(ctrl, text=T2("⏹ إيقاف", "⏹ Stop"), width=90, height=32, font=FONT_BTN_SUB,
+                                 fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF",
+                                 command=lambda: st.__setitem__("stop", True))
+        btn_stop.pack(side="left", padx=2)
+        status.pack(fill="x", padx=14, pady=(4, 0)); bar.pack(fill="x", padx=14, pady=(2, 4))
+
+        cols = ("order", "unit", "tid", "amount", "date", "status", "file")
+        hdr = {"order": T2("رقم", "No."), "unit": T2("الوحدة", "Unit"), "tid": "TID", "amount": T2("المبلغ", "Amount"),
+               "date": T2("التاريخ", "Date"), "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
+        tree = pos_make_tree(win, t, cols, hdr, {"order": 60, "unit": 150, "tid": 110, "amount": 110, "date": 80, "status": 130, "file": 280})
+        warn_box = ctk.CTkTextbox(win, height=110, font=(FONT_FAMILY, 10), fg_color=t["input"], text_color=t["text"])
+        warn_box.pack(fill="x", padx=12, pady=(2, 4))
+        sumlbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"], anchor="w")
+        sumlbl.pack(fill="x", padx=14)
+
+        def status_of(it):
+            if it["skip"]: return T2("مكرر (مستبعد)", "Duplicate"), "void"
+            if not it.get("include", True): return T2("مستبعد", "Excluded"), "void"
+            if it["tid"] is None or it["amount"] <= 0 or not it["ok"] or it["alt"] is not None:
+                return T2("⚠ راجع", "⚠ Review"), "missing"
+            return "✓", ""
+
+        def fill_tree():
+            tree.delete(*tree.get_children())
+            tot = 0.0
+            for i, it in enumerate(st["items"]):
+                s, tag = status_of(it)
+                if not it["skip"] and it.get("include", True) and it["amount"] > 0: tot += it["amount"]
+                sfx = f"_{it['suffix']}" if it["suffix"] else ""
+                tree.insert("", "end", iid=str(i), tags=(tag,) if tag else (),
+                            values=(f"{it['order']}{sfx}" if it["order"] else "-", it["unit"] or "-", it["tid"] or "-",
+                                    f"{it['amount']:,.2f}", it["date"] or "-", s, it["label"]))
+            sumlbl.configure(text=T2(f"عدد الإيصالات: {len(st['items'])}   |   الإجمالي: {tot:,.2f} جنيه", f"Receipts: {len(st['items'])}  |  Total: {tot:,.2f} EGP"))
+            warn_box.configure(state="normal"); warn_box.delete("1.0", "end")
+            lines = [f"• {w}" for w in st["warnings"]]
+            if st["excluded"]:
+                lines.append(T2(f"• اتجاهلت {len(st['excluded'])} إيصال دفع (مش باتش/إقفال): ", f"• Ignored {len(st['excluded'])} payment receipts: ") + "، ".join(st["excluded"][:8]))
+            warn_box.insert("1.0", "\n".join(lines) or T2("مفيش تحذيرات.", "No warnings.")); warn_box.configure(state="disabled")
+
+        def run():
+            files = pos_collect_files(st["sources"], POS_IMG_EXT + (".pdf",))
+            if not files:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش صور أو PDF في المصدر المختار.", "No images/PDF in source.")); return
+            st["stop"], st["busy"] = False, True; update_buttons()
+            def prog(i, n, label):
+                self.after(0, lambda: (bar.set(i / max(1, n)), status.configure(text=T2(f"قراءة {i + 1} من {n}: {label}", f"Reading {i + 1}/{n}: {label}"))))
+            def work():
+                try:
+                    items, w, ex = pos_closing_scan(files, bool(cb_rot.get()), prog, lambda: st["stop"])
+                    pos_closing_number(items, w)
+                    def fin():
+                        st["items"], st["warnings"], st["excluded"], st["busy"] = items, w, ex, False
+                        bar.set(1); update_buttons(); fill_tree()
+                        status.configure(text=T2(f"تمت القراءة: {len(items)} إيصال. راجع الجدول ثم اضغط إنشاء الملفات.", f"Done: {len(items)} receipts. Review, then Build."))
+                        if not items: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لم يتم العثور على إيصالات إقفال.", "No batch-close receipts found."))
+                    self.after(0, fin)
+                except Exception as e:
+                    log_exception("pos_closing_run", e)
+                    def bad():
+                        st["busy"] = False; update_buttons()
+                        messagebox.showerror("Error", str(e))
+                    self.after(0, bad)
+            threading.Thread(target=work, daemon=True).start()
+        btn_run.configure(command=run)
+
+        tid_choices = [T2("(بدون ماكينة)", "(none)")] + [f"{POS_TERMINALS[POS_NUM_TO_TID[n]][0]} - {POS_TERMINALS[POS_NUM_TO_TID[n]][2]} - {POS_NUM_TO_TID[n]}" for n in range(1, 20)]
+
+        def edit_selected(event=None):
+            sel = tree.selection()
+            if not sel: return
+            it = st["items"][int(sel[0])]
+            d = ctk.CTkToplevel(win); d.title(T2("تعديل الإيصال", "Edit receipt")); set_window_icon_safe(d)
+            center_window_relative(d, win, 420, 330); d.configure(fg_color=t["bg"])
+            ctk.CTkLabel(d, text=it["label"], font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(14, 4))
+            ctk.CTkLabel(d, text=T2("الماكينة", "Terminal"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=20)
+            cb = ctk.CTkComboBox(d, values=tid_choices, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"]); cb.pack(padx=20)
+            cb.set(next((c for c in tid_choices if it["tid"] and c.endswith(it["tid"])), tid_choices[0]))
+            ctk.CTkLabel(d, text=T2("المبلغ", "Amount"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=20, pady=(8, 0))
+            e_amt = ctk.CTkEntry(d, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"], text_color=t["text"]); e_amt.pack(padx=20)
+            e_amt.insert(0, f"{it['amount']:.2f}")
+            inc = ctk.CTkCheckBox(d, text=T2("ضمّه في التقفيل", "Include in closing"), font=FONT_SECTION_LBL, text_color=t["text"]); inc.pack(anchor="w", padx=20, pady=8)
+            if it.get("include", True) and not it["skip"]: inc.select()
+            def save():
+                try: amt = _r2(float(e_amt.get().replace(",", "").strip()))
+                except ValueError:
+                    messagebox.showerror(T2("خطأ", "Error"), T2("المبلغ غير صحيح.", "Invalid amount.")); return
+                v = cb.get()
+                if v != tid_choices[0]: pos_apply_tid(it, v.split(" - ")[-1].strip())
+                it["amount"], it["how"], it["ok"], it["alt"] = amt, "manual", True, None
+                it["include"] = bool(inc.get()); it["skip"] = False
+                d.destroy(); fill_tree()
+            def open_img():
+                try: os.startfile(it["path"])
+                except Exception as e: messagebox.showerror("Error", str(e))
+            r = ctk.CTkFrame(d, fg_color="transparent"); r.pack(pady=10)
+            ctk.CTkButton(r, text=T2("💾 حفظ", "💾 Save"), width=110, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(side="left", padx=4)
+            ctk.CTkButton(r, text=T2("🖼️ فتح الصورة", "🖼️ Open image"), width=120, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=open_img).pack(side="left", padx=4)
+            try: d.lift(); d.grab_set()
+            except Exception: pass
+        tree.bind("<Double-1>", edit_selected)
+
+        def build():
+            if not st["items"]:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اعمل قراءة الأول.", "Run a scan first.")); return
+            if not st["out"]:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder.")); return
+            tpl = _pos_find_template()
+            if not tpl:
+                tpl = filedialog.askopenfilename(title=T2("اختر قالب الإكسيل (الاسكندريه 00.xlsx)", "Choose Excel template"), filetypes=[("Excel", "*.xlsx")]) or None
+            btn_build.configure(state="disabled"); status.configure(text=T2("جاري إنشاء الملفات...", "Building files..."))
+            def work():
+                try: res = pos_closing_build(st["items"], st["out"], tpl)
+                except Exception as e:
+                    log_exception("pos_closing_build", e); res = {"error": str(e)}
+                def fin():
+                    btn_build.configure(state="normal")
+                    if "error" in res:
+                        messagebox.showerror("Error", res["error"]); return
+                    msg = T2(f"تم إنشاء:\n• {len(res['pdfs'])} ملف PDF\n• {'إكسيل' if res['xlsx'] else 'بدون إكسيل'}\n• صور مرقّمة\n\nالتاريخ: {res['report_date']}", f"Created {len(res['pdfs'])} PDF, {'Excel' if res['xlsx'] else 'no Excel'}.")
+                    if res["notes"]: msg += "\n\n" + "\n".join(res["notes"])
+                    status.configure(text=T2("تم الإنشاء ✓", "Built ✓"))
+                    messagebox.showinfo(T2("تم", "Done"), msg)
+                    try: os.startfile(st["out"])
+                    except Exception: pass
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        foot = ctk.CTkFrame(win, fg_color="transparent"); foot.pack(fill="x", padx=12, pady=(4, 12))
+        ctk.CTkButton(foot, text=T2("✏️ تعديل المحدد", "✏️ Edit selected"), width=140, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=edit_selected).pack(side="left", padx=4)
+        btn_build = ctk.CTkButton(foot, text=T2("📦 إنشاء الملفات (PDF + إكسيل)", "📦 Build files (PDF + Excel)"), width=230, height=32, font=FONT_BTN_SUB,
+                                  fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", command=build)
+        btn_build.pack(side="left", padx=4)
+
+    # ---------------------------------------- إيصالات الدفع ----------------------------------------
+    def open_pos_payments(self):
+        if not self._pos_gate() or not self._pos_need_ocr(): return
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(T2("💳 إيصالات الدفع", "💳 Payment Receipts"))
+        set_window_icon_safe(win)
+        center_window_relative(win, self, 1150, 720)
+        win.configure(fg_color=t["bg"])
+        try: win.lift(); win.focus_force()
+        except Exception: pass
+        st = {"sources": [], "out": "", "res": [], "stop": False, "busy": False}
+        FT = [("PDF", "*.pdf")]
+        status = ctk.CTkLabel(win, text=T2("اختر ملفات الـ PDF (أو فولدر) ومكان الإخراج، ثم اضغط بدء.", "Pick PDFs and output, then Start."),
+                              font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w")
+        bar = ctk.CTkProgressBar(win, height=10); bar.set(0)
+
+        def update_buttons():
+            btn_run.configure(state="normal" if (st["sources"] and not st["busy"]) else "disabled")
+        refresh = self._pos_picker_bar(win, t, st, (".pdf",), FT, lambda: update_buttons())
+        ctrl = ctk.CTkFrame(win, fg_color="transparent"); ctrl.pack(fill="x", padx=12, pady=2)
+        btn_run = ctk.CTkButton(ctrl, text=T2("▶ بدء الفحص والعد", "▶ Start scan"), width=150, height=32, font=FONT_BTN_SUB,
+                                fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", state="disabled")
+        btn_run.pack(side="left", padx=6)
+        refresh()
+        ctk.CTkButton(ctrl, text=T2("⏹ إيقاف", "⏹ Stop"), width=90, height=32, font=FONT_BTN_SUB, fg_color="#DC2626",
+                      hover_color="#B91C1C", text_color="#FFFFFF", command=lambda: st.__setitem__("stop", True)).pack(side="left", padx=2)
+        status.pack(fill="x", padx=14, pady=(4, 0)); bar.pack(fill="x", padx=14, pady=(2, 4))
+
+        cols = ("order", "unit", "tid", "date", "count", "new", "notes", "file")
+        hdr = {"order": T2("رقم", "No."), "unit": T2("الوحدة", "Unit"), "tid": "TID", "date": T2("التاريخ", "Date"),
+               "count": T2("العدد", "Count"), "new": T2("الاسم الجديد", "New name"), "notes": T2("ملاحظات", "Notes"), "file": T2("الملف الأصلي", "Original")}
+        tree = pos_make_tree(win, t, cols, hdr, {"order": 50, "unit": 120, "tid": 100, "date": 70, "count": 60, "new": 210, "notes": 260, "file": 200})
+        sumlbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w", justify="left", wraplength=1080)
+        sumlbl.pack(fill="x", padx=14, pady=2)
+
+        def fill_tree():
+            tree.delete(*tree.get_children())
+            total = 0
+            for i, r in enumerate(st["res"]):
+                total += max(r["count"], 0)
+                tree.insert("", "end", iid=str(i), tags=(() if r["ok"] else ("missing",)),
+                            values=(r["order"] or "-", r["unit"] or "-", r["tid"] or "-", f"{r['day']}.{r['month']}" if r["day"] else "-",
+                                    r["count"], r["new"] or "-", " | ".join(r["notes"]) or "✓", r["name"]))
+            got = {r["order"] for r in st["res"] if r["order"]}
+            miss = [f"{n} {POS_TERMINALS[POS_NUM_TO_TID[n]][2]}" for n in range(1, 20) if n not in got]
+            sumlbl.configure(text=T2(f"الملفات: {len(st['res'])}   |   إجمالي الإيصالات: {total}" + (f"\nماكينات ناقصة: {'، '.join(miss)}" if st["res"] and miss else ""),
+                                     f"Files: {len(st['res'])} | Receipts: {total}" + (f"\nMissing machines: {', '.join(miss)}" if st["res"] and miss else "")))
+
+        def make_result(f, r):
+            res = {"src": f, "name": os.path.basename(f), "tid": r["tid"], "order": None, "unit": None, "day": r["day"], "month": r["month"],
+                   "count": r["count"], "notes": [], "ok": True, "new": None}
+            if r["tid"]:
+                res["order"], res["unit"] = POS_TERMINALS[r["tid"]][0], POS_TERMINALS[r["tid"]][2]
+            else:
+                res["ok"] = False; res["notes"].append(T2("مش قادر أعرف الماكينة", "Machine unknown"))
+            if not r["day"]:
+                res["ok"] = False; res["notes"].append(T2("مش قادر أعرف التاريخ", "Date unknown"))
+            if r["tid"] and r["day"]: res["new"] = pos_machine_new_name(r["tid"], r["day"], r["month"])
+            if r["seq_min"] is not None and r["count"] != r["seq_max"] - r["seq_min"] + 1:
+                res["ok"] = False
+                res["notes"].append(T2(f"العدد {r['count']} بس التسلسل {r['seq_max'] - r['seq_min'] + 1} — راجع", f"Count {r['count']} vs sequence {r['seq_max'] - r['seq_min'] + 1}"))
+            if r["other_day"]: res["ok"] = False; res["notes"].append(T2("فيه إيصال بتاريخ تاني", "Other-day receipt"))
+            if r["partial"]: res["notes"].append(T2(f"{r['partial']} إيصال رقمه مش واضح", f"{r['partial']} unclear"))
+            if r["non_payment"]: res["notes"].append(T2("فيه إقفال/ملخص (مش معدود)", "Contains closing/summary"))
+            return res
+
+        def run():
+            files = pos_collect_files(st["sources"], (".pdf",))
+            if not files:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش ملفات PDF في المصدر.", "No PDFs.")); return
+            st["stop"], st["busy"], st["res"] = False, True, []; update_buttons(); fill_tree()
+            def work():
+                out = []
+                for i, f in enumerate(files):
+                    if st["stop"]: break
+                    self.after(0, lambda i=i, f=f: (bar.set(i / len(files)), status.configure(text=T2(f"فحص {i + 1} من {len(files)}: {os.path.basename(f)}", f"Scanning {i + 1}/{len(files)}"))))
+                    try:
+                        r = pos_count_pdf(f, lambda m, f=f: self.after(0, lambda: status.configure(text=f"{os.path.basename(f)} — {m}")), lambda: st["stop"])
+                        out.append(make_result(f, r))
+                    except Exception as e:
+                        log_exception(f"pos_payment:{f}", e)
+                        out.append({"src": f, "name": os.path.basename(f), "tid": None, "order": None, "unit": None, "day": None, "month": None,
+                                    "count": 0, "notes": [f"فشل: {e}"], "ok": False, "new": None})
+                    st["res"] = list(out)
+                    self.after(0, fill_tree)
+                used = set()
+                for r in st["res"]:           # أسماء مكررة
+                    if r["new"]:
+                        n, k = r["new"], 2
+                        while n in used: n = f"{r['new']}_{k}"; k += 1
+                        used.add(n); r["new"] = n
+                def fin():
+                    st["busy"] = False; update_buttons(); bar.set(1); fill_tree()
+                    status.configure(text=T2("تم الفحص. راجع الصفوف الصفراء ثم احفظ النسخ.", "Done. Review yellow rows, then save."))
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+        btn_run.configure(command=run)
+
+        tid_choices = [T2("(بدون ماكينة)", "(none)")] + [f"{POS_TERMINALS[POS_NUM_TO_TID[n]][0]} - {POS_TERMINALS[POS_NUM_TO_TID[n]][2]} - {POS_NUM_TO_TID[n]}" for n in range(1, 20)]
+        def edit_selected(event=None):
+            sel = tree.selection()
+            if not sel: return
+            r = st["res"][int(sel[0])]
+            d = ctk.CTkToplevel(win); d.title(T2("تعديل", "Edit")); set_window_icon_safe(d)
+            center_window_relative(d, win, 420, 360); d.configure(fg_color=t["bg"])
+            ctk.CTkLabel(d, text=r["name"], font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(14, 4))
+            cb = ctk.CTkComboBox(d, values=tid_choices, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"]); cb.pack(padx=20, pady=4)
+            cb.set(next((c for c in tid_choices if r["tid"] and c.endswith(r["tid"])), tid_choices[0]))
+            row = ctk.CTkFrame(d, fg_color="transparent"); row.pack(pady=4)
+            ents = {}
+            for key, lab, val in (("day", T2("اليوم", "Day"), r["day"]), ("month", T2("الشهر", "Month"), r["month"]), ("count", T2("العدد", "Count"), r["count"])):
+                ctk.CTkLabel(row, text=lab, font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(8, 2))
+                e = ctk.CTkEntry(row, width=60, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"], text_color=t["text"]); e.pack(side="left")
+                e.insert(0, "" if val is None else str(val)); ents[key] = e
+            def save():
+                try: cnt = int(ents["count"].get())
+                except ValueError: messagebox.showerror(T2("خطأ", "Error"), T2("العدد غير صحيح.", "Invalid count.")); return
+                v = cb.get()
+                r["tid"] = None if v == tid_choices[0] else v.split(" - ")[-1].strip()
+                r["day"], r["month"] = ents["day"].get().strip() or None, ents["month"].get().strip() or None
+                r["count"] = cnt
+                if r["tid"]: r["order"], r["unit"] = POS_TERMINALS[r["tid"]][0], POS_TERMINALS[r["tid"]][2]
+                r["new"] = pos_machine_new_name(r["tid"], r["day"], r["month"]) if (r["tid"] and r["day"] and r["month"]) else None
+                r["ok"], r["notes"] = bool(r["new"]), [T2("اتعدّل يدويًا", "Edited manually")]
+                d.destroy(); fill_tree()
+            ctk.CTkButton(d, text=T2("💾 حفظ", "💾 Save"), width=120, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(pady=12)
+            try: d.lift(); d.grab_set()
+            except Exception: pass
+        tree.bind("<Double-1>", edit_selected)
+
+        def save_copies():
+            if not st["out"]: messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder.")); return
+            n = 0
+            os.makedirs(st["out"], exist_ok=True)
+            for r in st["res"]:
+                if not r["new"]: continue
+                try: shutil.copy2(r["src"], os.path.join(st["out"], r["new"] + ".pdf")); n += 1
+                except Exception as e: log_exception("pos_save_copy", e)
+            messagebox.showinfo(T2("تم", "Done"), T2(f"اتحفظ {n} ملف باسمه الجديد (الأصول ماتلمستش).", f"Saved {n} renamed copies (originals untouched)."))
+            try: os.startfile(st["out"])
+            except Exception: pass
+
+        def export_xlsx():
+            if not st["res"]: return
+            if not OPENPYXL_AVAILABLE: messagebox.showerror("Error", "openpyxl missing"); return
+            f = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ملخص إيصالات الدفع.xlsx")
+            if not f: return
+            wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Payments"
+            ws.append(["رقم", "الوحدة", "TID", "التاريخ", "عدد الإيصالات", "الاسم الجديد", "ملاحظات", "الملف الأصلي"])
+            for r in sorted(st["res"], key=lambda x: (x["order"] or 99, x["name"])):
+                ws.append([r["order"], r["unit"], r["tid"], f"{r['day']}.{r['month']}" if r["day"] else "", r["count"], r["new"], " | ".join(r["notes"]), r["name"]])
+            ws.append([]); ws.append(["", "الإجمالي", "", "", sum(max(r["count"], 0) for r in st["res"])])
+            wb.save(f); messagebox.showinfo(T2("تم", "Done"), f)
+
+        foot = ctk.CTkFrame(win, fg_color="transparent"); foot.pack(fill="x", padx=12, pady=(4, 12))
+        for txt, cmd, col in ((T2("✏️ تعديل المحدد", "✏️ Edit"), edit_selected, t["primary"]),
+                              (T2("💾 حفظ نسخ بالأسماء الجديدة", "💾 Save renamed copies"), save_copies, "#16A34A"),
+                              (T2("📊 تصدير ملخص إكسيل", "📊 Export Excel"), export_xlsx, "#4338CA")):
+            ctk.CTkButton(foot, text=txt, width=200, height=32, font=FONT_BTN_SUB, fg_color=col, hover_color=t["primary_hover"],
+                          text_color="#FFFFFF", command=cmd).pack(side="left", padx=4)
 
     def open_records_viewer(self):
         if not self.last_detailed_records:
