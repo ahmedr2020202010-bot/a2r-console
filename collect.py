@@ -49,7 +49,76 @@ import html
 from collections import Counter
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+from tkinter import ttk
+
+try:
+    import cv2
+    import numpy as np
+    import pytesseract
+    ADVANCED_LIBS_OK = True
+except ImportError:
+    ADVANCED_LIBS_OK = False
+
+def process_and_enhance_image(image_path, out_path):
+    if not ADVANCED_LIBS_OK: return False
+    try:
+        image = cv2.imread(image_path)
+        if image is None: return False
+        orig = image.copy()
+        ratio = image.shape[0] / 500.0
+        resized = cv2.resize(image, (int(image.shape[1] / ratio), 500))
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        edged = cv2.Canny(gray, 75, 200)
+        cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
+        screenCnt = None
+        for c in cnts:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4:
+                screenCnt = approx
+                break
+        
+        if screenCnt is not None:
+            pts = screenCnt.reshape(4, 2) * ratio
+            rect = np.zeros((4, 2), dtype="float32")
+            s = pts.sum(axis=1)
+            rect[0] = pts[np.argmin(s)]
+            rect[2] = pts[np.argmax(s)]
+            diff = np.diff(pts, axis=1)
+            rect[1] = pts[np.argmin(diff)]
+            rect[3] = pts[np.argmax(diff)]
+            
+            (tl, tr, br, bl) = rect
+            widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+            widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+            maxWidth = max(int(widthA), int(widthB))
+            heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+            heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+            maxHeight = max(int(heightA), int(heightB))
+            
+            dst = np.array([
+                [0, 0],
+                [maxWidth - 1, 0],
+                [maxWidth - 1, maxHeight - 1],
+                [0, maxHeight - 1]], dtype="float32")
+            
+            M = cv2.getPerspectiveTransform(rect, dst)
+            warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
+        else:
+            warped = orig
+
+        # تطبيق تحسين التباين (CamScanner Effect)
+        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(warped_gray)
+        cv2.imwrite(out_path, enhanced)
+        return True
+    except Exception as e:
+        log_exception("process_image", e)
+        return False
+, messagebox, filedialog, simpledialog
 
 try:
     import winreg
@@ -96,7 +165,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.60.0"
+APP_VERSION = "v4.61.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -2236,7 +2305,6 @@ class AdminPasswordDialog(ctk.CTkToplevel):
         self.e.bind("<Return>", _chk)
         ctk.CTkButton(self, text="Unlock", font=FONT_BTN_SUB, fg_color=t["primary"], command=_chk).pack(pady=8)
 
-
 class AdvancedLoginGate(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
         super().__init__(parent)
@@ -2351,7 +2419,46 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
             except: pass
             return
             
-        self.lbl_status.configure(text=tr("adv_placeholder"), text_color="#10B981")
+        if not ADVANCED_LIBS_OK:
+            messagebox.showerror("Missing Libraries", "عذراً، مكتبات معالجة الصور (OpenCV/Numpy) غير مثبتة. يرجى تحديث requirements.txt على جيت هاب لكي تعمل الميزة.")
+            return
+            
+        self.lbl_status.configure(text="جاري معالجة الصور وإصلاح المنظور...", text_color="#F59E0B")
+        self.update()
+        
+        threading.Thread(target=self._process_images_thread, args=(path, action_type), daemon=True).start()
+
+    def _process_images_thread(self, folder_path, action_type):
+        try:
+            out_dir = os.path.join(folder_path, "_Enhanced")
+            os.makedirs(out_dir, exist_ok=True)
+            
+            image_files = glob.glob(os.path.join(folder_path, "*.jpg")) + glob.glob(os.path.join(folder_path, "*.png"))
+            if not image_files:
+                self.after(0, lambda: self.lbl_status.configure(text="لا توجد صور JPG/PNG في المجلد المختار!", text_color="#EF4444"))
+                return
+                
+            processed = 0
+            for i, img_path in enumerate(image_files):
+                filename = os.path.basename(img_path)
+                out_path = os.path.join(out_dir, "clean_" + filename)
+                
+                self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري تنظيف وتوضيح: {f}...", text_color="#38BDF8"))
+                
+                if process_and_enhance_image(img_path, out_path):
+                    processed += 1
+            
+            # Pytesseract OCR logic will be fully tied here in the next step
+            msg = f"تم بنجاح تنظيف وقص {processed} صورة (CamScanner) وحفظها في مجلد _Enhanced"
+            self.after(0, lambda: self.lbl_status.configure(text=msg, text_color="#10B981"))
+            self.after(0, lambda: messagebox.showinfo("نجاح المعالجة", msg))
+            
+            if os.path.exists(out_dir):
+                os.startfile(out_dir)
+                
+        except Exception as e:
+            self.after(0, lambda: self.lbl_status.configure(text="حدث خطأ أثناء المعالجة!", text_color="#EF4444"))
+            log_exception("adv_thread", e)
 
 class CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
