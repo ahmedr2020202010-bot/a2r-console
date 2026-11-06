@@ -118,7 +118,7 @@ def process_and_enhance_image(image_path, out_path):
     except Exception as e:
         log_exception("process_image", e)
         return False
-, messagebox, filedialog, simpledialog
+from tkinter import messagebox, filedialog, simpledialog
 
 try:
     import winreg
