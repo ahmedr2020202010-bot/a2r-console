@@ -27,8 +27,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install Tesseract and stage it for bundling
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          $src = $null
+          foreach ($c in 'C:\Program Files\Tesseract-OCR','C:\Program Files (x86)\Tesseract-OCR') {
+            if (Test-Path (Join-Path $c 'tesseract.exe')) { $src = $c; break }
+          }
+          if (-not $src) { Write-Error "tesseract.exe not found after install"; exit 1 }
+          New-Item -ItemType Directory -Force -Path tesseract | Out-Null
+          Copy-Item -Path (Join-Path $src '*') -Destination tesseract -Recurse -Force
+          # keep only the English model to keep the exe small
+          Get-ChildItem tesseract\tessdata -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'eng.traineddata' -and $_.Name -ne 'pdf.ttf' } | Remove-Item -Force
+          Get-ChildItem tesseract -Filter 'unins*' -ErrorAction SilentlyContinue | Remove-Item -Force
+          if (-not (Test-Path 'tesseract\tesseract.exe')) { Write-Error "tesseract\tesseract.exe missing"; exit 1 }
+          if (-not (Test-Path 'tesseract\tessdata\eng.traineddata')) { Write-Error "eng.traineddata missing"; exit 1 }
+          & .\tesseract\tesseract.exe --version
+
       - name: Verify OCR libraries are installed
         run: python -c "from rapidocr_onnxruntime import RapidOCR; import pypdfium2, onnxruntime; RapidOCR(); print('OCR OK')"
+
+      - name: Verify POS engine libraries
+        run: python -c "import cv2, numpy, pypdf, openpyxl, PIL, pypdfium2; print('POS libs OK', cv2.__version__)"
 
       - name: Verify required files
         shell: pwsh
@@ -51,6 +73,7 @@ jobs:
             '--icon=app.ico',
             '--add-binary','pdftotext.exe;.',
             '--add-data','app.ico;.',
+            '--add-data','tesseract;tesseract',
             '--collect-all','customtkinter',
             '--collect-all','reportlab',
             '--collect-all','arabic_reshaper',
@@ -61,6 +84,11 @@ jobs:
             '--collect-all','onnxruntime',
             '--collect-all','pypdfium2',
             '--hidden-import','pystray._win32',
+            '--hidden-import','cv2',
+            '--hidden-import','numpy',
+            '--hidden-import','pypdf',
+            '--hidden-import','openpyxl',
+            '--hidden-import','hmac',
             '--name','A2R_Console'
           )
           if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
