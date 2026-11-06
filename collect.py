@@ -233,7 +233,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.67.0"
+APP_VERSION = "v4.68.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -3412,7 +3412,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_manual.configure(text=L["manual"])
         self.btn_summary_reopen.configure(text=L["summary_btn"])
         self.btn_cash.configure(text=L["cash_btn"])
-        self.btn_archive_downloads.configure(text=L["clean_downloads"])
+        if hasattr(self, 'btn_archive_downloads'): self.btn_archive_downloads.configure(text=L["clean_downloads"])
         self.btn_mini_archive.configure(text=L["clean_downloads"])
         self.btn_reset.configure(text=L["reset"])
         self.lbl_kpi1_title.configure(text=L["kpi1"])
@@ -3422,7 +3422,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_view_rec.configure(text=L["view_records"])
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
-        self.btn_excel.configure(text=L["open_excel"])
+        if hasattr(self, 'btn_excel'): self.btn_excel.configure(text=L["open_excel"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
         if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.configure(text=L["btn_admin_panel"])
