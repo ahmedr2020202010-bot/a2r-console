@@ -225,6 +225,17 @@ def terminal_label(tid):
     return f"{t.order} - {t.unit} ({tid})" if t else (tid or "غير محدد")
 
 
+def unit_label(tid, fallback=None):
+    """اسم الوحدة مع رقمها لو الوحدة ليها أكتر من ماكينة (أبيس 1، أبيس 2، برج العرب 3 ...)."""
+    t = TERMINALS.get(tid)
+    if not t:
+        return fallback or "غير محدد"
+    same = sorted([x for x in TERMINALS.values() if x.row == t.row], key=lambda x: x.order)
+    if len(same) > 1:
+        return "%s %d" % (t.unit, [x.order for x in same].index(t.order) + 1)
+    return t.unit
+
+
 # ───────────────────────── أدوات خارجية (Tesseract / pdftoppm) ─────────────────────────
 _TESS = None
 _PPM = None
@@ -1707,7 +1718,7 @@ def build_closing_outputs(items, out_dir, template=None, report_date=None, progr
     lines = ["تقرير التقفيل - %s" % rd, "=" * 40]
     for r in main_items:
         lines.append("%s | %s | %s | %.2f %s" % (
-            r.order or "-", r.unit or "غير محدد", r.label, r.amount, "" if r.ok else "(راجع)"))
+            r.order or "-", unit_label(r.tid, r.unit), r.label, r.amount, "" if r.ok else "(راجع)"))
     lines.append("-" * 40)
     for row in range(2, 12):
         lines.append("%s: %.2f" % (ROW_NAMES[row], totals.get(row, 0.0)))
@@ -2621,6 +2632,8 @@ class ClosingWindow(_FeatureWindow):
                 ("status", "الحالة")]
         self.tv = self._tree(self, cols, [40, 190, 90, 110, 85, 230], height=6)
         self.tv.bind("<Double-1>", lambda e: self.view_selected())
+        # أي صف محتاج تأكيد يدوي يظهر بالأحمر (خلفية حمرا فاتحة + كتابة حمرا غامقة)
+        self.tv.tag_configure("err", foreground="#B91C1C", background="#FDE2E2")
         self.b_view = self._btn(bt, "🔍 عرض وتعديل", self.view_selected, color=t["warning"], w=10)
         self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=10)
         self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=10)
@@ -2757,10 +2770,10 @@ class ClosingWindow(_FeatureWindow):
         self._iid = {}
         for r in order:
             st = self._status_text(r)
-            tag = "skip" if r.skip else ("warn" if st.startswith("⚠️") else "ok")
+            tag = "skip" if r.skip else ("err" if (st.startswith("⚠️") or r.needs_review) else "ok")
             sfx = "_%d" % r.suffix if r.suffix else ""
             iid = self.tv.insert("", "end", values=(
-                "%s%s" % (r.order or "-", sfx), r.label, r.tid or "—", r.unit or "غير محدد",
+                "%s%s" % (r.order or "-", sfx), r.label, r.tid or "—", E.unit_label(r.tid, r.unit),
                 "%.2f" % r.amount if r.amount else "—", st), tags=(tag,))
             self._iid[iid] = r
         self.txt.configure(state="normal")
