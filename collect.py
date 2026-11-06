@@ -387,7 +387,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 عربي", "dir_path": "DIRECTORY PATH", "browse": "Browse", "open": "Open",
         "date_lbl": "REPORT DATE", "today": "Today", "yesterday": "Yesterday",
         "start": "⚡ START EXTRACTION", "reset": "Reset",
-        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "view_records": "🔍 Records Viewer",
+        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "view_records": "🔍 Records Viewer",
         "export_pdf": "📄 PDF Summary", "kpi1": "OPERATIONS", "kpi2": "TOTAL SUM",
         "open_excel": "📊 Open Excel", "currency": "EGP", "open_chrome": "🌐 Traffic Portal",
         "cash_btn": "💵 Cash", "clean_downloads": "📦 Archive", "autosync_on": "Auto Sync ON", "autosync_off": "Auto Sync OFF",
@@ -442,7 +442,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 English", "dir_path": "مسار مجلد الإيصالات", "browse": "تحديد", "open": "فتح",
         "date_lbl": "تاريخ التقرير", "today": "اليوم", "yesterday": "أمس",
         "start": "⚡ بدء استخراج ومعالجة البيانات", "reset": "تصفير",
-        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "view_records": "🔍 عرض السجلات",
+        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "view_records": "🔍 عرض السجلات",
         "export_pdf": "📄 تقرير PDF", "kpi1": "عدد العمليات", "kpi2": "إجمالي مبالغ السيستم",
         "open_excel": "📊 فتح الإكسيل", "currency": "ج.م", "open_chrome": "🌐 بوابة المرور",
         "cash_btn": "💵 حاسبة الكاش", "clean_downloads": "📦 أرشفة", "autosync_on": "مزامنة تلقائية: مفعل", "autosync_off": "مزامنة تلقائية: معطل",
@@ -682,29 +682,6 @@ UNITS_LIST = [
     "القبارى", "مصطفى كامل", "مديرية الأمن", "ميناء الإسكندرية", "مجمع خدمات مصر"
 ]
 
-# قاعدة بيانات: الوحدة -> رقم الماكينة (Terminal ID)
-UNIT_TERMINALS = {
-    "ابيس 1": "50335710",
-    "ابيس 2": "50335993",
-    "ابيس 3": "50335987",
-    "برج العرب 1": "50325716",
-    "برج العرب 2": "50335998",
-    "برج العرب 3": "50335994",
-    "برج العرب 4": "50335711",
-    "المنتزة 1": "50382298",
-    "المنتزة 2": "50382315",
-    "المنتزة 3": "50383712",
-    "محرم بك 1": "50382306",
-    "محرم بك 2": "50382316",
-    "العجمي 1": "50382308",
-    "العجمي 2": "50383706",
-    "القبارى": "50382300",
-    "مصطفى كامل": "50383702",
-    "مديرية الأمن": "50382312",
-    "ميناء الإسكندرية": "50383699",
-    "مجمع خدمات مصر": "50383700",
-}
-
 EMPLOYEES_LIST = [
     "خالد محمد", "محمد السيد", "محمد زكريا", "احمد مصطفى", "زياد أحمد",
     "مصطفى محمد", "ادهم ماهر", "احمد وليد", "عبدالله محمد", "محمد مجدى",
@@ -840,7 +817,7 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
-def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
+def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str):
     if not REPORTLAB_AVAILABLE:
         return False
     PAGE_W, PAGE_H = 160, 95
@@ -860,327 +837,17 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
 
     c.setFillColorRGB(0, 0, 0)
     c.setFont(font_name, 17)
-    y = PAGE_H - 20
+    y = PAGE_H - 24
     c.drawCentredString(PAGE_W / 2, y, _ar(emp_name))
     if unit_name:
-        y -= 20
+        y -= 22
         c.setFont(font_name, 14)
         c.drawCentredString(PAGE_W / 2, y, _ar(unit_name))
-    if terminal_id:
-        y -= 17
-        c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(PAGE_W / 2, y, f"TID: {terminal_id}")
-    y -= 19
+    y -= 22
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString(PAGE_W / 2, y, date_str)
     c.save()
     return True
-
-# ================= فهرس الأرشيف + النسخة الاحتياطية المخفية + البحث العام =================
-ARCHIVE_BACKUP_DIR = os.path.join(DOCUMENTS_DIR, ".archive_backup")
-_ARCHIVE_LOCK = threading.Lock()
-
-def T2(ar, en):
-    return ar if CURRENT_LANG == "ar" else en
-
-def _hide_path(p):
-    """إخفاء المجلد على ويندوز (Hidden) — الاسم نفسه يبدأ بنقطة كمان."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-            ctypes.windll.kernel32.SetFileAttributesW(str(p), 0x02)
-    except Exception as e:
-        log_exception("hide_path", e)
-
-def _ensure_archive_index():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS archive_index (
-            path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
-            insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
-            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER
-        )
-    ''')
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
-    conn.commit()
-    return conn
-
-def _archive_day_from_path(root, path):
-    try:
-        parts = os.path.relpath(path, root).split(os.sep)
-        if len(parts) < 4: return None
-        y, m, d = int(parts[0]), int(parts[1].split("-")[0]), int(parts[2])
-        return f"{y:04d}-{m:02d}-{d:02d}"
-    except Exception:
-        return None
-
-def archive_index_update(folder_path, progress=None):
-    """يفهرس إيصالات الأرشيف الجديدة فقط (الباقي يتخطاه) ويشيل المحذوف ويحدّث حالة الإلغاء."""
-    root = os.path.join(folder_path, ARCHIVE_DIRNAME)
-    if not os.path.isdir(root): return 0
-    load_void_map()
-    manual_map = load_manual_map()
-    files = []
-    for dp, _dn, fns in os.walk(root):
-        for f in fns:
-            if not f.lower().endswith((".pdf", ".txt")): continue
-            if f.startswith("Samary_") or f.endswith("_cropped.pdf") or f.endswith("_Summary.pdf"): continue
-            p = os.path.join(dp, f)
-            day = _archive_day_from_path(root, p)
-            if day: files.append((p, day))
-
-    conn = _ensure_archive_index()
-    done_new = 0
-    try:
-        existing = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT path, mtime, size FROM archive_index")}
-        current = {p for p, _ in files}
-        stale = [(p,) for p in existing if p not in current]
-        if stale:
-            conn.executemany("DELETE FROM archive_index WHERE path = ?", stale)
-
-        todo = []
-        for p, day in files:
-            try: st = os.stat(p)
-            except OSError: continue
-            old = existing.get(p)
-            if old and abs(old[0] - st.st_mtime) < 1 and old[1] == st.st_size: continue
-            todo.append((p, day, st))
-
-        total = len(todo)
-        for i, (p, day, st) in enumerate(todo, 1):
-            rec = None
-            try:
-                if p.lower().endswith(".txt"): rec = read_txt_record(p, datetime.date.fromisoformat(day))
-                else: rec = read_pdf_record(p, manual_map)
-            except Exception as e: log_exception(f"archive_index:{os.path.basename(p)}", e)
-            fname = os.path.basename(p)
-            if rec:
-                row = (p, day, fname, rec["unit"], rec["plate"], rec["insured"], float(rec["amount"]),
-                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size)
-            else:
-                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size)
-            conn.execute("INSERT OR REPLACE INTO archive_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
-            done_new += 1
-            if i % 40 == 0:
-                conn.commit()
-                if progress: progress(i, total)
-        conn.commit()
-        if progress and total: progress(total, total)
-
-        # تحديث حالة الإلغاء (ممكن تتغير بعد الأرشفة)
-        upd = []
-        for p, fname, cur in conn.execute("SELECT path, file, is_void FROM archive_index WHERE is_receipt = 1").fetchall():
-            v = int(fname.startswith("_") or fname.lstrip("_") in _VOID_KEYS)
-            if v != cur: upd.append((v, p))
-        if upd:
-            conn.executemany("UPDATE archive_index SET is_void = ? WHERE path = ?", upd)
-        conn.commit()
-    finally:
-        conn.close()
-    return done_new
-
-def archive_backup(folder_path):
-    """نسخة احتياطية تراكمية للأرشيف في فولدر مخفي جوه فولدر تقارير البرنامج. مفيش حاجة بتتمسح من النسخة."""
-    src = os.path.join(folder_path, ARCHIVE_DIRNAME)
-    if not os.path.isdir(src): return 0
-    os.makedirs(ARCHIVE_BACKUP_DIR, exist_ok=True)
-    _hide_path(ARCHIVE_BACKUP_DIR)
-    copied = 0
-    for dp, _dn, fns in os.walk(src):
-        rel = os.path.relpath(dp, src)
-        dst_dir = ARCHIVE_BACKUP_DIR if rel == "." else os.path.join(ARCHIVE_BACKUP_DIR, rel)
-        for f in fns:
-            s, d = os.path.join(dp, f), os.path.join(dst_dir, f)
-            try:
-                ss = os.stat(s)
-                if os.path.exists(d):
-                    ds = os.stat(d)
-                    if ds.st_size == ss.st_size and abs(ds.st_mtime - ss.st_mtime) < 2: continue
-                os.makedirs(dst_dir, exist_ok=True)
-                shutil.copy2(s, d)
-                copied += 1
-            except Exception as e:
-                log_exception(f"archive_backup:{f}", e)
-    # نسخة من قاعدة البيانات (الإلغاءات/اليدوي/الفهرس) جنب الأرشيف
-    try:
-        db_dir = os.path.join(ARCHIVE_BACKUP_DIR, "_db")
-        os.makedirs(db_dir, exist_ok=True)
-        s_conn = sqlite3.connect(DB_FILE)
-        d_conn = sqlite3.connect(os.path.join(db_dir, "a2r_vault_backup.db"))
-        try: s_conn.backup(d_conn)
-        finally:
-            d_conn.close(); s_conn.close()
-    except Exception as e:
-        log_exception("archive_backup_db", e)
-    return copied
-
-def archive_maintenance(folder_path, progress=None):
-    """فهرسة + نسخ احتياطي. لو في عملية شغالة بالفعل بترجع None ومش بتتكرر."""
-    if not _ARCHIVE_LOCK.acquire(blocking=False): return None
-    try:
-        n = archive_index_update(folder_path, progress)
-        b = archive_backup(folder_path)
-        return n, b
-    except Exception as e:
-        log_exception("archive_maintenance", e)
-        return None
-    finally:
-        _ARCHIVE_LOCK.release()
-
-def archive_load_rows():
-    conn = _ensure_archive_index()
-    try:
-        return conn.execute(
-            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
-            "FROM archive_index WHERE is_receipt = 1").fetchall()
-    finally:
-        conn.close()
-
-def archive_day_stats(rows):
-    days = {}
-    for path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void in rows:
-        d = days.setdefault(day, {"day": day, "ops": 0, "total": 0.0, "manual": 0, "void": 0,
-                                  "dup": 0, "missing": 0, "_keys": Counter()})
-        if is_void:
-            d["void"] += 1
-            continue
-        d["ops"] += 1
-        d["total"] += amount
-        if is_manual: d["manual"] += 1
-        if amount <= 0 or (not is_manual and (plate in ("-", "") or unit in (UNSPEC, ""))):
-            d["missing"] += 1
-        if plate not in ("-", ""):
-            d["_keys"][(plate, rtime, round(amount, 2))] += 1
-    out = []
-    for d in days.values():
-        d["dup"] = sum(c - 1 for c in d["_keys"].values() if c > 1)
-        d.pop("_keys", None)
-        out.append(d)
-    out.sort(key=lambda x: x["day"], reverse=True)
-    return out
-
-def _norm_search(s):
-    s = clean_arabic(str(s or "")).lower()
-    for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
-        s = s.replace(a, b)
-    return re.sub(r"[\s\-_]+", "", s)
-
-def archive_search(query, include_void=True, limit=3000):
-    q = _norm_search(query)
-    if not q: return []
-    amt = None
-    try: amt = float(str(query).strip().replace(",", ""))
-    except Exception: pass
-    out = []
-    for r in archive_load_rows():
-        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
-        if is_void and not include_void: continue
-        hit = q in _norm_search(plate) or q in _norm_search(insured) or q in _norm_search(fname)
-        if not hit and amt is not None and abs(amount - amt) < 0.005: hit = True
-        if hit: out.append(r)
-    out.sort(key=lambda r: (r[1], r[7]), reverse=True)
-    return out[:limit]
-
-def parse_flex_date(s):
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-        try: return datetime.datetime.strptime(s, fmt).date()
-        except Exception: pass
-    return None
-
-# ================= كنس الأرشيف: أي ملف مش بتاع النهارده يتنقل للأرشيف =================
-_SWEEP_CACHE = {}
-_SWEEP_LOCK = threading.Lock()
-
-def _unique_dest(dest):
-    """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
-    if not os.path.exists(dest): return dest
-    base, ext = os.path.splitext(dest)
-    n = 1
-    while os.path.exists(f"{base} ({n}){ext}"): n += 1
-    return f"{base} ({n}){ext}"
-
-def _sweep_file_date(path, fname, manual_map, mdate):
-    if fname.lower().endswith(".txt"):
-        rec = read_txt_record(path, mdate)
-        return rec["actual_date"] if rec else None      # txt مش إيصال → نسيبه
-    if MANUAL_NAME_RE.match(fname):
-        row = manual_map.get(fname)
-        if row:
-            dt_m = parse_vault_dt(row[4])
-            return dt_m.date() if dt_m else mdate
-        return mdate
-    raw = run_pdftotext(path)
-    if is_receipt_text(raw):
-        f = parse_receipt(path, raw)
-        return f["dt"].date() if f["dt"] else mdate
-    return extract_date_from_text(raw) or mdate
-
-def archive_sweep(folder_path, progress=None):
-    """ينقل كل ملف (PDF/TXT) تاريخه مش النهارده إلى الأرشيف، لأي سبب:
-    تاريخ مستقبلي غلط ← بنستخدم تاريخ الملف، خطأ قراءة ← تاريخ الملف، اسم مكرر ← بنزود رقم.
-    يرجّع (عدد المنقول، فولدرات الأيام اللي اتغيّرت)."""
-    ensure_archive_root(folder_path)
-    manual_map = load_manual_map()
-    load_void_map()
-    today = datetime.date.today()
-    cands = [f for f in glob.glob(os.path.join(folder_path, "*.pdf"))
-             if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-    cands += [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
-    total, moved, touched = len(cands), 0, set()
-
-    for idx, path in enumerate(cands, 1):
-        fname = os.path.basename(path)
-        if progress: progress(idx, total, fname)
-        try: stt = os.stat(path)
-        except OSError: continue
-        mdate = datetime.date.fromtimestamp(stt.st_mtime)
-        ck = (path, stt.st_mtime, stt.st_size)
-        file_date = _SWEEP_CACHE.get(ck)
-        if file_date is None:
-            try: file_date = _sweep_file_date(path, fname, manual_map, mdate)
-            except Exception as e:
-                log_exception(f"sweep_date:{fname}", e)
-                file_date = mdate
-            if file_date is None: continue
-            _SWEEP_CACHE[ck] = file_date
-        if file_date > today:                  # تاريخ مستقبلي = غالبًا قراءة غلط
-            file_date = mdate
-        if file_date >= today: continue        # بتاع النهارده يفضل مكانه
-
-        day_folder = archive_day_dir(folder_path, file_date)
-        try:
-            os.makedirs(day_folder, exist_ok=True)
-            shutil.move(path, _unique_dest(os.path.join(day_folder, fname)))
-            moved += 1
-            touched.add(day_folder)
-            if fname.lower().endswith(".pdf"):
-                cropped = path[:-4] + "_cropped.pdf"
-                if os.path.exists(cropped):
-                    try: os.remove(cropped)
-                    except Exception: pass
-        except Exception as e:
-            log_exception(f"sweep_move:{fname}", e)   # هيتحاول تاني في الكنسة الجاية
-    return moved, touched
-
-def archive_day_records(day_folder):
-    """كل سجلات اليوم من الفولدر نفسه (عشان الملخص يبقى لليوم كله مش للملفات الجديدة بس)."""
-    manual_map = load_manual_map()
-    load_void_map()
-    recs = []
-    for f in sorted(glob.glob(os.path.join(day_folder, "*.pdf"))):
-        b = os.path.basename(f)
-        if b.startswith("Samary_") or b.endswith("_cropped.pdf"): continue
-        try: rec = read_pdf_record(f, manual_map)
-        except Exception as e:
-            log_exception(f"day_records:{b}", e); rec = None
-        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": rec["is_manual"], "is_void": rec["is_void"]})
-    for f in sorted(glob.glob(os.path.join(day_folder, "*.txt"))):
-        try: rec = read_txt_record(f, datetime.date.today())
-        except Exception as e:
-            log_exception(f"day_records_txt:{os.path.basename(f)}", e); rec = None
-        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": True, "is_void": rec["is_void"]})
-    return recs
 
 SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
 EMPLOYEE_PASSWORDS = [
@@ -1845,8 +1512,6 @@ def collect_records(folder_path, target_date, progress=None):
                 pdf_files.append(f)
 
     txt_files = [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
-    if os.path.isdir(arch_day):
-        txt_files += [f for f in glob.glob(os.path.join(arch_day, "*.txt"))]
     total = len(pdf_files) + len(txt_files)
     manual_map = load_manual_map()
     records = []
@@ -2358,39 +2023,68 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception("trigger_daily_full_archive_once", e)
 
-    def _run_archive_sweep(self, folder_path, progress=None):
-        """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان."""
-        if not _SWEEP_LOCK.acquire(blocking=False): return 0
-        moved = 0
+    def _silent_archive_all_historical(self, folder_path):
         try:
-            moved, touched = archive_sweep(folder_path, progress)
-            for d_folder in touched:
+            archive_root = ensure_archive_root(folder_path)
+            manual_map = load_manual_map()
+            all_pdf_files = [f for f in glob.glob(os.path.join(folder_path, "*.pdf")) if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+            today_date = datetime.date.today()
+            days_records_map = {}
+            load_void_map()
+            _void = lambda n: n.startswith("_") or n.lstrip("_") in _VOID_KEYS
+
+            for pdf in all_pdf_files:
+                fname = os.path.basename(pdf)
+                try: mdate = datetime.date.fromtimestamp(os.path.getmtime(pdf))
+                except Exception: mdate = today_date
+
+                file_date = None
+                rec_info = None
+                if MANUAL_NAME_RE.match(fname):
+                    row = manual_map.get(fname)
+                    clean_b = fname.lstrip("_")
+                    m_amt = re.match(r"^(\d+(?:\.\d{2})?)", clean_b)
+                    if row:
+                        dt_m = parse_vault_dt(row[4])
+                        file_date = dt_m.date() if dt_m else mdate
+                        rec_info = {"unit": detect_unit_from_text(row[0]) or UNSPEC, "amount": float(row[3]), "is_manual": True, "is_void": _void(fname)}
+                    else:
+                        file_date = mdate
+                        rec_info = {"unit": UNSPEC, "amount": float(m_amt.group(1)) if m_amt else 0.0, "is_manual": True, "is_void": _void(fname)}
+                else:
+                    raw_txt = run_pdftotext(pdf)
+                    if is_receipt_text(raw_txt):
+                        f = parse_receipt(pdf, raw_txt)
+                        file_date = f["dt"].date() if f["dt"] else mdate
+                        rec_info = {"unit": f["unit"], "amount": f["amount"], "is_manual": False, "is_void": _void(fname)}
+                    else:
+                        file_date = extract_date_from_text(raw_txt) or mdate
+
+                if file_date and file_date < today_date:
+                    year_folder = os.path.join(archive_root, str(file_date.year))
+                    month_folder = os.path.join(year_folder, f"{file_date.month:02d}-{file_date.strftime('%B')}")
+                    day_folder = os.path.join(month_folder, f"{file_date.day:02d}")
+                    os.makedirs(day_folder, exist_ok=True)
+                    target_dest = os.path.join(day_folder, fname)
+                    try:
+                        shutil.move(pdf, target_dest)
+                        cropped_version = pdf.replace(".pdf", "_cropped.pdf")
+                        if os.path.exists(cropped_version):
+                            try: os.remove(cropped_version)
+                            except Exception: pass
+                        if rec_info:
+                            days_records_map.setdefault(day_folder, []).append(rec_info)
+                    except Exception:
+                        pass
+
+            for d_folder, recs in days_records_map.items():
                 d_name = os.path.basename(d_folder)
                 parent_m = os.path.basename(os.path.dirname(d_folder))
                 parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
-                tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
-                self._generate_day_summary_pdf(d_folder, tag, archive_day_records(d_folder))
-        except Exception as e:
-            log_exception("run_archive_sweep", e)
-        finally:
-            _SWEEP_LOCK.release()
-        if moved: self._start_archive_maintenance(folder_path)
-        return moved
-
-    def _archive_tick(self):
-        """كل 10 دقايق: أي ملف مش بتاع النهارده يتأرشف (يغطي تغيير اليوم والملفات اللي فشلت قبل كده)."""
-        try:
-            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-            if folder and os.path.isdir(folder) and not self.processing_lock.locked():
-                threading.Thread(target=self._run_archive_sweep, args=(folder,), daemon=True).start()
-        except Exception as e:
-            log_exception("archive_tick", e)
-        finally:
-            self.after(600000, self._archive_tick)
-
-    def _silent_archive_all_historical(self, folder_path):
-        self._run_archive_sweep(folder_path)
-        self._start_archive_maintenance(folder_path)
+                date_str_tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
+                self._generate_day_summary_pdf(d_folder, date_str_tag, recs)
+        except Exception as ex:
+            log_exception("silent_archive_historical", ex)
 
     def _cancel_auto_minimize(self):
         if self._auto_minimize_timer:
@@ -2416,4 +2110,1938 @@ class CustomTkinterApp(ctk.CTk):
             pass
 
     def _create_tray_image(self):
-        ico_path = get_a
+        ico_path = get_app_icon_path()
+        if ico_path:
+            try:
+                return Image.open(ico_path).convert("RGBA")
+            except Exception:
+                pass
+        img = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse([4, 4, 60, 60], fill="#080E17", outline="#38BDF8", width=3)
+        d.text((16, 18), "A2R", fill="#38BDF8")
+        return img
+
+    def hide_to_system_tray(self):
+        self._cancel_auto_minimize()
+        if not PYSTRAY_AVAILABLE:
+            if not getattr(self, "_tray_warned", False):
+                self._tray_warned = True
+                try:
+                    messagebox.showwarning(
+                        "System Tray",
+                        "ميزة النزول بجوار الساعة غير متاحة في هذه النسخة (مكتبة pystray/Pillow غير مضمّنة في البناء).\n"
+                        "سيتم تصغير البرنامج إلى شريط المهام بدلاً من ذلك.\n\n"
+                        f"Details: {PYSTRAY_IMPORT_ERROR or 'module not found'}")
+                except Exception:
+                    pass
+            self.iconify()
+            return
+        if self.tray_icon is None:
+            self._init_tray_icon()
+        if self.tray_icon is None:
+            # فشل إنشاء الأيقونة: لا نخفي النافذة حتى لا يضيع البرنامج
+            self.iconify()
+            return
+        self.withdraw()
+
+    def show_from_system_tray(self, icon=None, item=None):
+        def _restore():
+            self.deiconify()
+            self.state("normal")
+            if self.is_mini_mode:
+                self.switch_to_mini_view()
+            else:
+                self.switch_to_full_view()
+            self.lift()
+            self.focus_force()
+        self.run_on_main(_restore)
+
+    def request_full_console_from_tray(self):
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+        self.request_full_console()
+
+    def quit_app_completely(self, icon=None, item=None):
+        self._cancel_auto_minimize()
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+        self.run_on_main(self.destroy)
+
+    def fix_printer_paper_action(self):
+        ok, msg = configure_printer_57x90_silent()
+        play_sound_matched()
+        messagebox.showinfo(tr("done"), tr("fix_printer_ok"))
+
+    def reprint_receipt_record(self, rec):
+        fpath = rec.get("path", "")
+        if not fpath or not os.path.exists(fpath):
+            candidates = [
+                os.path.join(self.get_clean_path(), rec.get("file", "")),
+                os.path.join(self.get_clean_path(), "_" + rec.get("file", "").lstrip("_"))
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    fpath = c
+                    break
+
+        if fpath and os.path.exists(fpath):
+            self.send_to_thermal_printer_57x90(fpath)
+            play_sound_matched()
+            messagebox.showinfo(tr("done"), tr("reprint_success"))
+        else:
+            messagebox.showerror("Error", f"File not found: {rec.get('file', '')}")
+
+    def _sync_watch_path(self):
+        try: self._watch_path = self.get_clean_path()
+        except Exception: pass
+        try: self.after(1000, self._sync_watch_path)
+        except Exception: pass
+
+    def request_full_console(self):
+        self._cancel_auto_minimize()
+        ElevateLoginGate(self, self.unlock_full_console)
+
+    def unlock_full_console(self, is_supervisor):
+        self.is_supervisor = is_supervisor
+
+        # كل الصلاحيات متاحة للجميع (مستخدم أو مشرف) ما عدا زر الإكسل: حصري للمشرف
+        for w in (self.cb_d, self.cb_m, self.cb_y):
+            w.configure(state="normal")
+        for w in (self.btn_yesterday, self.btn_browse, self.btn_open_f):
+            w.configure(state="normal")
+
+        self.btn_excel.pack_forget()
+        self.btn_chrome.pack_forget()
+        if is_supervisor:
+            self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
+            self.f_role_btn.configure(border_color="#EF4444")
+            self.btn_excel.pack(side="left", padx=2)
+        else:
+            self.badge_role.configure(text="● USER", text_color="#10B981")
+            self.f_role_btn.configure(border_color="#10B981")
+        self.btn_chrome.pack(side="left", padx=2)
+
+        self.switch_to_full_view()
+        # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
+        self.after(400, self.auto_archive_on_login)
+
+    def _archive_done_today(self):
+        today_tag = datetime.date.today().strftime("%Y-%m-%d")
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
+            row = c.fetchone()
+            conn.close()
+            return bool(row) and row[0] == today_tag
+        except Exception as e:
+            log_exception("archive_done_today", e)
+            return False
+
+    def _mark_archive_done_today(self):
+        today_tag = datetime.date.today().strftime("%Y-%m-%d")
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log_exception("mark_archive_done_today", e)
+
+    def auto_archive_on_login(self):
+        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+        if not folder or not os.path.isdir(folder):
+            return
+        # الأرشفة التلقائية مرة واحدة فقط في اليوم
+        if self._archive_done_today():
+            return
+        try:
+            t = THEMES[self.current_theme_name]
+            win = ctk.CTkToplevel(self)
+            win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
+            win.resizable(False, False)
+            set_window_icon_safe(win)
+            center_window_relative(win, self, 430, 170)
+            win.configure(fg_color=t["bg"])
+            try: win.attributes("-topmost", True)
+            except Exception: pass
+            win.protocol("WM_DELETE_WINDOW", lambda: None)  # منع الإغلاق أثناء الأرشفة
+
+            ctk.CTkLabel(win, text=tr("arch_title"), font=(FONT_FAMILY, 13, "bold"),
+                         text_color=t["accent"]).pack(pady=(14, 2))
+            s_lbl = ctk.CTkLabel(win, text="Scanning files...", font=(FONT_FAMILY, 9, "bold"),
+                                 text_color=t["text"], wraplength=390)
+            s_lbl.pack(pady=(4, 6))
+
+            f_prog = ctk.CTkFrame(win, fg_color="transparent")
+            f_prog.pack(fill="x", padx=20, pady=(4, 4))
+            f_prog.grid_columnconfigure(0, weight=1)
+            p_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color=t["success"])
+            p_bar.set(0)
+            p_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            p_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
+            p_lbl.grid(row=0, column=1)
+
+            threading.Thread(target=self._process_archive_worker,
+                             args=(False, win, p_bar, p_lbl, s_lbl, folder, True), daemon=True).start()
+        except Exception as e:
+            log_exception("auto_archive_on_login", e)
+
+    def switch_to_mini_view(self, show=True):
+        self.is_mini_mode = True
+        self.body_full.pack_forget()
+        self.b_bar.pack_forget()
+        self.btn_back_to_mini.pack_forget()
+        self.f_role_btn.pack_forget()
+        
+        self.btn_elevate.pack(side="right", padx=(6, 0))
+        self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height = 440, 210
+        self.minsize(440, 210)
+        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        self.update_idletasks()
+
+        if not show:
+            return
+
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+        self._schedule_auto_minimize(5000)
+
+    def switch_to_full_view(self):
+        self.is_mini_mode = False
+        self.body_mini.pack_forget()
+        self.btn_elevate.pack_forget()
+        
+        self.btn_back_to_mini.pack(side="right", padx=(6, 0))
+        self.f_role_btn.pack(side="right", padx=(6, 0))
+        self.b_bar.pack(fill="x", side="bottom")
+        self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
+
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height = 590, 465
+        self.minsize(590, 465)
+        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        self.update_idletasks()
+
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+
+        self.bind("<Escape>", lambda e: self.confirm_and_reset())
+        self.bind("<Control-r>", lambda e: self.start_thread())
+        self.bind("<F2>", lambda e: self.open_manual())
+        self.bind("<F3>", lambda e: self.print_slip())
+        self.bind("<F4>", lambda e: self.open_cash_counter())
+
+        self._schedule_auto_minimize(30000)
+
+    def run_on_main(self, func):
+        self.after(0, func)
+
+    def get_clean_path(self):
+        txt = self.e_path.get().strip()
+        if txt.startswith("✓ "): return txt[2:].strip()
+        elif txt.startswith("⚠️ "): return txt[3:].strip()
+        return txt
+
+    def set_path_with_icon(self, raw_path):
+        self.e_path.delete(0, 'end')
+        if os.path.exists(raw_path) and os.path.isdir(raw_path):
+            self.e_path.insert(0, f"✓  {raw_path}")
+        else:
+            self.e_path.insert(0, f"⚠️  {raw_path}")
+
+    def validate_path_live(self):
+        clean_p = self.get_clean_path()
+        if os.path.exists(clean_p) and os.path.isdir(clean_p):
+            if not self.e_path.get().startswith("✓ "):
+                self.e_path.delete(0, 'end')
+                self.e_path.insert(0, f"✓  {clean_p}")
+        else:
+            if not self.e_path.get().startswith("⚠️ "):
+                self.e_path.delete(0, 'end')
+                self.e_path.insert(0, f"⚠️  {clean_p}")
+
+    def update_live_clock(self):
+        now = datetime.datetime.now()
+        clock_str = now.strftime("%I:%M:%S %p")
+        if hasattr(self, 'lbl_clock'):
+            self.lbl_clock.configure(text=clock_str)
+        self.after(1000, self.update_live_clock)
+
+    def toggle_mute(self):
+        global SOUND_MUTED
+        SOUND_MUTED = not SOUND_MUTED
+        self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
+
+    def setup_ui(self):
+        self.header = ctk.CTkFrame(self, corner_radius=0, height=36)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
+
+        f_left = ctk.CTkFrame(self.header, fg_color="transparent")
+        f_left.pack(side="left", padx=(10, 0), pady=4)
+
+        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=FONT_TITLE_LOGO)
+        self.lbl_logo.pack(side="left", padx=(0, 6))
+
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=88, height=25, state="readonly",
+                                        font=FONT_REGULAR_BOLD, command=self.on_theme_select)
+        self.cb_theme.set(self.current_theme_name)
+        self.cb_theme.pack(side="left", padx=(0, 3))
+
+        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=54, height=25, font=FONT_REGULAR_BOLD,
+                                      command=self.toggle_language)
+        self.btn_lang.pack(side="left", padx=(0, 3))
+
+        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=62, height=25, font=(FONT_FAMILY, 9, "bold"),
+                                      fg_color="#334155", hover_color="#475569", command=self.toggle_mute)
+        self.btn_mute.pack(side="left")
+
+        f_right = ctk.CTkFrame(self.header, fg_color="transparent")
+        f_right.pack(side="right", padx=(0, 10), pady=4)
+
+        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=115, height=26,
+                                         font=(FONT_FAMILY, 10, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
+                                         border_width=1, border_color="#EF4444", command=self.request_full_console)
+        self.btn_elevate.pack(side="right", padx=(6, 0))
+
+        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=95, height=25,
+                                              font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
+                                              command=self.switch_to_mini_view)
+
+        self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=6, border_width=1.2, fg_color="#121E2E")
+        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", font=(FONT_FAMILY, 9, "bold"), padx=8, pady=1)
+        self.badge_role.pack()
+
+        self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_clock.pack(side="right", padx=(0, 2))
+        self.update_live_clock()
+
+        self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
+
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=10, border_width=1)
+        self.card_mini_status.pack(fill="x", pady=(2, 4))
+
+        f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
+        f_mini_title_row.pack(fill="x", padx=14, pady=(6, 2))
+
+        self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"),
+                                          font=(FONT_FAMILY, 11, "bold"), text_color="#38BDF8")
+        self.lbl_mini_title.pack(side="left")
+
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=tr("btn_fix_printer"), width=70, height=22,
+                                             font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706", hover_color="#B45309",
+                                             text_color="#FFFFFF", command=self.fix_printer_paper_action)
+        self.btn_fix_printer.pack(side="right")
+
+        self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"),
+                                         font=(FONT_FAMILY, 10, "bold"), text_color="#10B981")
+        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 2))
+
+        self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0),
+                                            font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
+        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self.btn_mini_archive = ctk.CTkButton(self.body_mini, text=tr("clean_downloads"), height=36,
+                                              font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3",
+                                              text_color="#FFFFFF", command=self.open_downloads_archiver_dialog)
+        self.btn_mini_archive.pack(fill="x", pady=(2, 4))
+
+        self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+                                         font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
+        self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
+
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
+        self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
+        self.btn_center_box.pack(anchor="center", pady=(2, 0))
+
+        self.btn_view_rec = ctk.CTkButton(
+            self.btn_center_box, width=115, height=25, font=(FONT_FAMILY, 10, "bold"),
+            text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
+            command=self.open_records_viewer
+        )
+        self.btn_view_rec.pack(side="left", padx=2)
+
+        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=25, font=FONT_BTN_SUB,
+                                           fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
+        self.btn_pdf_export.pack(side="left", padx=2)
+
+        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
+                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
+        self.btn_print_slip.pack(side="left", padx=2)
+
+        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
+                                       height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
+
+        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
+                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
+
+        lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+                                font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
+        lbl_foot.pack(anchor="center", pady=(0, 2))
+
+        self.body_full = ctk.CTkFrame(self, fg_color="transparent")
+
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
+        self.card_top.pack(fill="x", pady=(0, 2))
+
+        self.lbl_folder = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
+        self.lbl_folder.pack(anchor="w", padx=8, pady=(2, 1))
+
+        f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
+        f_dir.pack(fill="x", padx=8, pady=1)
+
+        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=27, text_color="#FFFFFF")
+        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
+        attach_context_menu(self.e_path)
+
+        self.btn_browse = ctk.CTkButton(
+            f_dir, width=70, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
+            command=self.browse_folder
+        )
+        self.btn_browse.pack(side="left", padx=(0, 3))
+
+        self.btn_open_f = ctk.CTkButton(
+            f_dir, width=60, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#0F766E", hover_color="#115E59", border_width=1, border_color="#2DD4BF",
+            command=self.open_current_folder
+        )
+        self.btn_open_f.pack(side="left")
+
+        self.lbl_d = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
+        self.lbl_d.pack(anchor="w", padx=8, pady=(1, 1))
+
+        f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
+        f_date.pack(fill="x", padx=8, pady=(1, 3))
+
+        today = datetime.date.today()
+        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_d.set(f"{today.day:02d}")
+        self.cb_d.pack(side="left", padx=(0, 2))
+
+        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_m.set(f"{today.month:02d}")
+        self.cb_m.pack(side="left", padx=(0, 2))
+
+        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=66, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_y.set(str(today.year))
+        self.cb_y.pack(side="left", padx=(0, 4))
+
+        self.btn_today = ctk.CTkButton(f_date, width=52, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
+        self.btn_today.pack(side="left", padx=(0, 2))
+
+        self.btn_yesterday = ctk.CTkButton(f_date, width=62, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF",
+                                           fg_color="#334155", hover_color="#475569", command=self.set_yesterday)
+        self.btn_yesterday.pack(side="left", padx=(0, 6))
+
+        f_switches = ctk.CTkFrame(f_date, fg_color="transparent")
+        f_switches.pack(side="right")
+
+        self.sw_autosync = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autosync)
+        self.sw_autosync.pack(side="left", padx=(0, 2))
+        self.lbl_sw_sync = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
+        self.lbl_sw_sync.pack(side="left", padx=(0, 8))
+
+        self.sw_autoprint = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autoprint)
+        self.sw_autoprint.pack(side="left", padx=(0, 2))
+        self.lbl_sw_print = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
+        self.lbl_sw_print.pack(side="left")
+
+        self.sw_autosync.select()
+        self.sw_autoprint.select()
+
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 2))
+
+        dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
+        dash_grid.pack(fill="x", padx=8, pady=3)
+
+        f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
+        f_kpi.pack(side="left", fill="both", expand=True)
+
+        pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
+        pill_c1.pack(side="left", padx=(0, 4), fill="both", expand=True)
+        self.lbl_kpi1_title = ctk.CTkLabel(pill_c1, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi1_title.pack(anchor="w", padx=6, pady=(1, 0))
+        self.lbl_cnt = ctk.CTkLabel(pill_c1, text="0", font=FONT_KPI_VAL, text_color="#FFFFFF")
+        self.lbl_cnt.pack(anchor="w", padx=6, pady=(0, 1))
+
+        pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
+        pill_c2.pack(side="left", padx=(0, 4), fill="both", expand=True)
+        self.lbl_kpi2_title = ctk.CTkLabel(pill_c2, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi2_title.pack(anchor="w", padx=6, pady=(1, 0))
+        self.lbl_sum = ctk.CTkLabel(pill_c2, text="0.00 EGP", font=FONT_KPI_VAL, text_color="#00FF66")
+        self.lbl_sum.pack(anchor="w", padx=6, pady=(0, 1))
+
+        f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
+        f_pos.pack(side="right", fill="both")
+
+        self.lbl_pos_title = ctk.CTkLabel(f_pos, font=FONT_SECTION_LBL)
+        self.lbl_pos_title.pack(anchor="w", pady=(0, 1))
+
+        f_pos_in = ctk.CTkFrame(f_pos, fg_color="transparent")
+        f_pos_in.pack(fill="x")
+
+        vcmd = (self.register(self.validate_numeric_input), '%P')
+        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=105, height=25,
+                                  justify="center", font=FONT_ENTRY, text_color="#FFFFFF",
+                                  validate="key", validatecommand=vcmd)
+        self.e_pos.pack(side="left", padx=(0, 3))
+        self.e_pos.bind("<Return>", lambda e: self.check_pos())
+        attach_context_menu(self.e_pos)
+
+        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=50, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
+        self.btn_pos_check.pack(side="left")
+
+        self.lbl_diff = ctk.CTkLabel(f_pos, text="", font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_diff.pack(anchor="w", pady=(1, 0))
+
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 2))
+
+        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=10, pady=(4, 2))
+
+        f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_prog.pack(fill="x", padx=10, pady=(0, 2))
+
+        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=6, progress_color="#00FF66", fg_color="#064E3B")
+        self.progress_bar.set(0)
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=34)
+        self.lbl_progress_pct.pack(side="right")
+
+        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
+        self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 2))
+
+        f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_act.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=27, width=72, command=self.open_manual)
+        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 1))
+
+        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=27, width=72, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=27, width=60, command=self.open_cash_counter)
+        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=27, width=68, command=self.open_downloads_archiver_dialog)
+        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
+                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
+                                       command=self.confirm_and_reset)
+        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
+
+    def on_theme_select(self, selected_theme):
+        self.current_theme_name = selected_theme
+        self.apply_theme(selected_theme)
+
+    def apply_theme(self, name):
+        t = THEMES[name]
+        ctk.set_appearance_mode(t["mode"])
+        self.configure(fg_color=t["bg"])
+        self.header.configure(fg_color=t["sub_card"])
+        self.lbl_logo.configure(text_color=t["accent"])
+        self.card_top.configure(fg_color=t["card"], border_color=t["border"])
+        self.card_dash.configure(fg_color=t["card"], border_color=t["border"])
+        self.card_actions.configure(fg_color=t["card"], border_color=t["border"])
+        self.card_mini_status.configure(fg_color=t["card"], border_color=t["border"])
+        self.b_bar.configure(fg_color=t["sub_card"])
+
+        self.lbl_folder.configure(text_color=t["accent"])
+        self.lbl_d.configure(text_color=t["accent"])
+        self.lbl_kpi1_title.configure(text_color=t["accent"])
+        self.lbl_kpi2_title.configure(text_color=t["accent"])
+        self.lbl_pos_title.configure(text_color=t["accent"])
+        self.lbl_sum.configure(text_color="#00FF66")
+        self.btn_run.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
+        self.btn_pos_check.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
+
+        self.update_toggle_appearance()
+
+    def update_toggle_appearance(self):
+        t = THEMES[self.current_theme_name]
+        if self.auto_sync_enabled:
+            self.sw_autosync.configure(progress_color=t["success"], button_color="#FFFFFF")
+            self.lbl_sw_sync.configure(text=tr("autosync_on"), text_color="#FFFFFF")
+        else:
+            self.sw_autosync.configure(fg_color=t["border"], button_color=t["text_muted"])
+            self.lbl_sw_sync.configure(text=tr("autosync_off"), text_color=t["text_muted"])
+
+        if self.auto_print_enabled:
+            self.sw_autoprint.configure(progress_color=t["success"], button_color="#FFFFFF")
+            self.lbl_sw_print.configure(text=tr("autoprint_on"), text_color="#FFFFFF")
+        else:
+            self.sw_autoprint.configure(fg_color=t["border"], button_color=t["text_muted"])
+            self.lbl_sw_print.configure(text=tr("autoprint_off"), text_color=t["text_muted"])
+
+    def toggle_autosync(self):
+        self.auto_sync_enabled = bool(self.sw_autosync.get())
+        self.update_toggle_appearance()
+
+    def toggle_autoprint(self):
+        self.auto_print_enabled = bool(self.sw_autoprint.get())
+        self.update_toggle_appearance()
+        if self.auto_print_enabled:
+            p = self.get_clean_path()
+            if os.path.exists(p):
+                for f in glob.glob(os.path.join(p, "*.pdf")):
+                    fn = os.path.basename(f)
+                    self.printed_receipts_set.add(fn)
+                    self.printed_receipts_set.add(clean_download_filename(fn))
+
+    def toggle_language(self):
+        global CURRENT_LANG
+        self.current_lang = "ar" if self.current_lang == "en" else "en"
+        CURRENT_LANG = self.current_lang
+        self.apply_language(self.current_lang)
+
+    def apply_language(self, lang):
+        L = LANGUAGES[lang]
+        self.btn_lang.configure(text=L["toggle_btn"])
+        self.lbl_folder.configure(text=L["dir_path"])
+        self.btn_browse.configure(text=L["browse"])
+        self.btn_open_f.configure(text=L["open"])
+        self.lbl_d.configure(text=L["date_lbl"])
+        self.btn_today.configure(text=L["today"])
+        self.btn_yesterday.configure(text=L["yesterday"])
+        self.btn_run.configure(text=L["start"])
+        self.btn_manual.configure(text=L["manual"])
+        self.btn_summary_reopen.configure(text=L["summary_btn"])
+        self.btn_cash.configure(text=L["cash_btn"])
+        self.btn_archive_downloads.configure(text=L["clean_downloads"])
+        self.btn_mini_archive.configure(text=L["clean_downloads"])
+        self.btn_reset.configure(text=L["reset"])
+        self.lbl_kpi1_title.configure(text=L["kpi1"])
+        self.lbl_kpi2_title.configure(text=L["kpi2"])
+        self.lbl_pos_title.configure(text=L["pos_box_title"])
+        self.btn_pos_check.configure(text=L["pos_check_btn"])
+        self.btn_view_rec.configure(text=L["view_records"])
+        self.btn_pdf_export.configure(text=L["export_pdf"])
+        self.btn_print_slip.configure(text=L["print_slip"])
+        self.btn_excel.configure(text=L["open_excel"])
+        self.btn_chrome.configure(text=L["open_chrome"])
+        self.btn_elevate.configure(text=L["btn_full_console"])
+        self.btn_back_to_mini.configure(text=L["btn_back_mini"])
+        self.lbl_mini_title.configure(text=L["mini_station_title"])
+        self.lbl_mini_desc.configure(text=L["mini_status_active"])
+        self.lbl_mini_counter.configure(text=tr("mini_printed_count", count=self.printed_count_today))
+        self.btn_fix_printer.configure(text=L["btn_fix_printer"])
+        self.update_toggle_appearance()
+        if self.last_detailed_records:
+            annotate_records(self.last_detailed_records)
+
+    def confirm_and_reset(self):
+        if messagebox.askyesno(tr("confirm_reset"), tr("confirm_reset")):
+            self.reset_all()
+
+    def clear_results(self):
+        self.progress_bar.set(0)
+        self.lbl_progress_pct.configure(text="0%")
+        self.lbl_current_file.configure(text="")
+        self.lbl_cnt.configure(text="0")
+        self.lbl_sum.configure(text=f"0.00 {tr('currency')}")
+        self.lbl_diff.configure(text="")
+        self.system_total_sum = 0.0
+        self.last_generated_file = None
+        self.last_detailed_records = []
+        self.last_units_summary = {}
+        self.last_summary_info = {}
+
+    def reset_all(self):
+        self.set_path_with_icon(DEFAULT_RECEIPTS_DIR)
+        self.set_today()
+        self.clear_results()
+        self.e_pos.delete(0, 'end')
+
+    def set_today(self):
+        t = datetime.date.today()
+        self.cb_d.set(f"{t.day:02d}")
+        self.cb_m.set(f"{t.month:02d}")
+        self.cb_y.set(str(t.year))
+
+    def set_yesterday(self):
+        y = datetime.date.today() - datetime.timedelta(days=1)
+        self.cb_d.set(f"{y.day:02d}")
+        self.cb_m.set(f"{y.month:02d}")
+        self.cb_y.set(str(y.year))
+
+    def browse_folder(self):
+        f = filedialog.askdirectory(initialdir=self.get_clean_path())
+        if f:
+            self.set_path_with_icon(f)
+
+    def open_current_folder(self):
+        p = self.get_clean_path()
+        if os.path.exists(p): os.startfile(p)
+
+    def check_pos(self):
+        raw = self.e_pos.get().strip().replace(",", "")
+        if not raw or not self.last_detailed_records:
+            self.lbl_diff.configure(text="")
+            return
+        try:
+            val = float(raw)
+            diff = round(val - self.system_total_sum, 2)
+            t = THEMES[self.current_theme_name]
+            if abs(diff) < 0.01:
+                self.lbl_diff.configure(text=tr("pos_matched"), text_color=t["success"])
+                play_sound_matched()
+            elif diff < 0:
+                self.lbl_diff.configure(text=f"{tr('pos_shortage')} -{abs(diff):,.2f}", text_color=t["danger"])
+                play_sound_diff()
+            else:
+                self.lbl_diff.configure(text=f"{tr('pos_excess')} +{diff:,.2f}", text_color=t["warning"])
+                play_sound_diff()
+        except:
+            self.lbl_diff.configure(text="⚠️ Error", text_color="#EF4444")
+
+    def open_chrome_browser(self):
+        target_url = "http://192.168.235.50/traffic"
+        chrome_candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for path in chrome_candidates:
+            if os.path.exists(path):
+                subprocess.Popen([path, target_url])
+                return
+        webbrowser.open(target_url)
+
+    def init_watchdogs(self):
+        def _routine():
+            # استبعاد وتسكين الملفات الموجودة قبل تشغيل البرنامج
+            initial_path = self._watch_path
+            if initial_path and os.path.exists(initial_path):
+                try:
+                    for f in glob.glob(os.path.join(initial_path, "*.pdf")):
+                        fn = os.path.basename(f)
+                        self.printed_receipts_set.add(fn)
+                        self.printed_receipts_set.add(clean_download_filename(fn))
+                except Exception as e:
+                    log_exception("init_watchdogs_seed", e)
+
+            while True:
+                time.sleep(2)
+                p = self._watch_path
+                if not p or not os.path.exists(p): continue
+
+                pdf_files = glob.glob(os.path.join(p, "*.pdf"))
+
+                if self.auto_print_enabled:
+                    for pdf_file in pdf_files:
+                        fname = os.path.basename(pdf_file)
+                        if fname.endswith("_cropped.pdf") or fname.endswith("_Summary.pdf"):
+                            continue
+                        if not (fname.lower().startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
+                            continue
+
+                        if fname.lstrip("_") in _VOID_KEYS:
+                            continue
+                        clean_fn = clean_download_filename(fname)
+                        if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
+                            cr_file = pdf_file + ".crdownload"
+                            if not os.path.exists(cr_file):
+                                try:
+                                    if os.path.getsize(pdf_file) > 1000:
+                                        self.printed_receipts_set.add(fname)
+                                        self.printed_receipts_set.add(clean_fn)
+                                        self.send_to_thermal_printer_57x90(pdf_file)
+                                        self.printed_count_today += 1
+                                        self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                                            text=tr("mini_printed_count", count=self.printed_count_today)))
+                                except: pass
+
+                if self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode:
+                    try:
+                        valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+                        current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
+                        if self.last_pdf_state_sig == "":
+                            self.last_pdf_state_sig = current_sig
+                        elif current_sig != self.last_pdf_state_sig:
+                            self.last_pdf_state_sig = current_sig
+                            self.run_on_main(self.start_thread)
+                    except: pass
+
+        threading.Thread(target=_routine, daemon=True).start()
+
+    def send_to_thermal_printer_57x90(self, pdf_file_path):
+        temp_copy = None
+        try:
+            sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+            if not os.path.exists(sumatra_path):
+                sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+
+            target = pdf_file_path
+            clean_name = os.path.basename(pdf_file_path).lstrip("_")
+            if clean_name.lower().startswith("quote_receipt_"):
+                temp_copy = make_print_copy(pdf_file_path)
+                if temp_copy:
+                    target = temp_copy
+
+            if os.path.exists(sumatra_path):
+                cmd = [
+                    sumatra_path,
+                    "-print-to-default",
+                    "-print-settings", "paper=57 x 90 mm,fit",
+                    "-silent",
+                    target
+                ]
+                subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            else:
+                if sys.platform == "win32": os.startfile(target, "print")
+        except Exception as e:
+            log_exception(f"auto_print:{os.path.basename(pdf_file_path)}", e)
+        finally:
+            if temp_copy:
+                time.sleep(1.0)
+                try: os.remove(temp_copy)
+                except Exception: pass
+
+    def open_downloads_archiver_dialog(self):
+        try:
+            t = THEMES[self.current_theme_name]
+            win = ctk.CTkToplevel(self)
+            win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
+            win.resizable(False, False)
+            center_window_relative(win, self, 470, 480)
+            win.configure(fg_color=t["bg"])
+
+            ctk.CTkLabel(win, text=tr("arch_title"), font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
+            ctk.CTkLabel(win, text=tr("arch_subtitle"), font=(FONT_FAMILY, 9), text_color=t["success"]).pack(pady=(0, 6))
+
+            f_src = ctk.CTkFrame(win, fg_color="transparent")
+            f_src.pack(fill="x", padx=16, pady=(0, 4))
+            ctk.CTkLabel(f_src, text=tr("arch_dir_lbl"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=2, pady=(0, 1))
+            
+            f_in = ctk.CTkFrame(f_src, fg_color="transparent")
+            f_in.pack(fill="x")
+
+            e_arch_dir = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=27, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+            default_dir = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            e_arch_dir.insert(0, default_dir)
+            e_arch_dir.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            attach_context_menu(e_arch_dir)
+
+            def _browse_arch():
+                d = filedialog.askdirectory(initialdir=e_arch_dir.get().strip())
+                if d:
+                    e_arch_dir.delete(0, 'end')
+                    e_arch_dir.insert(0, d)
+
+            btn_browse_arch = ctk.CTkButton(f_in, text=tr("arch_btn_browse"), width=60, height=27, font=FONT_BTN_SUB,
+                                            fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=_browse_arch)
+            btn_browse_arch.pack(side="left")
+
+            f_supervisor = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=8, border_width=1, border_color=t["accent"])
+            f_supervisor.pack(fill="x", padx=16, pady=(6, 4))
+
+            ctk.CTkLabel(f_supervisor, text=tr("arch_open_day_title"), font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"]).pack(anchor="w", padx=10, pady=(6, 2))
+
+            f_pick_date = ctk.CTkFrame(f_supervisor, fg_color="transparent")
+            f_pick_date.pack(fill="x", padx=10, pady=(0, 6))
+
+            today_now = datetime.date.today()
+            cb_arch_d = ctk.CTkComboBox(f_pick_date, values=[f"{d:02d}" for d in range(1, 32)], width=50, height=25, font=FONT_REGULAR_BOLD)
+            cb_arch_d.set(f"{today_now.day:02d}")
+            cb_arch_d.pack(side="left", padx=(0, 2))
+
+            cb_arch_m = ctk.CTkComboBox(f_pick_date, values=[f"{m:02d}" for m in range(1, 13)], width=50, height=25, font=FONT_REGULAR_BOLD)
+            cb_arch_m.set(f"{today_now.month:02d}")
+            cb_arch_m.pack(side="left", padx=(0, 2))
+
+            cb_arch_y = ctk.CTkComboBox(f_pick_date, values=[str(y) for y in range(today_now.year - 3, today_now.year + 3)], width=64, height=25, font=FONT_REGULAR_BOLD)
+            cb_arch_y.set(str(today_now.year))
+            cb_arch_y.pack(side="left", padx=(0, 6))
+
+            def _find_day_archive_folder(base_folder, target_dt):
+                candidates_root = []
+                bname = os.path.basename(os.path.normpath(base_folder)).lower()
+                if bname == ARCHIVE_DIRNAME.lower():
+                    candidates_root.append(base_folder)
+                    candidates_root.append(os.path.dirname(base_folder))
+                else:
+                    candidates_root.append(os.path.join(base_folder, ARCHIVE_DIRNAME))
+                    candidates_root.append(base_folder)
+
+                y_str = str(target_dt.year)
+                d_str = f"{target_dt.day:02d}"
+                m_prefix = f"{target_dt.month:02d}"
+
+                for root in candidates_root:
+                    if not os.path.exists(root) or not os.path.isdir(root):
+                        continue
+                    y_dir = os.path.join(root, y_str)
+                    if not os.path.isdir(y_dir):
+                        continue
+                    try:
+                        for m_entry in os.listdir(y_dir):
+                            if m_entry.startswith(m_prefix) and os.path.isdir(os.path.join(y_dir, m_entry)):
+                                day_dir = os.path.join(y_dir, m_entry, d_str)
+                                if os.path.isdir(day_dir):
+                                    return day_dir
+                    except Exception:
+                        pass
+                return None
+
+            def _open_selected_day_summary():
+                try:
+                    s_d = int(cb_arch_d.get())
+                    s_m = int(cb_arch_m.get())
+                    s_y = int(cb_arch_y.get())
+                    target_dt = datetime.date(s_y, s_m, s_d)
+                except Exception:
+                    messagebox.showerror("Error", tr("invalid_date"))
+                    return
+
+                src_folder = e_arch_dir.get().strip()
+                day_folder = _find_day_archive_folder(src_folder, target_dt)
+                date_tag = target_dt.strftime("%d-%m-%Y")
+
+                if day_folder and os.path.isdir(day_folder):
+                    summary_candidates = glob.glob(os.path.join(day_folder, "*Samary*.pdf")) + \
+                                         glob.glob(os.path.join(day_folder, "*Summary*.pdf"))
+                    if summary_candidates:
+                        os.startfile(summary_candidates[0])
+                        return
+
+                    manual_map = load_manual_map()
+                    load_void_map()
+                    recs = []
+                    for f in glob.glob(os.path.join(day_folder, "*.pdf")):
+                        if f.endswith("_cropped.pdf") or "samary" in os.path.basename(f).lower() or "summary" in os.path.basename(f).lower():
+                            continue
+                        r = read_pdf_record(f, manual_map)
+                        if r:
+                            recs.append(refresh_void_flag(r))
+                    
+                    if recs:
+                        self._generate_day_summary_pdf(day_folder, date_tag, recs)
+                        new_summary = os.path.join(day_folder, f"Samary_{date_tag}.pdf")
+                        if os.path.exists(new_summary):
+                            os.startfile(new_summary)
+                            return
+
+                messagebox.showinfo("Not Found", f"No summary report or archived receipts found for: {date_tag}")
+
+            btn_open_samary = ctk.CTkButton(f_pick_date, text=tr("arch_btn_open_day"), font=FONT_BTN_SUB, fg_color="#0F766E",
+                                            hover_color="#115E59", text_color="#FFFFFF", width=120, height=26, command=_open_selected_day_summary)
+            btn_open_samary.pack(side="left")
+
+            f_prog = ctk.CTkFrame(win, fg_color="transparent")
+            f_prog.pack(fill="x", padx=16, pady=(4, 4))
+            f_prog.grid_columnconfigure(0, weight=1)
+
+            archive_prog_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color=t["success"])
+            archive_prog_bar.set(0)
+            archive_prog_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+            archive_prog_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
+            archive_prog_lbl.grid(row=0, column=1)
+
+            archive_status_lbl = ctk.CTkLabel(win, text=tr("arch_ready"), font=(FONT_FAMILY, 9), text_color=t["text_muted"])
+            archive_status_lbl.pack(pady=(0, 4))
+
+            def _execute(archive_all=False):
+                target_folder = e_arch_dir.get().strip()
+                if not os.path.exists(target_folder) or not os.path.isdir(target_folder):
+                    messagebox.showerror("Error", tr("dir_missing"))
+                    return
+                btn_prev.configure(state="disabled")
+                btn_all.configure(state="disabled")
+                btn_open_folder.configure(state="disabled")
+                btn_browse_arch.configure(state="disabled")
+                btn_open_samary.configure(state="disabled")
+                threading.Thread(target=self._process_archive_worker, args=(archive_all, win, archive_prog_bar, archive_prog_lbl, archive_status_lbl, target_folder), daemon=True).start()
+
+            btn_prev = ctk.CTkButton(win, text=tr("arch_btn_prev"), font=FONT_BTN_SUB,
+                                     fg_color="#0F766E", hover_color="#115E59", height=28, text_color="#FFFFFF", command=lambda: _execute(False))
+            btn_prev.pack(fill="x", padx=16, pady=2)
+
+            btn_all = ctk.CTkButton(win, text=tr("arch_btn_all"), font=FONT_BTN_SUB,
+                                    fg_color="#312E81", hover_color="#3730A3", height=28, text_color="#FFFFFF", command=lambda: _execute(True))
+            btn_all.pack(fill="x", padx=16, pady=2)
+
+            def _open_selected_archive():
+                root = ensure_archive_root(e_arch_dir.get().strip())
+                if os.path.exists(root): os.startfile(root)
+
+            btn_open_folder = ctk.CTkButton(win, text=tr("arch_btn_open_folder"), font=FONT_BTN_SUB,
+                                            fg_color="#1E293B", hover_color="#334155", border_width=1, border_color=t["border"], height=28,
+                                            text_color=t["text"], command=_open_selected_archive)
+            btn_open_folder.pack(fill="x", padx=16, pady=(3, 8))
+        except Exception as e: log_exception("open_archive_dialog", e)
+
+    def open_archive_directory(self):
+        p = self.get_clean_path()
+        archive_root = ensure_archive_root(p)
+        if os.path.exists(archive_root): os.startfile(archive_root)
+
+    def _generate_day_summary_pdf(self, day_folder_path, date_str, records_list):
+        if not REPORTLAB_AVAILABLE or not records_list: return
+        pdf_path = os.path.join(day_folder_path, f"Samary_{date_str}.pdf")
+        try:
+            total_sum = sum(r['amount'] for r in records_list if not r.get('is_void'))
+            total_cnt = sum(1 for r in records_list if not r.get('is_void'))
+            pdf_cnt = sum(1 for r in records_list if not r.get('is_manual') and not r.get('is_void'))
+            manual_cnt = sum(1 for r in records_list if r.get('is_manual') and not r.get('is_void'))
+            void_cnt = sum(1 for r in records_list if r.get('is_void'))
+            units_set = set(r['unit'] for r in records_list if not r.get('is_void'))
+            unit_name = " + ".join(units_set) if units_set else "وحدة غير محددة"
+
+            PAGE_W, PAGE_H = 226, 480
+            c = canvas.Canvas(pdf_path, pagesize=(PAGE_W, PAGE_H))
+            font_name = "Helvetica-Bold"
+
+            for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+                if os.path.exists(f_cand):
+                    try:
+                        pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
+                        font_name = "ReceiptArabic"
+                        break
+                    except: pass
+
+            def _ar(txt):
+                try: return get_display(arabic_reshaper.reshape(str(txt)))
+                except: return str(txt)
+
+            c.setStrokeColorRGB(0.15, 0.35, 0.55)
+            c.setLineWidth(1.5)
+            c.rect(6, 6, PAGE_W - 12, PAGE_H - 12)
+
+            c.setFont(font_name, 14)
+            c.setFillColorRGB(0.05, 0.25, 0.55)
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 32, _ar("ملخص الفحص المؤرشف"))
+            c.setFont("Helvetica-Bold", 11)
+            c.setFillColorRGB(0.15, 0.15, 0.15)
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 50, f"Date: {date_str}")
+
+            c.setStrokeColorRGB(0.6, 0.6, 0.6)
+            c.line(14, PAGE_H - 60, PAGE_W - 14, PAGE_H - 60)
+
+            y = PAGE_H - 88
+            rows = [
+                ("وحدة المرور", unit_name),
+                ("إجمالي العمليات", f"{total_cnt:,}"),
+                ("إيصالات إلكترونية", f"{pdf_cnt:,}"),
+                ("معاملات يدوية", f"{manual_cnt:,}"),
+                ("معاملات ملغية", f"{void_cnt:,}"),
+            ]
+
+            for lbl, val in rows:
+                c.setFillColorRGB(0.94, 0.96, 0.98)
+                c.rect(12, y - 6, PAGE_W - 24, 24, fill=True, stroke=False)
+                c.setFont(font_name, 9.5)
+                c.setFillColorRGB(0.25, 0.25, 0.25)
+                c.drawRightString(PAGE_W - 18, y + 2, _ar(lbl))
+                c.setFont(font_name, 10.5)
+                c.setFillColorRGB(0.0, 0.0, 0.0)
+                c.drawString(18, y + 2, _ar(val))
+                y -= 30
+
+            c.setFillColorRGB(0.08, 0.48, 0.28)
+            c.roundRect(12, y - 16, PAGE_W - 24, 42, 5, fill=True, stroke=False)
+            c.setFont(font_name, 10)
+            c.setFillColorRGB(1, 1, 1)
+            c.drawRightString(PAGE_W - 20, y + 6, _ar("إجمالي المبالغ:"))
+            c.setFont("Helvetica-Bold", 14)
+            c.drawCentredString(PAGE_W / 2, y - 8, f"{total_sum:,.2f} EGP")
+
+            c.setStrokeColorRGB(0.7, 0.7, 0.7)
+            c.line(14, 42, PAGE_W - 14, 42)
+            c.setFont("Helvetica", 8)
+            c.setFillColorRGB(0.35, 0.35, 0.35)
+            c.drawCentredString(PAGE_W / 2, 26, f"Archived: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            c.drawCentredString(PAGE_W / 2, 14, f"A2R Console {APP_VERSION} • {APP_OWNER}")
+            c.save()
+        except Exception as e:
+            log_exception("generate_day_summary_pdf", e)
+
+    def _process_archive_worker(self, archive_all, win, p_bar, p_lbl, s_lbl, folder_path, auto=False):
+        archive_root = ensure_archive_root(folder_path)
+        manual_map = load_manual_map()
+
+        all_pdf_files = [f for f in glob.glob(os.path.join(folder_path, "*.pdf")) if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+        total_f = len(all_pdf_files)
+        if total_f == 0:
+            self.run_on_main(lambda: s_lbl.configure(text="No PDF files found to archive!"))
+            time.sleep(1.5)
+            if auto: self._mark_archive_done_today()
+            self.run_on_main(lambda: win.destroy() if win.winfo_exists() else None)
+            return
+
+        today_date = datetime.date.today()
+        moved_count = 0
+        days_records_map = {}
+        load_void_map()
+        _void = lambda n: n.startswith("_") or n.lstrip("_") in _VOID_KEYS
+
+        for idx, pdf in enumerate(all_pdf_files, 1):
+            fname = os.path.basename(pdf)
+            pct = int((idx / total_f) * 100)
+            self.run_on_main(lambda p=pct, f=fname: [
+                p_bar.set(p / 100.0),
+                p_lbl.configure(text=f"{p}%"),
+                s_lbl.configure(text=f"Processing: {f}")
+            ])
+
+            try: mdate = datetime.date.fromtimestamp(os.path.getmtime(pdf))
+            except Exception: mdate = today_date
+
+            file_date = None
+            rec_info = None
+            if MANUAL_NAME_RE.match(fname):
+                row = manual_map.get(fname)
+                clean_b = fname.lstrip("_")
+                m_amt = re.match(r"^(\d+(?:\.\d{2})?)", clean_b)
+                if row:
+                    dt_m = parse_vault_dt(row[4])
+                    file_date = dt_m.date() if dt_m else mdate
+                    rec_info = {"unit": detect_unit_from_text(row[0]) or UNSPEC, "amount": float(row[3]), "is_manual": True, "is_void": _void(fname)}
+                else:
+                    file_date = mdate
+                    rec_info = {"unit": UNSPEC, "amount": float(m_amt.group(1)) if m_amt else 0.0, "is_manual": True, "is_void": _void(fname)}
+            else:
+                raw_txt = run_pdftotext(pdf)
+                if is_receipt_text(raw_txt):
+                    f = parse_receipt(pdf, raw_txt)
+                    file_date = f["dt"].date() if f["dt"] else mdate
+                    rec_info = {"unit": f["unit"], "amount": f["amount"], "is_manual": False, "is_void": _void(fname)}
+                else:
+                    file_date = extract_date_from_text(raw_txt) or mdate
+
+            if file_date == today_date: continue
+
+            if archive_all or (file_date < today_date):
+                year_folder = os.path.join(archive_root, str(file_date.year))
+                month_folder = os.path.join(year_folder, f"{file_date.month:02d}-{file_date.strftime('%B')}")
+                day_folder = os.path.join(month_folder, f"{file_date.day:02d}")
+                os.makedirs(day_folder, exist_ok=True)
+
+                target_dest = os.path.join(day_folder, fname)
+                try:
+                    shutil.move(pdf, target_dest)
+                    moved_count += 1
+                    cropped_version = pdf.replace(".pdf", "_cropped.pdf")
+                    if os.path.exists(cropped_version):
+                        try: os.remove(cropped_version)
+                        except Exception: pass
+                    if rec_info:
+                        days_records_map.setdefault(day_folder, []).append(rec_info)
+                except Exception as ex_m: log_exception(f"archive_move:{fname}", ex_m)
+
+        for d_folder, recs in days_records_map.items():
+            d_name = os.path.basename(d_folder)
+            parent_m = os.path.basename(os.path.dirname(d_folder))
+            parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
+            date_str_tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
+            self._generate_day_summary_pdf(d_folder, date_str_tag, recs)
+
+        if auto: self._mark_archive_done_today()
+
+        def _complete():
+            if auto:
+                p_bar.set(1.0)
+                p_lbl.configure(text="100%")
+                s_lbl.configure(text=f"✓ Archive complete — {moved_count} file(s) archived.")
+                try: win.after(1500, win.destroy)
+                except Exception: pass
+                return
+            try: win.destroy()
+            except: pass
+            play_sound_matched()
+            messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nCreated Samary PDF summaries for all archived days.")
+
+        self.run_on_main(_complete)
+
+    def start_thread(self):
+        L = LANGUAGES[self.current_lang]
+        if not self.processing_lock.acquire(blocking=False): return
+
+        try:
+            target_date = datetime.date(int(self.cb_y.get()), int(self.cb_m.get()), int(self.cb_d.get()))
+        except:
+            self.processing_lock.release()
+            messagebox.showerror("Error", L["invalid_date"])
+            return
+
+        folder_path = self.get_clean_path()
+        if not os.path.exists(folder_path):
+            self.processing_lock.release()
+            messagebox.showerror("Error", L["dir_missing"])
+            return
+
+        if not os.path.exists(PDFTOTEXT_EXE):
+            self.processing_lock.release()
+            messagebox.showerror("Error", f"{L['pdf_missing']}{BASE_DIR}")
+            return
+
+        if not OPENPYXL_AVAILABLE:
+            self.processing_lock.release()
+            messagebox.showerror("Error", "openpyxl is not installed.")
+            return
+
+        self.btn_run.configure(state="disabled")
+        self.is_processing = True
+        threading.Thread(target=self.process_files, args=(folder_path, target_date), daemon=True).start()
+
+    def process_files(self, folder_path, target_date):
+        date_for_filename = target_date.strftime("%d-%m-%Y")
+        date_label = target_date.strftime("%d.%m.%Y")
+
+        try:
+            self.run_on_main(lambda: self.progress_bar.set(0))
+
+            def _progress(i, total, fname):
+                pct = int((i / total) * 100) if total else 100
+                self.run_on_main(lambda i=i, t=total, f=fname, p=pct: [
+                    self.progress_bar.set(i / max(1, t)),
+                    self.lbl_progress_pct.configure(text=f"{p}%"),
+                    self.lbl_current_file.configure(text=f"Reading: {f}")
+                ])
+
+            records = collect_records(folder_path, target_date, _progress)
+
+            if not records:
+                self.run_on_main(self.clear_results)
+                if not self.auto_sync_enabled:
+                    self.run_on_main(lambda: messagebox.showinfo("Done", f"No receipts found for: {date_label}"))
+                return
+
+            device_unit = annotate_records(records)
+            info, units_summary = build_summary(records, device_unit, date_label)
+            
+            report_file_path = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{date_for_filename}.xlsx")
+            out_file = write_report(records, report_file_path)
+
+            self.last_generated_file = out_file
+            self.system_total_sum = info["total_sum"]
+            self.last_detailed_records = records
+            self.last_units_summary = units_summary
+            self.last_summary_info = info
+
+            def _finish():
+                self.progress_bar.set(1.0)
+                self.lbl_progress_pct.configure(text="100%")
+                last_f = records[-1]["file"] if records else "None"
+                self.lbl_current_file.configure(text=f"Done · {last_f}")
+                self.lbl_cnt.configure(text=f"{info['total_count']:,}")
+                self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+                self.check_pos()
+                play_sound_matched()
+
+            self.run_on_main(_finish)
+
+        except Exception as ex:
+            log_exception("process_critical", ex)
+            err_msg = str(ex)
+            self.run_on_main(lambda: messagebox.showerror("System Error", err_msg))
+        finally:
+            self.is_processing = False
+            if self.processing_lock.locked(): self.processing_lock.release()
+            self.run_on_main(lambda: self.btn_run.configure(state="normal"))
+
+    def open_excel(self):
+        if not self.is_supervisor:
+            messagebox.showwarning("Restricted", tr("restricted_admin"))
+            return
+        if self.last_generated_file and os.path.exists(self.last_generated_file):
+            os.startfile(self.last_generated_file)
+        else:
+            messagebox.showinfo("Notice", "Run extraction first!")
+
+    def refresh_after_void_change(self):
+        recs = self.last_detailed_records
+        old = self.last_summary_info or {}
+        device_unit = annotate_records(recs)
+        info, units_summary = build_summary(recs, device_unit, old.get("date_label", ""))
+        if old.get("unit"):
+            info["unit"] = old["unit"]
+        self.last_summary_info = info
+        self.last_units_summary = units_summary
+        self.system_total_sum = info["total_sum"]
+        self.lbl_cnt.configure(text=f"{info['total_count']:,}")
+        self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+        self.check_pos()
+        try:
+            rp = self.last_generated_file
+            if rp and os.path.exists(rp):
+                with open(rp, "ab"):
+                    pass
+                write_report(recs, rp)
+        except Exception as e:
+            log_exception("regen_report_after_void", e)
+
+    def void_selected_record(self, rec, on_done_callback=None):
+        try:
+            if rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("void_already"))
+                return
+            key = void_key(rec.get("file", "") or rec.get("path", ""))
+            if not key:
+                messagebox.showerror("Error", "Unable to detect receipt key!")
+                return
+
+            try:
+                parent = (self.focus_get() or self).winfo_toplevel()
+            except Exception:
+                parent = self
+            reason = simpledialog.askstring(tr("void_reason_title"), tr("void_reason_prompt"), parent=parent)
+            if reason is None:
+                return
+            reason = reason.strip()
+
+            add_void(key, rec["amount"], rec.get("plate", "-"), reason)
+            rec["is_void"] = True
+            rec["void_reason"] = reason
+
+            self.refresh_after_void_change()
+            if on_done_callback: on_done_callback()
+            messagebox.showinfo(tr("done"), f"Transaction voided: {rec['amount']:.2f} EGP.")
+        except Exception as e:
+            log_exception("void_record", e)
+            messagebox.showerror("Error", f"Void failed: {str(e)}")
+
+    def unvoid_selected_record(self, rec, on_done_callback=None):
+        try:
+            if not rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("restore_already"))
+                return
+            old_path = rec.get("path", "")
+            basename = os.path.basename(old_path)
+
+            if basename.startswith("_"):
+                if not old_path or not os.path.exists(old_path):
+                    messagebox.showerror("Error", "File does not exist in folder!")
+                    return
+                new_path = os.path.join(os.path.dirname(old_path), basename.lstrip("_"))
+                if os.path.exists(new_path):
+                    messagebox.showerror("Error", "A file with original name already exists.")
+                    return
+                try:
+                    os.rename(old_path, new_path)
+                except OSError as ex:
+                    messagebox.showerror("Error", f"Failed to rename file:\n{ex}")
+                    return
+                rec["path"], rec["file"] = new_path, os.path.basename(new_path)
+
+            remove_void(void_key(rec.get("file", "") or old_path))
+            rec["is_void"] = False
+            rec["void_reason"] = ""
+
+            self.refresh_after_void_change()
+            if on_done_callback: on_done_callback()
+            messagebox.showinfo(tr("done"), f"Transaction restored: {rec['amount']:.2f} EGP.")
+        except Exception as e:
+            log_exception("unvoid_record", e)
+            messagebox.showerror("Error", f"Restore failed: {str(e)}")
+
+    def open_records_viewer(self):
+        if not self.last_detailed_records:
+            messagebox.showinfo("Notice", tr("no_records_yet"))
+            return
+
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(tr("records_viewer_title"))
+        win.resizable(True, True)
+        set_window_icon_safe(win)
+        center_window_relative(win, self, 1260, 580)
+        win.configure(fg_color=t["bg"])
+
+        search_row = ctk.CTkFrame(win, corner_radius=10, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row.pack(fill="x", padx=14, pady=(12, 6))
+
+        search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
+                                    text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        search_entry.pack(side="left", padx=8, pady=8)
+        search_entry.focus_set()
+        attach_context_menu(search_entry)
+
+        amt_entry = ctk.CTkEntry(search_row, placeholder_text=tr("amt_filter_placeholder"), font=FONT_ENTRY, width=95,
+                                 text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        amt_entry.pack(side="left", padx=(0, 6), pady=8)
+        attach_context_menu(amt_entry)
+
+        def open_selected():
+            sel = tree.selection()
+            if not sel: return
+            try:
+                rec = self.last_detailed_records[int(sel[0])]
+            except Exception: return
+            fpath = rec.get("path", "")
+            if fpath and os.path.exists(fpath): os.startfile(fpath)
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}")
+
+        def reprint_selected():
+            sel = tree.selection()
+            if not sel: return
+            try:
+                rec = self.last_detailed_records[int(sel[0])]
+                self.reprint_receipt_record(rec)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        btn_open = ctk.CTkButton(search_row, text=tr("open_pdf_btn"), font=FONT_BTN_SUB, fg_color=t["primary"],
+                                 hover_color=t["primary_hover"], text_color="#FFFFFF", width=115, height=30, command=open_selected)
+        btn_open.pack(side="left", padx=2)
+
+        btn_reprint_toolbar = ctk.CTkButton(search_row, text=tr("btn_reprint"), font=FONT_BTN_SUB, fg_color="#D97706",
+                                            hover_color="#B45309", text_color="#FFFFFF", width=105, height=30, command=reprint_selected)
+        btn_reprint_toolbar.pack(side="left", padx=2)
+
+        def cancel_selected():
+            sel = tree.selection()
+            if not sel: return
+            idx = int(sel[0])
+            rec = self.last_detailed_records[idx]
+            if rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("void_already"))
+                return
+            msg = tr("void_confirm_msg", idx=idx+1, amt=rec['amount'])
+            if messagebox.askyesno(tr("void_confirm_title"), msg):
+                self.void_selected_record(rec, refresh)
+
+        btn_cancel_row = ctk.CTkButton(search_row, text=tr("btn_void_sel"), font=FONT_BTN_SUB, fg_color="#991B1B",
+                                       hover_color="#7F1D1D", text_color="#FFFFFF", width=110, height=30, command=cancel_selected)
+        btn_cancel_row.pack(side="left", padx=2)
+
+        def restore_selected_void():
+            sel = tree.selection()
+            if not sel: return
+            idx = int(sel[0])
+            rec = self.last_detailed_records[idx]
+            if not rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("restore_already"))
+                return
+            msg = tr("restore_confirm_msg", idx=idx+1, amt=rec['amount'])
+            if messagebox.askyesno(tr("restore_confirm_title"), msg):
+                self.unvoid_selected_record(rec, refresh)
+
+        btn_restore_void = ctk.CTkButton(search_row, text=tr("btn_restore_sel"), font=FONT_BTN_SUB, fg_color="#0F766E",
+                                         hover_color="#115E59", text_color="#FFFFFF", width=115, height=30, command=restore_selected_void)
+        btn_restore_void.pack(side="left", padx=2)
+
+        count_lbl = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        count_lbl.pack(side="right", padx=14)
+
+        ctk.CTkLabel(win, text=tr("legend_text"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
+
+        tree_frame = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame.pack(fill="both", expand=True, padx=14, pady=(2, 14))
+
+        columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
+        headers = {
+            "idx": tr("col_idx"), "unit": tr("col_unit"), "plate": tr("col_plate"),
+            "insured": tr("col_insured"), "amount": tr("col_amount"), "time": tr("col_time"),
+            "make": tr("col_make"), "model": tr("col_model"), "chassis": tr("col_chassis"),
+            "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
+        }
+
+        style = ttk.Style()
+        try: style.theme_use("clam")
+        except: pass
+        style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
+                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
+        style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
+                        font=(FONT_FAMILY, 11, "bold"), relief="flat")
+
+        def _fixed(option):
+            try:
+                return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
+            except Exception: return []
+        style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
+                  foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="A2R.Treeview")
+        
+        sort_directions = {}
+        def sort_by(col):
+            reverse = sort_directions.get(col, False)
+            sort_directions[col] = not reverse
+            if col in ("idx", "amount"):
+                self.last_detailed_records.sort(key=lambda r: float(r["amount"]) if col=="amount" else 0, reverse=reverse)
+            else:
+                self.last_detailed_records.sort(key=lambda r: str(r.get(col, "")), reverse=reverse)
+            refresh()
+
+        for col in columns:
+            tree.heading(col, text=headers.get(col, col), command=lambda c=col: sort_by(c))
+            w = 38 if col == "idx" else (140 if col in ("insured", "file", "status", "period") else 85)
+            tree.column(col, width=w, anchor="center")
+
+        for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
+            tree.tag_configure(kind, background=bg, foreground=fg)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        vsb.pack(side="right", fill="y", padx=2, pady=2)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        hsb.pack(side="bottom", fill="x", padx=2, pady=2)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
+        tree.bind("<Double-1>", lambda e: open_selected())
+
+        row_menu = tk.Menu(tree, tearoff=0)
+        row_menu.add_command(label=tr("menu_open_file"), command=open_selected)
+        row_menu.add_command(label=tr("menu_reprint"), command=reprint_selected)
+        row_menu.add_separator()
+        row_menu.add_command(label=tr("menu_void_tx"), command=cancel_selected)
+        row_menu.add_command(label=tr("menu_restore_tx"), command=restore_selected_void)
+
+        def show_row_menu(event):
+            item = tree.identify_row(event.y)
+            if item:
+                tree.selection_set(item)
+                row_menu.entryconfigure(0, label=tr("menu_open_file"))
+                row_menu.entryconfigure(1, label=tr("menu_reprint"))
+                row_menu.entryconfigure(3, label=tr("menu_void_tx"))
+                row_menu.entryconfigure(4, label=tr("menu_restore_tx"))
+                row_menu.tk_popup(event.x_root, event.y_root)
+
+        tree.bind("<Button-3>", show_row_menu)
+
+        def refresh(*_):
+            q = search_entry.get().strip().lower()
+            aq = amt_entry.get().strip().replace(",", "")
+            tree.delete(*tree.get_children())
+            shown = 0
+            shown_valid_sum = 0.0
+
+            for i, r in enumerate(self.last_detailed_records):
+                amt_str = f"{r['amount']:.2f}"
+                vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
+                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
+
+                if aq and aq not in amt_str: continue
+                if q:
+                    full_s = f"{r['unit']} {r['plate']} {r['insured']} {r['time']} {r['chassis']} {r['motor']} {r['make']} {r['model']} {r['file']} {r['status_text']}".lower()
+                    if q not in full_s: continue
+
+                tag = r["kind"] if r["kind"] in ("dup", "void") else ""
+                tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
+                shown += 1
+                if not r.get("is_void"):
+                    shown_valid_sum += r["amount"]
+
+            count_lbl.configure(text=tr("records_stats", shown=shown, net=shown_valid_sum, total=self.last_summary_info.get('total_sum', 0)))
+
+        search_entry.bind("<KeyRelease>", refresh)
+        amt_entry.bind("<KeyRelease>", refresh)
+        refresh()
+
+    def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
+        t = THEMES[self.current_theme_name]
+        modal = ctk.CTkToplevel(self)
+        modal.title(tr("summary_title"))
+        modal.resizable(False, False)
+        set_window_icon_safe(modal)
+        center_window_relative(modal, self, 440, 420)
+        modal.configure(fg_color=t["bg"])
+
+        hdr = ctk.CTkFrame(modal, corner_radius=0, height=42, fg_color=t["card"])
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=6)
+
+        card_box = ctk.CTkFrame(modal, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card_box.pack(fill="both", expand=True, padx=14, pady=10)
+
+        row_u = ctk.CTkFrame(card_box, fg_color="transparent")
+        row_u.pack(fill="x", padx=14, pady=(8, 4))
+        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
+
+        clean_opts = []
+        if unit_display_name: clean_opts.append(clean_arabic(unit_display_name))
+        for u in UNIT_NAMES + UNITS_LIST:
+            cu = clean_arabic(u)
+            if cu not in clean_opts: clean_opts.append(cu)
+
+        def _unit_changed(val):
+            if self.last_summary_info is not None:
+                self.last_summary_info["unit"] = val
+
+        cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=200, height=30, font=FONT_REGULAR_BOLD,
+                                     fg_color=t["input"], border_color=t["border"], text_color=t["text"],
+                                     command=_unit_changed)
+        cb_unit.set(clean_arabic(unit_display_name))
+        cb_unit.pack(side="right")
+
+        void_cnt = self.last_summary_info.get("void_count", 0)
+        void_amt = self.last_summary_info.get("void_sum", 0.0)
+
+        details = [
+            (tr("period_lbl"), date_label, t["text"], 12),
+            (tr("total_ops_lbl"), f"{total_cnt:,}", t["text"], 13),
+            (tr("pdf_lbl"), f"{pdf_count:,}", t["accent"], 12),
+            (tr("txt_lbl"), f"{manual_count:,}", t["success"], 12),
+            (tr("void_ops_lbl"), f"{void_cnt:,}  (-{void_amt:,.2f} {tr('currency')})", t["danger"], 12),
+        ]
+        if duplicates: details.append((tr("duplicates_lbl"), f"{duplicates}", t["danger"], 12))
+        if wrong: details.append((tr("wrong_lbl"), f"{wrong}", t["warning"], 12))
+        details.append((tr("total_amt_lbl"), f"{total_sum:,.2f} {tr('currency')}", t["success"], 16))
+
+        for lbl_t, val_t, val_c, val_sz in details:
+            row = ctk.CTkFrame(card_box, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=2)
+            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
+            ctk.CTkLabel(row, text=val_t, font=(FONT_FAMILY, val_sz, "bold"), text_color=val_c).pack(side="right")
+
+        b_bar = ctk.CTkFrame(modal, fg_color="transparent")
+        b_bar.pack(fill="x", padx=14, pady=(0, 10))
+
+        ctk.CTkButton(b_bar, text="Close", width=70, height=32, font=FONT_BTN_SUB, fg_color=t["border"],
+                      hover_color=t["card"], text_color=t["text"], command=modal.destroy).pack(side="right", padx=(4, 0))
+
+        ctk.CTkButton(b_bar, text=tr("export_pdf"), width=90, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=self.export_pdf_summary).pack(side="right", padx=4)
+
+        if self.is_supervisor:
+            ctk.CTkButton(b_bar, text=tr("open_excel"), width=95, height=32, font=FONT_BTN_SUB, fg_color=t["success"],
+                          hover_color=t["primary_hover"], text_color="#FFFFFF",
+                          command=lambda: [modal.destroy(), self.open_excel()]).pack(side="right")
+
+    def reopen_summary_modal(self):
+        if not self.last_summary_info:
+            messagebox.showinfo("Notice", tr("no_summary_yet"))
+            return
+        info = self.last_summary_info
+        self.show_custom_summary(info["unit"], info["total_sum"], info["total_count"],
+                                 info["pdf_count"], info["manual_count"], info["date_label"], info["duplicates"],
+                                 info.get("wrong_count", 0), info.get("missing_count", 0))
+
+    def open_manual(self):
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(tr("manual_win_title"))
+        win.resizable(False, False)
+        center_window_relative(win, self, 380, 340)
+        win.configure(fg_color=t["bg"])
+
+        ctk.CTkLabel(win, text=tr("manual_amt_lbl"), font=FONT_SECTION_LBL, text_color=t["warning"]).pack(anchor="w", padx=18, pady=(12, 2))
+        e_a = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
+        e_a.pack(fill="x", padx=18)
+        attach_context_menu(e_a)
+
+        ctk.CTkLabel(win, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
+        e_name = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
+        e_name.pack(fill="x", padx=18)
+        attach_context_menu(e_name)
+
+        ctk.CTkLabel(win, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
+        e_p = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
+        e_p.pack(fill="x", padx=18)
+        attach_context_menu(e_p)
+
+        ctk.CTkLabel(win, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
+        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, fg_color=t["input"], border_color=t["border"], height=32)
+        cb_u.set("")
+        cb_u.pack(fill="x", padx=18)
+        attach_context_menu(cb_u)
+
+        def save(event=None):
+            raw = e_a.get().strip().replace(",", "")
+            if not raw: return
+            try:
+                amt = float(raw)
+                if amt <= 0: return
+                dest = self.get_clean_path()
+                now_dt = datetime.datetime.now()
+                t_stamp = now_dt.strftime("%H%M%S")
+                date_tag = now_dt.strftime("%d-%m-%Y")
+                file_base = f"{amt:.2f}_{t_stamp}.pdf"
+                full_path = os.path.join(dest, file_base)
+
+                u_val = cb_u.get().strip() or "-"
+                p_val = e_p.get().strip() or "-"
+                n_val = e_name.get().strip() or "-"
+
+                if not REPORTLAB_AVAILABLE:
+                    messagebox.showerror("Error", "ReportLab is not installed!")
+                    return
+
+                self.printed_receipts_set.add(file_base)
+                create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
+                try:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute("INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+                              (u_val, p_val, n_val, amt, f"{date_tag} {t_stamp}", file_base))
+                    conn.commit()
+                    conn.close()
+                except Exception as ex_db: log_exception("insert_vault", ex_db)
+
+                if self.auto_print_enabled:
+                    self.send_to_thermal_printer_57x90(full_path)
+
+                try: os.startfile(full_path)
+                except: pass
+                win.destroy()
+            except Exception as ex_save:
+                messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}")
+
+        e_a.bind("<Return>", save)
+        ctk.CTkButton(win, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN, fg_color=t["success"],
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", height=36, command=save).pack(fill="x", padx=18, pady=16)
+        win.after(100, lambda: e_a.focus_set())
+
+    def print_slip(self):
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(tr("slip_dialog_title"))
+        win.resizable(False, False)
+        center_window_relative(win, self, 340, 250)
+        win.configure(fg_color=t["bg"])
+
+        ctk.CTkLabel(win, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(12, 2))
+
+        cb_employee = SafeArabicComboBox(win, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=32,
+                                         fg_color=t["input"], border_color=t["border"])
+        cb_employee.set("")
+        cb_employee.pack(fill="x", padx=16)
+        attach_context_menu(cb_employee)
+
+        ctk.CTkLabel(win, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(6, 2))
+        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=32, fg_color=t["input"], border_color=t["border"])
+        cb_u.set("")
+        cb_u.pack(fill="x", padx=16)
+        attach_context_menu(cb_u)
+
+        def do_p(event=None):
+            emp_val = cb_employee.get().strip()
+            unit_val = cb_u.get().strip()
+            date_val = datetime.date.today().strftime('%d/%m/%Y')
+            
+            pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val):
+                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                if not os.path.exists(sumatra_path):
+                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                
+                if os.path.exists(sumatra_path):
+                    cmd = [
+                        sumatra_path,
+                        "-print-to-default",
+                        "-print-settings", "paper=57 x 90 mm,fit",
+                        "-silent",
+                        pdf_path
+                    ]
+                    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                else:
+                    if sys.platform == "win32": os.startfile(pdf_path, "print")
+            else:
+                txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
+                lines = [l for l in [emp_val, unit_val, date_val] if l]
+                with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+                if sys.platform == "win32": os.startfile(txt_path, "print")
+            win.destroy()
+
+        cb_employee.bind("<Return>", do_p)
+        ctk.CTkButton(win, text=tr("slip_btn_print"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=do_p).pack(fill="x", padx=16, pady=16)
+        win.after(100, lambda: cb_employee.focus_set())
+
+    def export_pdf_summary(self):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror("Error", "ReportLab library required for PDF generation.")
+            return
+        if not self.last_summary_info or not self.last_generated_file:
+            messagebox.showinfo("Notice", "No records available yet. Run extraction first!")
+            return
+
+        pdf_path = os.path.splitext(self.last_generated_file)[0] + "_Summary.pdf"
+        try:
+            info = self.last_summary_info
+            PAGE_W, PAGE_H = 226, 480
+            c = canvas.Canvas(pdf_path, pagesize=(PAGE_W, PAGE_H))
+            font_name = "Helvetica-Bold"
+
+            for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+                if os.path.exists(f_cand):
+                    try:
+                        pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
+                        font_name = "ReceiptArabic"
+                        break
+                    except: pass
+
+            def _ar(txt):
+                try: return get_display(arabic_reshaper.reshape(str(txt)))
+                except: return str(txt)
+
+            c.setStrokeColorRGB(0.15, 0.35, 0.55)
+            c.setLineWidth(1.5)
+            c.rect(6, 6, PAGE_W - 12, PAGE_H - 12)
+
+            c.setFont(font_name, 15)
+            c.setFillColorRGB(0.05, 0.25, 0.55)
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 32, _ar("إيصال ملخص الفحص"))
+            c.setFont("Helvetica-Bold", 12)
+            c.setFillColorRGB(0.15, 0.15, 0.15)
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 52, f"A2R Operations Console {APP_VERSION}")
+
+            c.setStrokeColorRGB(0.6, 0.6, 0.6)
+            c.line(14, PAGE_H - 64, PAGE_W - 14, PAGE_H - 64)
+
+            y = PAGE_H - 92
+            rows = [
+                ("وحدة المرور", info.get('unit', '-')),
+                ("تاريخ التقرير", info.get('date_label', '-')),
+                ("إجمالي العمليات", f"{info.get('total_count', 0):,}"),
+                ("إيصالات إلكترونية", f"{info.get('pdf_count', 0):,}"),
+                ("معاملات يدوية", f"{info.get('manual_count', 0):,}"),
+                ("معاملات ملغية", f"{info.get('void_count', 0):,}"),
+            ]
+
+            for lbl, val in rows:
+                c.setFillColorRGB(0.94, 0.96, 0.98)
+                c.rect(12, y - 6, PAGE_W - 24, 24, fill=True, stroke=False)
+                c.setFont(font_name, 10)
+                c.setFillColorRGB(0.25, 0.25, 0.25)
+                c.drawRightString(PAGE_W - 18, y + 2, _ar(lbl))
+                c.setFont(font_name, 11)
+                c.setFillColorRGB(0.0, 0.0, 0.0)
+                c.drawString(18, y + 2, _ar(val))
+                y -= 30
+
+            c.setFillColorRGB(0.08, 0.48, 0.28)
+            c.roundRect(12, y - 18, PAGE_W - 24, 46, 5, fill=True, stroke=False)
+            c.setFont(font_name, 11)
+            c.setFillColorRGB(1, 1, 1)
+            c.drawRightString(PAGE_W - 20, y + 8, _ar("إجمالي مبالغ السيستم:"))
+            c.setFont("Helvetica-Bold", 15)
+            c.drawCentredString(PAGE_W / 2, y - 9, f"{info.get('total_sum', 0):,.2f} EGP")
+
+            c.setStrokeColorRGB(0.7, 0.7, 0.7)
+            c.line(14, 46, PAGE_W - 14, 46)
+            c.setFont("Helvetica", 8)
+            c.setFillColorRGB(0.35, 0.35, 0.35)
+            c.drawCentredString(PAGE_W / 2, 30, f"Printed: {datetime.datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+            c.drawCentredString(PAGE_W / 2, 16, f"Alexandria • {APP_OWNER} • {APP_VERSION}")
+            c.save()
+
+            os.startfile(pdf_path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def open_cash_counter(self):
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        win.title(tr("cash_win_title"))
+        win.resizable(False, False)
+        center_window_relative(win, self, 420, 500)
+        win.configure(fg_color=t["bg"])
+
+        ctk.CTkLabel(win, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
+        f_quick = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        f_quick.pack(fill="x", padx=16, pady=(4, 8))
+
+        r_c = ctk.CTkFrame(f_quick, fg_color="transparent")
+        r_c.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(r_c, text=tr("cash_manual_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["warning"]).pack(side="left")
+        e_manual_cash = ctk.CTkEntry(r_c, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_manual_cash.pack(side="right")
+        attach_context_menu(e_manual_cash)
+
+        r_p = ctk.CTkFrame(f_quick, fg_color="transparent")
+        r_p.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(r_p, text=tr("cash_pos_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(side="left")
+        e_pos_in = ctk.CTkEntry(r_p, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_pos_in.pack(side="right")
+        attach_context_menu(e_pos_in)
+
+        frame_box = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        frame_box.pack(fill="both", expand=True, padx=16, pady=2)
+
+        denoms = [200, 100, 50, 20, 10, 5, 1]
+        entries = {}
+
+        lbl_tot_cash = ctk.CTkLabel(win, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
+        lbl_combined_total = ctk.CTkLabel(win, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"])
+        lbl_diff_sys = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"))
+        current_calculated = [0.0, 0.0]
+
+        def recalc(*_):
+            c_sum = 0.0
+            for d, ent in entries.items():
+                v = ent.get().strip()
+                if v.isdigit(): c_sum += int(v) * d
+
+            manual_str = e_manual_cash.get().strip().replace(",", "")
+            if manual_str:
+                try: c_sum = float(manual_str)
+                except: pass
+
+            current_calculated[0] = c_sum
+            lbl_tot_cash.configure(text=tr("cash_tot_lbl", sum=c_sum))
+
+            pos_val = 0.0
+            pos_str = e_pos_in.get().strip().replace(",", "")
+            if pos_str:
+                try: pos_val = float(pos_str)
+                except: pass
+
+            comb = c_sum + pos_val
+            current_calculated[1] = comb
+            lbl_combined_total.configure(text=tr("cash_comb_lbl", sum=comb))
+
+            if self.system_total_sum > 0:
+                diff = round(comb - self.system_total_sum, 2)
+                if abs(diff) < 0.01: lbl_diff_sys.configure(text=tr("cash_matched_lbl"), text_color=t["success"])
+                elif diff < 0: lbl_diff_sys.configure(text=tr("cash_short_lbl", val=abs(diff)), text_color=t["danger"])
+                else: lbl_diff_sys.configure(text=tr("cash_extra_lbl", val=diff), text_color=t["warning"])
+            else:
+                lbl_diff_sys.configure(text="")
+
+        e_manual_cash.bind("<KeyRelease>", recalc)
+        e_pos_in.bind("<KeyRelease>", recalc)
+
+        for d in denoms:
+            r = ctk.CTkFrame(frame_box, fg_color="transparent")
+            r.pack(fill="x", padx=12, pady=1)
+            ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=90, anchor="w", font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(side="left")
+            e = ctk.CTkEntry(r, width=85, height=22, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+            e.pack(side="right")
+            e.bind("<KeyRelease>", recalc)
+            attach_context_menu(e)
+            entries[d] = e
+
+        lbl_tot_cash.pack(pady=(4, 0))
+        lbl_combined_total.pack(pady=(1, 0))
+        lbl_diff_sys.pack(pady=(1, 6))
+
+        def apply_and_close(event=None):
+            if current_calculated[1] > 0:
+                self.e_pos.delete(0, 'end')
+                self.e_pos.insert(0, f"{current_calculated[1]:.2f}")
+                self.check_pos()
+            win.destroy()
+
+        btn_apply = ctk.CTkButton(win, text=tr("cash_apply_btn"), font=FONT_BTN_MAIN,
+                                  fg_color=t["success"], hover_color=t["primary_hover"], height=36, command=apply_and_close)
+        btn_apply.pack(fill="x", padx=20, pady=(0, 12))
+        win.bind("<Return>", apply_and_close)
+        e_manual_cash.focus_set()
+
+if __name__ == "__main__":
+    app = CustomTkinterApp()
+    app.mainloop()
