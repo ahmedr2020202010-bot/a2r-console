@@ -1420,14 +1420,19 @@ def simple_workbook(out_path, totals):
 
 
 def find_template(extra_dirs=()):
-    for d in list(extra_dirs) + [BASE_DIR, BUNDLE_DIR]:
-        if not d or not os.path.isdir(d):
-            continue
+    """قالب الإكسيل: الاسم المضبوط 'الاسكندريه 00.xlsx' الأول، وبعده أي ملف اسمه بينتهي بـ 00.xlsx."""
+    dirs = [d for d in list(extra_dirs) + [BASE_DIR, BUNDLE_DIR] if d and os.path.isdir(d)]
+    for d in dirs:
         exact = os.path.join(d, "الاسكندريه 00.xlsx")
         if os.path.exists(exact):
             return exact
-        for f in os.listdir(d):
-            if f.lower().endswith(".xlsx") and "00" in f and not f.startswith(("~", ".")):
+    for d in dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except Exception:
+            continue
+        for f in names:
+            if f.lower().endswith("00.xlsx") and not f.startswith(("~", ".")):
                 return os.path.join(d, f)
     return None
 
@@ -1750,6 +1755,7 @@ def _appdata_dir():
 def _open_path(p):
     try:
         if not p or not os.path.exists(p):
+            messagebox.showinfo("A2R", "الملف أو المكان ده مش موجود.")
             return
         if sys.platform == "win32":
             os.startfile(p)
@@ -1759,6 +1765,61 @@ def _open_path(p):
             subprocess.Popen(["xdg-open", p])
     except Exception as e:
         messagebox.showerror("A2R", str(e))
+
+
+def _lang():
+    return getattr(sys.modules.get("__main__"), "CURRENT_LANG", "en")
+
+
+def _L(ar, en):
+    return ar if _lang() == "ar" else en
+
+
+def _settings_path():
+    return os.path.join(_appdata_dir(), "pos_settings.json")
+
+
+def _load_settings():
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_setting(k, v):
+    try:
+        d = _load_settings()
+        d[k] = v
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def _reveal(p):
+    """يفتح مكان الملف في الإكسبلورر ويحدد الملف (أو يفتح الفولدر لو الملف مش موجود)."""
+    try:
+        if p and os.path.isfile(p) and sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select," + os.path.normpath(p)])
+        elif p and os.path.isdir(p):
+            _open_path(p)
+        elif p and os.path.isdir(os.path.dirname(p)):
+            _open_path(os.path.dirname(p))
+        else:
+            messagebox.showinfo("A2R", "المكان ده لسه مش موجود.")
+    except Exception as e:
+        messagebox.showerror("A2R", str(e))
+
+
+def _newest(folder, ext):
+    try:
+        c = [os.path.join(folder, f) for f in os.listdir(folder)
+             if f.lower().endswith(ext) and not f.startswith("~")]
+        return max(c, key=os.path.getmtime) if c else None
+    except Exception:
+        return None
 
 
 def _fixes_path():
@@ -1934,8 +1995,9 @@ class _FeatureWindow(ctk.CTkToplevel):
         _icon(self)
         self.configure(fg_color=self.t["bg"])
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 3)))
-        self.minsize(820, 560)
+        w, h = min(w, int(sw * 0.86)), min(h, int(sh * 0.80))
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 4)))
+        self.minsize(720, 460)
         self.sources = []
         self.recursive = tk.BooleanVar(value=False)
         self.job = None
@@ -2003,7 +2065,7 @@ class _FeatureWindow(ctk.CTkToplevel):
         self.bar.set(0)
         self.bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.lbl_status = ctk.CTkLabel(parent, text="", font=(F, 10, "bold"), text_color=t["muted"], anchor="w",
-                                       justify="left", wraplength=820)
+                                       justify="left", wraplength=700)
         self.lbl_status.pack(fill="x", padx=14, pady=(0, 2))
 
     def _tree(self, parent, columns, widths, height=10):
@@ -2104,15 +2166,41 @@ class _EditClosingDialog(_Modal):
         cb(tid, E.round2(amt))
 
 
+class _ReceiptViewer(ctk.CTkToplevel):
+    """بيعرض صورة الإيصال المقروء عشان تقارنه بالمبلغ في الجدول."""
+
+    def __init__(self, parent, item):
+        super().__init__(parent)
+        t, F = _theme(parent), _font()
+        self.title("A2R - %s" % item.label)
+        _icon(self)
+        self.configure(fg_color=t["bg"])
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        mw, mh = min(620, int(sw * 0.45)), int(sh * 0.78)
+        self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 40))
+        info = "%s  |  %s  |  المبلغ المقروء: %s" % (
+            item.label, E.terminal_label(item.tid) if item.tid else "ماكينة غير محددة",
+            "%.2f" % item.amount if item.amount else "—")
+        ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20).pack(pady=6)
+        try:
+            img = (item.crop if item.crop is not None else item.image).copy().convert("RGB")
+            img.thumbnail((mw - 30, mh - 90))
+            self._img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+            ctk.CTkLabel(self, text="", image=self._img).pack(padx=8, pady=4)
+        except Exception as e:
+            ctk.CTkLabel(self, text="مش قادر أعرض الصورة: %s" % e, text_color=t["danger"]).pack(pady=20)
+
+
 class ClosingWindow(_FeatureWindow):
     TITLE = "التقفيل"
 
     def __init__(self, parent):
-        super().__init__(parent, 960, 700)
+        super().__init__(parent, 880, 600)
         t, F = self.t, self.F
         self.raw_all, self.kept, self.warnings, self.outputs = [], [], [], None
-        self.out_dir = os.path.join(_documents_dir(), "Closing")
-        self.template = None
+        _st = _load_settings()
+        self.out_dir = _st.get("closing_out") or os.path.join(_documents_dir(), "Closing")
+        self.template = _st.get("closing_template") if os.path.exists(_st.get("closing_template") or "") else None
         ctk.CTkLabel(self, text="📑 التقفيل - قراءة باتشات الماكينات", font=(F, 16, "bold"),
                      text_color=t["accent"]).pack(pady=(10, 0))
         self._build_source_bar(self)
@@ -2125,21 +2213,23 @@ class ClosingWindow(_FeatureWindow):
         self.lbl_out.pack(side="left", fill="x", expand=True)
         self._refresh_out_label()
         self._build_progress(self)
+        # الشريط السفلي والملاحظات الأول (side=bottom) عشان الأزرار ماتختفيش في الشاشات الصغيرة
+        bt = ctk.CTkFrame(self, fg_color="transparent")
+        bt.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
+        self.txt = ctk.CTkTextbox(self, height=80, font=(F, 10), fg_color=t["input"], text_color=t["text"])
+        self.txt.pack(side="bottom", fill="x", padx=12, pady=4)
+        self.txt.configure(state="disabled")
         cols = [("n", "م"), ("file", "الملف"), ("tid", "الماكينة"), ("unit", "الوحدة"), ("amount", "المبلغ"),
                 ("status", "الحالة")]
-        self.tv = self._tree(self, cols, [40, 220, 100, 130, 100, 330], height=11)
+        self.tv = self._tree(self, cols, [40, 200, 100, 120, 90, 280], height=7)
         self.tv.bind("<Double-1>", lambda e: self.edit_selected())
-        self.txt = ctk.CTkTextbox(self, height=110, font=(F, 10), fg_color=t["input"], text_color=t["text"])
-        self.txt.pack(fill="x", padx=12, pady=4)
-        self.txt.configure(state="disabled")
-        bt = ctk.CTkFrame(self, fg_color="transparent")
-        bt.pack(fill="x", padx=12, pady=(2, 10))
-        self.b_edit = self._btn(bt, "✏️ تعديل المحدد", self.edit_selected, color=t["warning"], w=140)
-        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء الملفات", self.rebuild, w=160)
-        self.b_folder = self._btn(bt, "📂 فتح الناتج", lambda: _open_path(self.out_dir), color=t["card"], w=120)
-        self.b_pdf = self._btn(bt, "📄 PDF", lambda: self._open_out("pdf"), color=t["card"], w=80)
-        self.b_xlsx = self._btn(bt, "📊 Excel", lambda: self._open_out("xlsx"), color=t["card"], w=90)
-        for b in (self.b_xlsx, self.b_pdf, self.b_folder, self.b_rebuild, self.b_edit):
+        self.b_edit = self._btn(bt, "✏️ تعديل", self.edit_selected, color=t["warning"], w=90)
+        self.b_view = self._btn(bt, "👁 عرض الإيصال", self.view_selected, color=t["card"], w=120)
+        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=110)
+        self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=120)
+        self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=115)
+        self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=120)
+        for b in (self.b_xlsx, self.b_pdf, self.b_folder, self.b_rebuild, self.b_view, self.b_edit):
             b.pack(side="right", padx=3)
 
     def _refresh_out_label(self):
@@ -2152,6 +2242,7 @@ class ClosingWindow(_FeatureWindow):
         d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الناتج")
         if d:
             self.out_dir = d
+            _save_setting("closing_out", d)
             self._refresh_out_label()
 
     def pick_template(self):
@@ -2159,16 +2250,37 @@ class ClosingWindow(_FeatureWindow):
                                        filetypes=[("Excel", "*.xlsx")])
         if f:
             self.template = f
+            _save_setting("closing_template", f)
             self._refresh_out_label()
 
+    def _out_file(self, kind):
+        p = (self.outputs or {}).get(kind)
+        if p and os.path.exists(p):
+            return p
+        return _newest(self.out_dir, ".pdf" if kind == "pdf" else ".xlsx")
+
     def _open_out(self, kind):
-        if not self.outputs:
+        p = self._out_file(kind)
+        if not p:
+            messagebox.showinfo("A2R", "لسه ما اتعملش ملف. اضغط «بدء القراءة» الأول.", parent=self)
             return
-        p = self.outputs.get(kind)
+        _open_path(p)
+
+    def show_folder(self):
+        p = self._out_file("xlsx") or self._out_file("pdf")
         if p:
-            _open_path(p)
+            _reveal(p)
         else:
-            messagebox.showinfo("A2R", "الملف ده لسه ما اتعملش.", parent=self)
+            os.makedirs(self.out_dir, exist_ok=True)
+            _open_path(self.out_dir)
+
+    def view_selected(self):
+        sel = self.tv.selection()
+        item = self._iid.get(sel[0]) if sel and getattr(self, "_iid", None) else None
+        if item is None:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        _ReceiptViewer(self, item)
 
     # --- التشغيل
     def start(self):
@@ -2257,6 +2369,10 @@ class ClosingWindow(_FeatureWindow):
             lines.append("فيه إيصالات بتواريخ تانية: اتعمل لها PDF منفصل ومش داخلة في الإجمالي.")
         if o.get("xlsx_error"):
             lines.append("⚠️ فشل الإكسيل: " + o["xlsx_error"])
+        tot = o.get("totals") or {}
+        if tot:
+            lines.insert(0, "الإجماليات: " + " | ".join(
+                "%s %s" % (E.ROW_NAMES[r], format(v, ",.2f")) for r, v in sorted(tot.items()) if v))
         self.txt.insert("1.0", ("ملاحظات للمراجعة (%d):\n• " % len(lines) + "\n• ".join(lines)) if lines else "مفيش ملاحظات ✓")
         self.txt.configure(state="disabled")
 
@@ -2350,7 +2466,7 @@ class PaymentsWindow(_FeatureWindow):
     TITLE = "إيصالات الدفع"
 
     def __init__(self, parent):
-        super().__init__(parent, 980, 700)
+        super().__init__(parent, 900, 600)
         t, F = self.t, self.F
         self.results = []
         self.dest = os.path.join(_documents_dir(), "وحدات")
@@ -2523,18 +2639,41 @@ class PaymentsWindow(_FeatureWindow):
 # ───────────────────────── النافذة الرئيسية للأدوات + نقطة الدخول ─────────────────────────
 class PosToolsHub(_Modal):
     def __init__(self, app):
-        super().__init__(app, "A2R - أدوات المشرف", 400, 290)
+        super().__init__(app, _L("A2R - أدوات المشرف", "A2R - Supervisor"), 440, 300)
         self.app = app
         t, F = self.t, _font()
         self._wins = {}
-        ctk.CTkLabel(self, text="🛠️ أدوات المشرف", font=(F, 17, "bold"), text_color=t["accent"]).pack(pady=(16, 2))
-        ctk.CTkLabel(self, text="اختار الأداة (بتطلب كلمة مرور خاصة)", font=(F, 10, "bold"),
-                     text_color=t["muted"]).pack(pady=(0, 12))
-        ctk.CTkButton(self, text="📑  التقفيل", height=48, font=(F, 14, "bold"), fg_color=t["primary"],
-                      hover_color=t["hover"], command=lambda: self.ask("التقفيل", ClosingWindow)).pack(fill="x", padx=36, pady=5)
-        ctk.CTkButton(self, text="🧾  إيصالات الدفع", height=48, font=(F, 14, "bold"), fg_color=t["primary"],
-                      hover_color=t["hover"], command=lambda: self.ask("إيصالات الدفع", PaymentsWindow)).pack(fill="x", padx=36, pady=5)
-        ctk.CTkLabel(self, text="A2R %s" % TOOLS_VERSION, font=(F, 9, "bold"), text_color="#64748B").pack(pady=(10, 0))
+        ctk.CTkLabel(self, text=_L("🛠️ المشرف", "🛠️ Supervisor"), font=(F, 17, "bold"),
+                     text_color=t["accent"]).pack(pady=(14, 2))
+        ctk.CTkLabel(self, text=_L("كل صلاحيات المشرف في مكان واحد", "All supervisor tools in one place"),
+                     font=(F, 10, "bold"), text_color=t["muted"]).pack(pady=(0, 8))
+        g = ctk.CTkFrame(self, fg_color="transparent")
+        g.pack(fill="both", expand=True, padx=20, pady=4)
+        g.grid_columnconfigure((0, 1), weight=1, uniform="a")
+
+        def mk(r, c, text, cmd, color):
+            ctk.CTkButton(g, text=text, height=52, font=(F, 12, "bold"), fg_color=color, hover_color=t["hover"],
+                          command=cmd).grid(row=r, column=c, padx=5, pady=5, sticky="nsew")
+
+        mk(0, 0, _L("📑 التقفيل 🔐", "📑 Closing 🔐"), lambda: self.ask("التقفيل", ClosingWindow), t["primary"])
+        mk(0, 1, _L("🧾 إيصالات الدفع 🔐", "🧾 Payment receipts 🔐"),
+           lambda: self.ask("إيصالات الدفع", PaymentsWindow), t["primary"])
+        mk(1, 0, _L("📊 فتح الإكسيل", "📊 Open Excel"), lambda: self.run_app("open_excel"), "#059669")
+        mk(1, 1, _L("🗂️ سجل الأرشيف", "🗂️ Archive history"), lambda: self.run_app("open_archive_history"), "#7C3AED")
+        ctk.CTkLabel(self, text="A2R %s" % TOOLS_VERSION, font=(F, 9, "bold"), text_color="#64748B").pack(pady=(4, 8))
+
+    def run_app(self, name):
+        fn = getattr(self.app, name, None)
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+        if fn:
+            try:
+                fn()
+            except Exception as e:
+                messagebox.showerror("A2R", str(e))
 
     def ask(self, title, cls):
         w = self._wins.get(title)
@@ -2576,10 +2715,23 @@ def open_pos_tools(app):
     _HUB = PosToolsHub(app)
 
 
+def pos_tools_button_text():
+    return _L("🛠️ المشرف", "🛠️ Supervisor")
+
+
+def refresh_pos_tools_button(app):
+    b = getattr(app, "btn_pos_tools", None)
+    if b is not None:
+        try:
+            b.configure(text=pos_tools_button_text())
+        except Exception:
+            pass
+
+
 def make_pos_tools_button(app, parent, **kw):
-    """بيعمل الزر (من غير ما يحطه). حطه بـ pack/grid/place واظهره للمشرف بس (is_supervisor)."""
+    """بيعمل الزر (من غير ما يحطه). الاسم بيتغير مع لغة البرنامج."""
     t = _theme(app)
-    btn = ctk.CTkButton(parent, text="🛠️ أدوات المشرف", font=(_font(), 11, "bold"), fg_color=t["primary"],
+    btn = ctk.CTkButton(parent, text=pos_tools_button_text(), font=(_font(), 11, "bold"), fg_color=t["primary"],
                         hover_color=t["hover"], command=lambda: open_pos_tools(app), **kw)
     app.btn_pos_tools = btn
     return btn
@@ -2589,7 +2741,7 @@ POS_TOOLS_ERROR = ""
 try:
     _a2r_embed("a2r_pos_engine", _A2R_POS_ENGINE_SRC)
     _a2r_embed("a2r_pos_tools", _A2R_POS_TOOLS_SRC)
-    from a2r_pos_tools import open_pos_tools, make_pos_tools_button
+    from a2r_pos_tools import open_pos_tools, make_pos_tools_button, refresh_pos_tools_button
     POS_TOOLS_AVAILABLE = True
 except Exception as _pos_exc:
     POS_TOOLS_AVAILABLE = False
@@ -5841,11 +5993,11 @@ class CustomTkinterApp(ctk.CTk):
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
-            self.btn_excel.pack(side="left", padx=2)
-            self.btn_arch_hist.pack(side="left", padx=2)
             if getattr(self, "btn_pos_tools", None) is not None:
                 self.btn_pos_tools.pack(side="left", padx=2)
             else:
+                self.btn_excel.pack(side="left", padx=2)
+                self.btn_arch_hist.pack(side="left", padx=2)
                 self.btn_pos_close.pack(side="left", padx=2)
                 self.btn_pos_pay.pack(side="left", padx=2)
         else:
@@ -6128,7 +6280,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pos_tools = None
         if POS_TOOLS_AVAILABLE:
             try:
-                self.btn_pos_tools = make_pos_tools_button(self, self.btn_center_box, width=115, height=25)
+                self.btn_pos_tools = make_pos_tools_button(self, self.btn_center_box, width=105, height=25)
             except Exception:
                 self.btn_pos_tools = None
 
@@ -6389,6 +6541,11 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pos_pay.configure(text=L["pos_pay_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
+        if POS_TOOLS_AVAILABLE:
+            try:
+                refresh_pos_tools_button(self)
+            except Exception:
+                pass
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
