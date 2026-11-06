@@ -3137,7 +3137,7 @@ class PosToolsHub(_Modal):
         g.grid_columnconfigure((0, 1), weight=1, uniform="a")
 
         def mk(r, c, text, cmd, color):
-            ctk.CTkButton(g, text=text, height=52, font=(F, 12, "bold"), fg_color=color, hover_color=t["hover"],
+            ctk.CTkButton(g, text=text, height=64, font=(F, 12, "bold"), fg_color=color, hover_color=t["hover"],
                           command=cmd).grid(row=r, column=c, padx=5, pady=5, sticky="nsew")
 
         mk(0, 0, _L("📑 التقفيل 🔐", "📑 Closing 🔐"), lambda: self.ask("التقفيل", ClosingWindow), t["primary"])
@@ -3345,11 +3345,20 @@ logging.basicConfig(
 
 def log_exception(context, exc):
     try: logging.error(f"[{context}] {exc}")
-    except: pass
+    except Exception: pass
+
+def db_connect():
+    """اتصال موحّد بقاعدة البيانات: مهلة انتظار 15 ثانية بدل الفشل الفوري لو القاعدة مشغولة (database is locked)."""
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    try:
+        conn.execute("PRAGMA busy_timeout=15000")
+    except Exception as e:
+        log_exception("db_connect", e)
+    return conn
 
 def init_local_database():
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = db_connect()
         c = conn.cursor()
         c.execute('''
             CREATE TABLE IF NOT EXISTS manual_tx (
@@ -3406,7 +3415,7 @@ def load_void_map():
     global _VOID_KEYS
     mp = {}
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = db_connect()
         c = conn.cursor()
         c.execute("SELECT file_key, reason, voided_at, voided_by FROM voids")
         for k, r, at, by in c.fetchall():
@@ -3420,7 +3429,7 @@ def load_void_map():
 def add_void(file_key, amount, plate, reason):
     by = os.environ.get("USERNAME") or os.environ.get("USER") or "-"
     at = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    conn = sqlite3.connect(DB_FILE)
+    conn = db_connect()
     try:
         conn.execute("INSERT OR REPLACE INTO voids (file_key, amount, plate, reason, voided_at, voided_by) VALUES (?,?,?,?,?,?)",
                      (file_key, float(amount), plate or "-", reason or "", at, by))
@@ -3430,7 +3439,7 @@ def add_void(file_key, amount, plate, reason):
     _VOID_KEYS[file_key] = {"reason": reason or "", "at": at, "by": by}
 
 def remove_void(file_key):
-    conn = sqlite3.connect(DB_FILE)
+    conn = db_connect()
     try:
         conn.execute("DELETE FROM voids WHERE file_key = ?", (file_key,))
         conn.commit()
@@ -3495,6 +3504,47 @@ THEMES = {
     }
 }
 THEME_KEYS = list(THEMES.keys())
+
+# تباين النص الأبيض على اللون الأساسي كان أقل من 4.5:1 في أربع ثيمات (القراءة صعبة)؛ ده تغميق بسيط بيحقق المعيار.
+THEMES["Aero Dark"].update(primary="#0369A1", primary_hover="#075985")
+THEMES["Light Modern"].update(primary="#0369A1", primary_hover="#075985")
+THEMES["Cyber Amber"].update(primary="#B45309", primary_hover="#92400E")
+THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
+
+# ألوان الأزرار بحسب الدور: (لون, لون الـ hover). كل الأزرار من نفس الدور بقت بنفس اللون، وتتغيّر مع الثيم.
+#  primary = الإجراء الأساسي | success_btn = إنشاء/إضافة | tool = تقارير وأرشيف | warn_btn = طباعة ودفع
+#  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
+_ROLE_BTN = {
+    "Aero Dark": {
+        "secondary": ("#334155", "#475569"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Light Modern": {
+        "secondary": ("#475569", "#334155"), "success_btn": ("#047857", "#065F46"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Cyber Amber": {
+        "secondary": ("#3F3F46", "#52525B"), "success_btn": ("#047857", "#065F46"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#9A3412", "#7C2D12"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Emerald Glass": {
+        "secondary": ("#1E3A34", "#2A4D45"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#BE123C", "#9F1239")},
+    "Royal Purple": {
+        "secondary": ("#3B2A5A", "#4C3A73"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#1D4ED8", "#1E40AF"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+}
+for _n, _roles in _ROLE_BTN.items():
+    for _k, (_c, _h) in _roles.items():
+        THEMES[_n][_k] = _c
+        THEMES[_n][_k + "_hover"] = _h
+
+# أي زر في أي دور (أسماء الـ attributes في النافذة الرئيسية)
+BUTTON_ROLES = {
+    "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_today", "btn_view_rec"],
+    "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel", "btn_pos_close"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_hist", "btn_mini_archive", "btn_chrome"],
+    "warn_btn": ["btn_print_slip", "btn_pos_pay", "btn_fix_printer"],
+    "secondary": ["btn_yesterday", "btn_mute", "btn_back_to_mini", "btn_pdf_export"],
+    "danger_btn": ["btn_elevate"],
+}
 
 TAG_COLORS = {
     "Dark": {
@@ -3696,7 +3746,7 @@ def play_sound_matched():
             winsound.Beep(987, 100)
             winsound.Beep(1318, 120)
             winsound.Beep(1760, 160)
-        except: pass
+        except Exception: pass
     threading.Thread(target=_tone, daemon=True).start()
 
 def play_sound_diff():
@@ -3705,7 +3755,7 @@ def play_sound_diff():
         try:
             winsound.Beep(520, 150)
             winsound.Beep(440, 200)
-        except: pass
+        except Exception: pass
     threading.Thread(target=_tone, daemon=True).start()
 
 def _entry_widget(widget):
@@ -3881,7 +3931,7 @@ def parse_print_time(time_str):
     for fmt, pat in patterns:
         if re.match(pat, time_str):
             try: return datetime.datetime.strptime(time_str, fmt)
-            except: pass
+            except Exception: pass
     return None
 
 def extract_date_from_text(txt):
@@ -3897,7 +3947,7 @@ def extract_date_from_text(txt):
         for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
             try:
                 return datetime.datetime.strptime(d_str, fmt).date()
-            except: pass
+            except Exception: pass
     return None
 
 def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
@@ -3913,11 +3963,11 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
                 pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                 font_name = "ReceiptArabic"
                 break
-            except: pass
+            except Exception: pass
 
     def _ar(t):
         try: return get_display(arabic_reshaper.reshape(str(t)))
-        except: return str(t)
+        except Exception: return str(t)
 
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(1.2)
@@ -3988,11 +4038,11 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
                 pdfmetrics.registerFont(TTFont("SlipArabic", f_cand))
                 font_name = "SlipArabic"
                 break
-            except: pass
+            except Exception: pass
 
     def _ar(t):
         try: return get_display(arabic_reshaper.reshape(str(t)))
-        except: return str(t)
+        except Exception: return str(t)
 
     c.setFillColorRGB(0, 0, 0)
     c.setFont(font_name, 17)
@@ -4029,7 +4079,7 @@ def _hide_path(p):
         log_exception("hide_path", e)
 
 def _ensure_archive_index():
-    conn = sqlite3.connect(DB_FILE)
+    conn = db_connect()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS archive_index (
             path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
@@ -4115,6 +4165,35 @@ def archive_index_update(folder_path, progress=None):
         conn.close()
     return done_new
 
+def _backup_db_safely(db_dir, keep_days=14):
+    """نسخ القاعدة بأمان: فحص سلامة قبل النسخ، كتابة لملف مؤقت ثم استبدال ذري (النسخة السليمة القديمة
+    متتمسحش لو النسخ فشل)، ونسخة مؤرخة لكل يوم مع الاحتفاظ بآخر keep_days يوم."""
+    s_conn = db_connect()
+    try:
+        r = s_conn.execute("PRAGMA quick_check").fetchone()
+        if not r or r[0] != "ok":
+            log_exception("archive_backup_db", f"quick_check failed, backup skipped: {r}")
+            return False
+        latest = os.path.join(db_dir, "a2r_vault_backup.db")
+        tmp = latest + ".tmp"
+        if os.path.exists(tmp): os.remove(tmp)
+        d_conn = sqlite3.connect(tmp)
+        try: s_conn.backup(d_conn)
+        finally: d_conn.close()
+        os.replace(tmp, latest)
+    finally:
+        s_conn.close()
+    day = datetime.datetime.now().strftime("%Y%m%d")
+    dated = os.path.join(db_dir, f"a2r_vault_{day}.db")
+    dtmp = dated + ".tmp"
+    shutil.copy2(latest, dtmp)
+    os.replace(dtmp, dated)
+    olds = sorted(glob.glob(os.path.join(db_dir, "a2r_vault_????????.db")))
+    for p in olds[:-keep_days]:
+        try: os.remove(p)
+        except Exception as e: log_exception("archive_backup_prune", e)
+    return True
+
 def archive_backup(folder_path):
     """نسخة احتياطية تراكمية للأرشيف في فولدر مخفي جوه فولدر تقارير البرنامج. مفيش حاجة بتتمسح من النسخة."""
     src = os.path.join(folder_path, ARCHIVE_DIRNAME)
@@ -4141,11 +4220,7 @@ def archive_backup(folder_path):
     try:
         db_dir = os.path.join(ARCHIVE_BACKUP_DIR, "_db")
         os.makedirs(db_dir, exist_ok=True)
-        s_conn = sqlite3.connect(DB_FILE)
-        d_conn = sqlite3.connect(os.path.join(db_dir, "a2r_vault_backup.db"))
-        try: s_conn.backup(d_conn)
-        finally:
-            d_conn.close(); s_conn.close()
+        _backup_db_safely(db_dir)
     except Exception as e:
         log_exception("archive_backup_db", e)
     return copied
@@ -4156,6 +4231,8 @@ def archive_maintenance(folder_path, progress=None):
     try:
         n = archive_index_update(folder_path, progress)
         b = archive_backup(folder_path)
+        try: _archive_search_rows()
+        except Exception as e: log_exception("archive_search_warm", e)
         return n, b
     except Exception as e:
         log_exception("archive_maintenance", e)
@@ -4201,6 +4278,30 @@ def _norm_search(s):
         s = s.replace(a, b)
     return re.sub(r"[\s\-_]+", "", s)
 
+_ARCH_SEARCH_CACHE = {"sig": None, "rows": []}
+_ARCH_SEARCH_LOCK = threading.Lock()
+
+def _archive_search_rows():
+    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file) محسوبة مرة واحدة.
+    بتتجدد بس لما الفهرس يتغيّر (بصمة: عدد الصفوف ومجاميع mtime/is_void/amount)."""
+    conn = _ensure_archive_index()
+    try:
+        sig = conn.execute("SELECT COUNT(*), IFNULL(SUM(mtime),0), IFNULL(SUM(is_void),0), "
+                           "IFNULL(SUM(amount),0) FROM archive_index").fetchone()
+        with _ARCH_SEARCH_LOCK:
+            if _ARCH_SEARCH_CACHE["sig"] == sig:
+                return _ARCH_SEARCH_CACHE["rows"]
+        rows = conn.execute(
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
+            "FROM archive_index WHERE is_receipt = 1").fetchall()
+    finally:
+        conn.close()
+    prepared = [(r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2])) for r in rows]
+    with _ARCH_SEARCH_LOCK:
+        _ARCH_SEARCH_CACHE["sig"] = sig
+        _ARCH_SEARCH_CACHE["rows"] = prepared
+    return prepared
+
 def archive_search(query, include_void=True, limit=3000):
     q = _norm_search(query)
     if not q: return []
@@ -4208,10 +4309,10 @@ def archive_search(query, include_void=True, limit=3000):
     try: amt = float(str(query).strip().replace(",", ""))
     except Exception: pass
     out = []
-    for r in archive_load_rows():
+    for r, n_plate, n_insured, n_file in _archive_search_rows():
         path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
         if is_void and not include_void: continue
-        hit = q in _norm_search(plate) or q in _norm_search(insured) or q in _norm_search(fname)
+        hit = q in n_plate or q in n_insured or q in n_file
         if not hit and amt is not None and abs(amount - amt) < 0.005: hit = True
         if hit: out.append(r)
     out.sort(key=lambda r: (r[1], r[7]), reverse=True)
@@ -4227,6 +4328,18 @@ def parse_flex_date(s):
 # ================= كنس الأرشيف: أي ملف مش بتاع النهارده يتنقل للأرشيف =================
 _SWEEP_CACHE = {}
 _SWEEP_LOCK = threading.Lock()
+
+_CACHE_LIMIT = 20000
+_CACHE_LOCK = threading.Lock()
+
+def _cache_put(cache, key, val):
+    """تخزين مؤقت بحد أقصى: لما يعدّي الحد بنشيل أقدم نصف الإدخالات (القاموس بيحفظ ترتيب الإضافة).
+    قبل كده الـ cache كان بيكبر مع كل ملف أُرشف طول عمر البرنامج."""
+    with _CACHE_LOCK:
+        cache[key] = val
+        if len(cache) > _CACHE_LIMIT:
+            for k in list(cache)[:_CACHE_LIMIT // 2]:
+                cache.pop(k, None)
 
 def _unique_dest(dest):
     """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
@@ -4279,7 +4392,7 @@ def archive_sweep(folder_path, progress=None):
                 log_exception(f"sweep_date:{fname}", e)
                 file_date = mdate
             if file_date is None: continue
-            _SWEEP_CACHE[ck] = file_date
+            _cache_put(_SWEEP_CACHE, ck, file_date)
         if file_date > today:                  # تاريخ مستقبلي = غالبًا قراءة غلط
             file_date = mdate
         if file_date >= today: continue        # بتاع النهارده يفضل مكانه
@@ -5128,7 +5241,36 @@ def pos_make_tree(parent, t, columns, headers, widths):
     tree.configure(yscrollcommand=vsb.set); tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
     return tree
 
-SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
+# باسورد المشرف: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مفيش نص صريح في الكود.
+# لتغييره: شغّل make_admin_hash.py والصق السطرين الناتجين مكان _SUP_SALT و _SUP_HASH.
+_SUP_SALT = bytes.fromhex("4d5883eb3e96982fb29d76b5ae8d46d7")
+_SUP_HASH = "8696da1f0380fb81ab0e79ce8ba22766d54115016d5b75846e42862b44394173"
+_SUP_ITER = 200_000
+_SUP_STATE = {"fails": 0, "locks": 0, "locked_until": 0.0}
+
+def _sup_hash(val):
+    return _hl.pbkdf2_hmac("sha256", val.encode("utf-8"), _SUP_SALT, _SUP_ITER).hex()
+
+def sup_lock_remaining():
+    return max(0, int(_SUP_STATE["locked_until"] - time.time() + 0.999))
+
+def is_supervisor_password(raw):
+    """مقارنة ثابتة الزمن. نفس التطبيع القديم (strip + lower) عشان السلوك ميتغيرش. مفيش عدّ فشل هنا."""
+    return _hm.compare_digest(_sup_hash((raw or "").strip().lower()), _SUP_HASH)
+
+def sup_register_fail():
+    """5 محاولات فاشلة متتالية = قفل 30 ثانية (يتضاعف لحد 10 دقايق). النجاح بيصفّر العدّاد."""
+    _SUP_STATE["fails"] += 1
+    try: logging.warning("Supervisor gate: failed attempt #%d", _SUP_STATE["fails"])
+    except Exception: pass
+    if _SUP_STATE["fails"] >= 5:
+        _SUP_STATE["fails"] = 0
+        _SUP_STATE["locks"] += 1
+        _SUP_STATE["locked_until"] = time.time() + min(600, 30 * (2 ** (_SUP_STATE["locks"] - 1)))
+
+def sup_register_success():
+    _SUP_STATE["fails"] = 0
+    _SUP_STATE["locks"] = 0
 EMPLOYEE_PASSWORDS = [
     "ahmedramadan", "a2r", "ahmed.r",
     "1531", "20262", "2026", "16061993", "1558", "1964",
@@ -5654,7 +5796,7 @@ def parse_vault_dt(created_at):
 def load_manual_map():
     mp = {}
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = db_connect()
         c = conn.cursor()
         c.execute("SELECT unit, plate, insured, amount, created_at, file_name FROM manual_tx ORDER BY id")
         for u, p, n, a, ca, fn in c.fetchall():
@@ -5712,7 +5854,7 @@ def read_pdf_record(path, manual_map):
         dt = parse_print_time(tm.group(0).strip().replace("/", "-")) if tm else None
         amt = float(m_amt.group(1)) if m_amt else 0.0
         rec = make_record(path, unit, "-", "-", amt, dt, mdate, True)
-        _PARSE_CACHE[key] = dict(rec)
+        _cache_put(_PARSE_CACHE, key, dict(rec))
         return rec
 
     key = (path, st.st_mtime, st.st_size)
@@ -5721,7 +5863,7 @@ def read_pdf_record(path, manual_map):
         return dict(cached) if cached else None
     txt = run_pdftotext(path)
     if not is_receipt_text(txt):
-        _PARSE_CACHE[key] = None
+        _cache_put(_PARSE_CACHE, key, None)
         return None
     f = parse_receipt(path, txt)
     rec = make_record(path, f["unit"], f["plate"], f["insured"], f["amount"], f["dt"], mdate, False,
@@ -5729,7 +5871,7 @@ def read_pdf_record(path, manual_map):
                       model=f["model"], period=f["period"])
     if not f["dt"]:
         rec["time"] = f["time"]
-    _PARSE_CACHE[key] = dict(rec)
+    _cache_put(_PARSE_CACHE, key, dict(rec))
     return rec
 
 def read_txt_record(tfile, target_date):
@@ -5986,7 +6128,7 @@ def write_report(records, out_file):
     except Exception:
         alt_path = out_file.replace(".xlsx", f"_{int(time.time())}.xlsx")
         try: wb.save(alt_path)
-        except: pass
+        except Exception: pass
     return out_file
 
 def _content_stream_bytes(data, page_body):
@@ -6136,19 +6278,27 @@ class ElevateLoginGate(ctk.CTkToplevel):
             self.pwd_visible = True
 
     def check_pwd(self):
+        rem = sup_lock_remaining()
+        if rem > 0:
+            self.lbl_err.configure(text=T2(f"مقفول مؤقتًا. حاول بعد {rem} ثانية.", f"Locked. Try again in {rem}s."))
+            self.e_pwd.delete(0, 'end')
+            return
         val = self.e_pwd.get().strip().lower()
         h_val = hashlib.sha256(val.encode('utf-8')).hexdigest()
-        if h_val in SUPERVISOR_HASHES:
+        if is_supervisor_password(val):
+            sup_register_success()
             self.destroy()
             self.on_success(is_supervisor=True)
         elif h_val in EMPLOYEE_HASHES:
+            sup_register_success()
             self.destroy()
             self.on_success(is_supervisor=False)
         else:
+            sup_register_fail()
             self.lbl_err.configure(text=tr("access_denied"))
             self.e_pwd.delete(0, 'end')
             try: winsound.MessageBeep(winsound.MB_ICONHAND)
-            except: pass
+            except Exception: pass
 
 class AdminPasswordDialog(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
@@ -6167,13 +6317,19 @@ class AdminPasswordDialog(ctk.CTkToplevel):
         attach_context_menu(self.e)
 
         def _chk(event=None):
-            val = self.e.get().strip().lower()
-            if hashlib.sha256(val.encode('utf-8')).hexdigest() in SUPERVISOR_HASHES:
+            rem = sup_lock_remaining()
+            if rem > 0:
+                messagebox.showerror("Access Denied", T2(f"مقفول مؤقتًا. حاول بعد {rem} ثانية.", f"Locked. Try again in {rem}s."))
+                self.destroy()
+                return
+            if is_supervisor_password(self.e.get()):
+                sup_register_success()
                 self.destroy()
                 on_success()
             else:
+                sup_register_fail()
                 try: winsound.MessageBeep(winsound.MB_ICONHAND)
-                except: pass
+                except Exception: pass
                 messagebox.showerror("Access Denied", tr("restricted_admin"))
                 self.destroy()
 
@@ -6289,7 +6445,7 @@ class CustomTkinterApp(ctk.CTk):
     def _trigger_daily_full_archive_once(self):
         today_tag = datetime.date.today().strftime("%Y-%m-%d")
         try:
-            conn = sqlite3.connect(DB_FILE)
+            conn = db_connect()
             c = conn.cursor()
             c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
             row = c.fetchone()
@@ -6500,7 +6656,7 @@ class CustomTkinterApp(ctk.CTk):
     def _archive_done_today(self):
         today_tag = datetime.date.today().strftime("%Y-%m-%d")
         try:
-            conn = sqlite3.connect(DB_FILE)
+            conn = db_connect()
             c = conn.cursor()
             c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
             c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
@@ -6514,7 +6670,7 @@ class CustomTkinterApp(ctk.CTk):
     def _mark_archive_done_today(self):
         today_tag = datetime.date.today().strftime("%Y-%m-%d")
         try:
-            conn = sqlite3.connect(DB_FILE)
+            conn = db_connect()
             c = conn.cursor()
             c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
             c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
@@ -6957,8 +7113,29 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_sum.configure(text_color="#00FF66")
         self.btn_run.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
         self.btn_pos_check.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
+        self._apply_button_roles(t)
 
         self.update_toggle_appearance()
+
+    def _apply_button_roles(self, t):
+        """تلوين كل الأزرار بحسب دورها من الثيم الحالي (تغيير الثيم بيغيّرها كلها)."""
+        for role, attrs in BUTTON_ROLES.items():
+            col, hov = t.get(role), t.get(role + "_hover")
+            if not col:
+                continue
+            for a in attrs:
+                b = getattr(self, a, None)
+                if b is None:
+                    continue
+                try:
+                    b.configure(fg_color=col, hover_color=hov)
+                except Exception as e:
+                    log_exception("apply_button_role:" + a, e)
+        for a in ("btn_browse", "btn_view_rec"):   # الحد المضيء حوالين الزرين دول
+            b = getattr(self, a, None)
+            if b is not None:
+                try: b.configure(border_color=t["accent"])
+                except Exception as e: log_exception("apply_button_border:" + a, e)
 
     def update_toggle_appearance(self):
         t = THEMES[self.current_theme_name]
@@ -7102,7 +7279,7 @@ class CustomTkinterApp(ctk.CTk):
             else:
                 self.lbl_diff.configure(text=f"{tr('pos_excess')} +{diff:,.2f}", text_color=t["warning"])
                 play_sound_diff()
-        except:
+        except Exception:
             self.lbl_diff.configure(text="⚠️ Error", text_color="#EF4444")
 
     def open_chrome_browser(self):
@@ -7122,66 +7299,71 @@ class CustomTkinterApp(ctk.CTk):
         def _routine():
             # استبعاد وتسكين الملفات الموجودة قبل تشغيل البرنامج
             initial_path = self._watch_path
+            last_seeded = None   # آخر مجلد اتعلّمت ملفاته "اتطبعت"
             if initial_path and os.path.exists(initial_path):
                 try:
                     for f in glob.glob(os.path.join(initial_path, "*.pdf")):
                         fn = os.path.basename(f)
                         self.printed_receipts_set.add(fn)
                         self.printed_receipts_set.add(clean_download_filename(fn))
+                    last_seeded = initial_path
                 except Exception as e:
                     log_exception("init_watchdogs_seed", e)
 
-            last_watched = initial_path
             while True:
                 time.sleep(2)
-                p = self._watch_path
-                if not p or not os.path.exists(p): continue
+                try:
+                    p = self._watch_path
+                    if not p or not os.path.exists(p): continue
+                    if p != last_seeded:
+                        # مجلد جديد اتختار: الملفات اللي فيه دلوقتي قديمة، مش بتتطبع تلقائيًا.
+                        # الطباعة التلقائية بتشتغل بس على الملفات اللي تظهر بعد كده.
+                        for f in glob.glob(os.path.join(p, "*.pdf")):
+                            fn = os.path.basename(f)
+                            self.printed_receipts_set.add(fn)
+                            self.printed_receipts_set.add(clean_download_filename(fn))
+                        last_seeded = p
+                        continue
+                    if not (self.auto_print_enabled or self.auto_sync_enabled): continue
 
-                pdf_files = glob.glob(os.path.join(p, "*.pdf"))
+                    pdf_files = glob.glob(os.path.join(p, "*.pdf"))
 
-                # لو الفولدر/اليوم اتغيّر: سجّل الإيصالات القديمة كأنها اتطبعت عشان ماتتطبعش تاني
-                if p != last_watched:
-                    last_watched = p
-                    for _f in pdf_files:
-                        _fn = os.path.basename(_f)
-                        self.printed_receipts_set.add(_fn)
-                        self.printed_receipts_set.add(clean_download_filename(_fn))
-                    continue
+                    if self.auto_print_enabled:
+                        for pdf_file in pdf_files:
+                            fname = os.path.basename(pdf_file)
+                            if fname.endswith("_cropped.pdf") or fname.endswith("_Summary.pdf"):
+                                continue
+                            if not (fname.lower().startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
+                                continue
 
-                if self.auto_print_enabled:
-                    for pdf_file in pdf_files:
-                        fname = os.path.basename(pdf_file)
-                        if fname.endswith("_cropped.pdf") or fname.endswith("_Summary.pdf"):
-                            continue
-                        if not (fname.lower().startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
-                            continue
+                            if fname.lstrip("_") in _VOID_KEYS:
+                                continue
+                            clean_fn = clean_download_filename(fname)
+                            if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
+                                cr_file = pdf_file + ".crdownload"
+                                if not os.path.exists(cr_file):
+                                    try:
+                                        if os.path.getsize(pdf_file) > 1000:
+                                            self.printed_receipts_set.add(fname)
+                                            self.printed_receipts_set.add(clean_fn)
+                                            self.send_to_thermal_printer_57x90(pdf_file)
+                                            self.printed_count_today += 1
+                                            self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                                                text=tr("mini_printed_count", count=self.printed_count_today)))
+                                    except Exception: pass
 
-                        if fname.lstrip("_") in _VOID_KEYS:
-                            continue
-                        clean_fn = clean_download_filename(fname)
-                        if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
-                            cr_file = pdf_file + ".crdownload"
-                            if not os.path.exists(cr_file):
-                                try:
-                                    if os.path.getsize(pdf_file) > 1000:
-                                        self.printed_receipts_set.add(fname)
-                                        self.printed_receipts_set.add(clean_fn)
-                                        self.send_to_thermal_printer_57x90(pdf_file)
-                                        self.printed_count_today += 1
-                                        self.run_on_main(lambda: self.lbl_mini_counter.configure(
-                                            text=tr("mini_printed_count", count=self.printed_count_today)))
-                                except: pass
-
-                if self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode:
-                    try:
-                        valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-                        current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
-                        if self.last_pdf_state_sig == "":
-                            self.last_pdf_state_sig = current_sig
-                        elif current_sig != self.last_pdf_state_sig:
-                            self.last_pdf_state_sig = current_sig
-                            self.run_on_main(self.start_thread)
-                    except: pass
+                    if self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode:
+                        try:
+                            valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+                            current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
+                            if self.last_pdf_state_sig == "":
+                                self.last_pdf_state_sig = current_sig
+                            elif current_sig != self.last_pdf_state_sig:
+                                self.last_pdf_state_sig = current_sig
+                                self.run_on_main(self.start_thread)
+                        except Exception: pass
+                except Exception as e:
+                    log_exception("watchdog_loop", e)
 
         threading.Thread(target=_routine, daemon=True).start()
 
@@ -7419,11 +7601,11 @@ class CustomTkinterApp(ctk.CTk):
                         pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                         font_name = "ReceiptArabic"
                         break
-                    except: pass
+                    except Exception: pass
 
             def _ar(txt):
                 try: return get_display(arabic_reshaper.reshape(str(txt)))
-                except: return str(txt)
+                except Exception: return str(txt)
 
             c.setStrokeColorRGB(0.15, 0.35, 0.55)
             c.setLineWidth(1.5)
@@ -7483,9 +7665,13 @@ class CustomTkinterApp(ctk.CTk):
             self.run_on_main(lambda p=pct, f=fname: [
                 p_bar.set(p / 100.0), p_lbl.configure(text=f"{p}%"), s_lbl.configure(text=f"Processing: {f}")])
 
-        moved_count = self._run_archive_sweep(folder_path, prog)
-        if auto: self._mark_archive_done_today()
-        self._start_archive_maintenance(folder_path)
+        moved_count = 0
+        try:
+            moved_count = self._run_archive_sweep(folder_path, prog) or 0
+            if auto: self._mark_archive_done_today()
+            self._start_archive_maintenance(folder_path)
+        except Exception as e:
+            log_exception("archive_worker", e)
 
         def _complete():
             if auto:
@@ -7496,7 +7682,7 @@ class CustomTkinterApp(ctk.CTk):
                 except Exception: pass
                 return
             try: win.destroy()
-            except: pass
+            except Exception: pass
             play_sound_matched()
             messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nSummary PDFs updated for all affected days.")
 
@@ -7508,7 +7694,7 @@ class CustomTkinterApp(ctk.CTk):
 
         try:
             target_date = datetime.date(int(self.cb_y.get()), int(self.cb_m.get()), int(self.cb_d.get()))
-        except:
+        except Exception:
             self.processing_lock.release()
             messagebox.showerror("Error", L["invalid_date"])
             return
@@ -8491,7 +8677,7 @@ class CustomTkinterApp(ctk.CTk):
 
         style = ttk.Style()
         try: style.theme_use("clam")
-        except: pass
+        except Exception: pass
         style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
                         fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
         style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
@@ -8712,7 +8898,7 @@ class CustomTkinterApp(ctk.CTk):
                 self.printed_receipts_set.add(file_base)
                 create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
                 try:
-                    conn = sqlite3.connect(DB_FILE)
+                    conn = db_connect()
                     c = conn.cursor()
                     c.execute("INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
                               (u_val, p_val, n_val, amt, f"{date_tag} {t_stamp}", file_base))
@@ -8724,7 +8910,7 @@ class CustomTkinterApp(ctk.CTk):
                     self.send_to_thermal_printer_57x90(full_path)
 
                 try: os.startfile(full_path)
-                except: pass
+                except Exception: pass
                 win.destroy()
             except Exception as ex_save:
                 messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}")
@@ -8822,11 +9008,11 @@ class CustomTkinterApp(ctk.CTk):
                         pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                         font_name = "ReceiptArabic"
                         break
-                    except: pass
+                    except Exception: pass
 
             def _ar(txt):
                 try: return get_display(arabic_reshaper.reshape(str(txt)))
-                except: return str(txt)
+                except Exception: return str(txt)
 
             c.setStrokeColorRGB(0.15, 0.35, 0.55)
             c.setLineWidth(1.5)
@@ -8929,7 +9115,7 @@ class CustomTkinterApp(ctk.CTk):
             manual_str = e_manual_cash.get().strip().replace(",", "")
             if manual_str:
                 try: c_sum = float(manual_str)
-                except: pass
+                except Exception: pass
 
             current_calculated[0] = c_sum
             lbl_tot_cash.configure(text=tr("cash_tot_lbl", sum=c_sum))
@@ -8938,7 +9124,7 @@ class CustomTkinterApp(ctk.CTk):
             pos_str = e_pos_in.get().strip().replace(",", "")
             if pos_str:
                 try: pos_val = float(pos_str)
-                except: pass
+                except Exception: pass
 
             comb = c_sum + pos_val
             current_calculated[1] = comb
