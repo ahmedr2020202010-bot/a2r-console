@@ -7131,12 +7131,22 @@ class CustomTkinterApp(ctk.CTk):
                 except Exception as e:
                     log_exception("init_watchdogs_seed", e)
 
+            last_watched = initial_path
             while True:
                 time.sleep(2)
                 p = self._watch_path
                 if not p or not os.path.exists(p): continue
 
                 pdf_files = glob.glob(os.path.join(p, "*.pdf"))
+
+                # لو الفولدر/اليوم اتغيّر: سجّل الإيصالات القديمة كأنها اتطبعت عشان ماتتطبعش تاني
+                if p != last_watched:
+                    last_watched = p
+                    for _f in pdf_files:
+                        _fn = os.path.basename(_f)
+                        self.printed_receipts_set.add(_fn)
+                        self.printed_receipts_set.add(clean_download_filename(_fn))
+                    continue
 
                 if self.auto_print_enabled:
                     for pdf_file in pdf_files:
