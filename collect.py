@@ -61,17 +61,34 @@ except ImportError:
 
 
 def parse_pos_receipt(text):
+    up_text = text.upper()
+    
+    # 1. Classification (Batch/Summary/Copy vs Payment/Other)
+    is_batch = False
+    receipt_type = "غير معروف"
+    
+    batch_keywords = ["BATCH CLOS", "SUCCESSF", "GRAND TOTAL", "SUMMARY", "REPRINT", "DUPLICATE", "TOTAL NET", "THANK YOU FOR USING"]
+    if any(kw in up_text for kw in batch_keywords):
+        is_batch = True
+        receipt_type = "تقفيل/ملخص/نسخة"
+    else:
+        pay_score = sum(1 for kw in [r'R{1,2}N\W', r'APPROVED', r'AUTH\W', r'CLESS|CHIP'] if re.search(kw, up_text))
+        if pay_score >= 1:
+            receipt_type = "إيصال دفع (مستبعد)"
+            
+    # 2. Extract TID
     tid = None
-    tid_match = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", text, re.IGNORECASE)
+    tid_match = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", up_text)
     if tid_match:
         raw_tid = re.sub(r'\D', '', tid_match.group(1).replace('/', '7'))
         if len(raw_tid) >= 8:
             tid = raw_tid[-8:]
     if not tid:
-        loose_match = re.search(r"\b(503\d{5})\b", text)
+        loose_match = re.search(r"\b(503\d{5})\b", up_text)
         if loose_match:
             tid = loose_match.group(1)
 
+    # 3. Extract Amount (Grand Total)
     amounts = []
     for m in re.finditer(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)", text):
         val_str = m.group(1).replace(',', '') + '.' + m.group(2)
@@ -80,22 +97,38 @@ def parse_pos_receipt(text):
             if 0.5 <= v <= 5000000:
                 amounts.append(v)
         except: pass
+    grand_total = max(amounts) if amounts else 0.0
 
-    grand_total = 0.0
-    if amounts:
-        grand_total = max(amounts)
-
+    # 4. Extract Batch No
     batch_no = "-"
-    b_match = re.search(r"BATCH\s*NO\D{0,6}(\d{4,7})", text, re.IGNORECASE)
+    b_match = re.search(r"BATCH\s*NO\D{0,6}(\d{4,7})", up_text)
     if b_match:
         batch_no = b_match.group(1)
+        
+    # 5. Extract Date
+    date_val = "-"
+    date_match = re.search(r"DATE\s*:?\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})", up_text)
+    if date_match:
+        date_val = date_match.group(1).replace('/', '-')
+    else:
+        dates = re.findall(r"\b\d{2}[-/.]\d{2}[-/.]\d{4}\b|\b\d{4}[-/.]\d{2}[-/.]\d{2}\b", text)
+        if dates:
+            date_val = dates[0].replace('/', '-')
 
-    return {"tid": tid, "total": grand_total, "batch": batch_no}
+    return {
+        "is_valid_batch": is_batch,
+        "type": receipt_type,
+        "tid": tid, 
+        "total": grand_total, 
+        "batch": batch_no,
+        "date": date_val
+    }
 
 def process_and_enhance_image(image_path, out_path):
     if not ADVANCED_LIBS_OK: return False
     try:
-        image = cv2.imread(image_path)
+        img_array = np.fromfile(image_path, np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         if image is None: return False
         orig = image.copy()
         ratio = image.shape[0] / 500.0
@@ -146,7 +179,9 @@ def process_and_enhance_image(image_path, out_path):
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced = clahe.apply(warped_gray)
-        cv2.imwrite(out_path, enhanced)
+        is_success, im_buf_arr = cv2.imencode(".jpg", enhanced)
+        if is_success:
+            im_buf_arr.tofile(out_path)
         return True
     except Exception as e:
         log_exception("process_image", e)
@@ -198,7 +233,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.63.0"
+APP_VERSION = "v4.66.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -532,7 +567,7 @@ LANGUAGES = {
         "cut": "Cut", "copy": "Copy", "paste": "Paste", "select_all": "Select All",
         "restricted_admin": "This feature is restricted to administrator only!", "done": "Done",
         "status_void": "Voided ❌", "status_dup": "Duplicate ×{n} ⚠️", "status_wrong": "Other Unit", "status_missing": "Missing: ", "status_manual": "Manual Receipt", "status_ok": "Valid Receipt",
-        "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Advanced Batching & Receipts", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
+        "btn_admin_panel": "⚙️ Admin Panel", "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Advanced Batching & Receipts", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
@@ -588,7 +623,7 @@ LANGUAGES = {
         "cut": "قص", "copy": "نسخ", "paste": "لصق", "select_all": "تحديد الكل",
         "restricted_admin": "هذه الصلاحية متاحة للمشرف فقط!", "done": "تم",
         "status_void": "ملغي ❌", "status_dup": "مكرر ×{n} ⚠️", "status_wrong": "وحدة مختلفة", "status_missing": "ناقص: ", "status_manual": "معاملة يدوية", "status_ok": "إيصال سليم",
-        "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "أدوات التقفيل وإيصالات الدفع", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
+        "btn_admin_panel": "⚙️ لوحة المشرف", "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "أدوات التقفيل وإيصالات الدفع", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
@@ -2402,40 +2437,60 @@ class AdvancedLoginGate(ctk.CTkToplevel):
 class AdvancedToolsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title(tr("adv_win_title"))
+        self.parent_app = parent
+        self.title("Admin Control Panel")
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 540, 300)
+        center_window_relative(self, parent, 620, 390)
         
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(self, text=tr("adv_win_title"), font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(pady=(14, 8))
+        ctk.CTkLabel(self, text="⚙️ لوحة تحكم المشرف (Admin Control Panel)", font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(14, 10))
 
-        f_dir = ctk.CTkFrame(self, fg_color="transparent")
-        f_dir.pack(fill="x", padx=20, pady=10)
+        # Section 1: Data & Archives
+        f_data = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+        f_data.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(f_data, text="التقارير وسجل الأرشيف", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
         
-        ctk.CTkLabel(f_dir, text=tr("adv_pick_folder"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", pady=(0, 4))
+        f_data_btns = ctk.CTkFrame(f_data, fg_color="transparent")
+        f_data_btns.pack(fill="x", padx=10, pady=(6, 12))
+        
+        btn_excel = ctk.CTkButton(f_data_btns, text=tr("open_excel"), font=FONT_BTN_SUB, fg_color="#059669", hover_color="#047857", text_color="#FFFFFF", height=32, command=self.parent_app.open_excel_direct)
+        btn_excel.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        
+        btn_arch_hist = ctk.CTkButton(f_data_btns, text=tr("arch_hist_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=32, command=self.parent_app.open_archive_history)
+        btn_arch_hist.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        
+        btn_clean = ctk.CTkButton(f_data_btns, text=tr("clean_downloads"), font=FONT_BTN_SUB, fg_color="#1E293B", hover_color="#334155", border_width=1, border_color="#38BDF8", text_color="#FFFFFF", height=32, command=self.parent_app.open_downloads_archiver_dialog)
+        btn_clean.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+        # Section 2: Smart Processing (Batching & Receipts)
+        f_smart = ctk.CTkFrame(self, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+        f_smart.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(f_smart, text="المعالجة الذكية والتقفيل (OCR & OpenCV)", font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 0))
+
+        f_dir = ctk.CTkFrame(f_smart, fg_color="transparent")
+        f_dir.pack(fill="x", padx=10, pady=(6, 6))
+        ctk.CTkLabel(f_dir, text=tr("adv_pick_folder"), font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", pady=(0, 2))
         
         f_in = ctk.CTkFrame(f_dir, fg_color="transparent")
         f_in.pack(fill="x")
-        
         self.e_path = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=30, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        
         btn_browse = ctk.CTkButton(f_in, text=tr("browse"), width=70, height=30, font=FONT_BTN_SUB, fg_color=t["primary"], command=self.browse_folder)
         btn_browse.pack(side="left")
 
-        f_btns = ctk.CTkFrame(self, fg_color="transparent")
-        f_btns.pack(fill="x", padx=20, pady=15)
+        f_smart_btns = ctk.CTkFrame(f_smart, fg_color="transparent")
+        f_smart_btns.pack(fill="x", padx=10, pady=(0, 12))
         
-        btn_batch = ctk.CTkButton(f_btns, text=tr("adv_btn_batch"), height=35, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
-        btn_batch.pack(side="right", fill="x", expand=True, padx=(5, 0))
+        btn_receipts = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_receipts"), height=36, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
+        btn_receipts.pack(side="left", fill="x", expand=True, padx=(4, 4))
         
-        btn_receipts = ctk.CTkButton(f_btns, text=tr("adv_btn_receipts"), height=35, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
-        btn_receipts.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        btn_batch = ctk.CTkButton(f_smart_btns, text=tr("adv_btn_batch"), height=36, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
+        btn_batch.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
-        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"], wraplength=500)
+        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], wraplength=580)
         self.lbl_status.pack(pady=(0, 10))
 
     def browse_folder(self):
@@ -2487,7 +2542,8 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
                 if process_and_enhance_image(img_path, out_path):
                     self.after(0, lambda f=filename: self.lbl_status.configure(text=f"جاري قراءة البيانات (OCR): {f}...", text_color="#F59E0B"))
                     try:
-                        text = pytesseract.image_to_string(out_path, lang='eng')
+                        img_for_ocr = Image.open(out_path)
+                        text = pytesseract.image_to_string(img_for_ocr, lang='eng')
                         parsed = parse_pos_receipt(text)
                         
                         unit_name = "غير معروف"
@@ -2502,25 +2558,43 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
                             "tid": parsed["tid"],
                             "unit": unit_name,
                             "total": parsed["total"],
-                            "batch": parsed["batch"]
+                            "batch": parsed["batch"],
+                            "date": parsed["date"],
+                            "is_valid": parsed["is_valid_batch"],
+                            "type": parsed["type"]
                         })
-                        processed += 1
+                        if parsed["is_valid_batch"]:
+                            processed += 1
                     except Exception as e:
                         log_exception(f"ocr_error: {filename}", e)
             
             if results_data:
                 report_path = os.path.join(out_dir, "Review_Report.txt")
                 with open(report_path, "w", encoding="utf-8") as rf:
-                    rf.write("=== تقرير مراجعة إيصالات الدفع ===\n\n")
+                    rf.write("=== تقرير مراجعة إيصالات الدفع والتقفيل ===\n\n")
                     grand_sum = 0.0
+                    excluded_files = []
+                    
                     for r in results_data:
+                        if not r['is_valid']:
+                            excluded_files.append(r)
+                            continue
+                            
                         rf.write(f"الملف: {r['file']}\n")
+                        rf.write(f"التاريخ: {r['date']}\n")
                         rf.write(f"الماكينة: {r['tid'] or 'غير مقروء'} ({r['unit']})\n")
+                        rf.write(f"النوع: {r['type']}\n")
                         rf.write(f"رقم الباتش: {r['batch']}\n")
                         rf.write(f"الإجمالي: {r['total']:,.2f} ج.م\n")
                         rf.write("-" * 40 + "\n")
                         grand_sum += r['total']
-                    rf.write(f"\nالإجمالي العام المقروء: {grand_sum:,.2f} ج.م\n")
+                        
+                    rf.write(f"\nالإجمالي العام للتقفيلات الصحيحة: {grand_sum:,.2f} ج.م\n")
+                    
+                    if excluded_files:
+                        rf.write("\n\n=== الملفات المستبعدة (ليست إيصالات تقفيل/ملخص) ===\n")
+                        for ex in excluded_files:
+                            rf.write(f"- {ex['file']} (السبب: {ex['type']})\n")
                     
             msg = f"تم بنجاح معالجة وقراءة {processed} صورة وإنشاء التقرير"
             self.after(0, lambda: self.lbl_status.configure(text=msg, text_color="#10B981"))
@@ -2833,16 +2907,9 @@ class CustomTkinterApp(ctk.CTk):
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
-            self.btn_excel.pack(side="left", padx=2)
-            self.btn_arch_hist.pack(side="left", padx=2)
-            if not hasattr(self, 'btn_advanced_tools'):
-                self.btn_advanced_tools = ctk.CTkButton(self.btn_center_box, text=tr("btn_advanced_tools"), fg_color="#4F46E5", hover_color="#4338CA", width=105, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.request_advanced_tools)
-            self.btn_advanced_tools.pack(side="left", padx=2)
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
-            if hasattr(self, 'btn_advanced_tools'):
-                self.btn_advanced_tools.pack_forget()
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
@@ -2953,8 +3020,8 @@ class CustomTkinterApp(ctk.CTk):
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 590, 465
-        self.minsize(590, 465)
+        width, height = 590, 500
+        self.minsize(590, 500)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -3089,36 +3156,13 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
 
         self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
-        self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(2, 0))
+        self.b_bar.pack_propagate(False)
+        
+        self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF")
+        self.lbl_foot.pack(side="left", padx=14, pady=8)
 
-        self.btn_view_rec = ctk.CTkButton(
-            self.btn_center_box, width=115, height=25, font=(FONT_FAMILY, 10, "bold"),
-            text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
-            command=self.open_records_viewer
-        )
-        self.btn_view_rec.pack(side="left", padx=2)
-
-        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=25, font=FONT_BTN_SUB,
-                                           fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
-        self.btn_pdf_export.pack(side="left", padx=2)
-
-        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
-        self.btn_print_slip.pack(side="left", padx=2)
-
-        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
-                                       height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
-
-        self.btn_arch_hist = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
-
-        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
-                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
-
-        lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
-                                font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        lbl_foot.pack(anchor="center", pady=(0, 2))
+        self.btn_admin_panel = ctk.CTkButton(self.b_bar, text=tr("btn_admin_panel"), font=FONT_BTN_SUB, fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF", width=130, height=28, command=self.request_advanced_tools)
+        self.btn_admin_panel.pack(side="right", padx=14, pady=7)
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
@@ -3241,8 +3285,8 @@ class CustomTkinterApp(ctk.CTk):
         self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
         self.card_actions.pack(fill="x", pady=(0, 2))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=10, pady=(4, 2))
+        self.btn_run = ctk.CTkButton(self.card_actions, text=tr("start"), font=FONT_BTN_MAIN, height=36, text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=10, pady=(6, 2))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
         f_prog.pack(fill="x", padx=10, pady=(0, 2))
@@ -3257,25 +3301,38 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
         self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 2))
 
-        f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_act.pack(fill="x", padx=10, pady=(0, 4))
+        # Reorganized Grid Actions
+        f_grid = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_grid.pack(fill="x", padx=10, pady=(0, 4))
+        
+        self.btn_view_rec = ctk.CTkButton(f_grid, text=tr("view_records"), font=FONT_BTN_SUB, fg_color="#0284C7", hover_color="#0369A1", text_color="#FFFFFF", height=30, command=self.open_records_viewer)
+        self.btn_view_rec.grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        
+        self.btn_summary_reopen = ctk.CTkButton(f_grid, text=tr("summary_btn"), font=FONT_BTN_SUB, fg_color="#7C3AED", hover_color="#6D28D9", text_color="#FFFFFF", height=30, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        
+        self.btn_pdf_export = ctk.CTkButton(f_grid, text=tr("export_pdf"), font=FONT_BTN_SUB, fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", height=30, command=self.export_pdf_summary)
+        self.btn_pdf_export.grid(row=0, column=2, sticky="ew", padx=3, pady=3)
 
-        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=27, width=72, command=self.open_manual)
-        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 1))
+        self.btn_manual = ctk.CTkButton(f_grid, text=tr("manual"), font=FONT_BTN_SUB, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", height=30, command=self.open_manual)
+        self.btn_manual.grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        
+        self.btn_cash = ctk.CTkButton(f_grid, text=tr("cash_btn"), font=FONT_BTN_SUB, fg_color="#0D9488", hover_color="#0F766E", text_color="#FFFFFF", height=30, command=self.open_cash_counter)
+        self.btn_cash.grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        
+        self.btn_print_slip = ctk.CTkButton(f_grid, text=tr("print_slip"), font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309", text_color="#FFFFFF", height=30, command=self.print_slip)
+        self.btn_print_slip.grid(row=1, column=2, sticky="ew", padx=3, pady=3)
+        
+        f_grid.grid_columnconfigure((0,1,2), weight=1)
 
-        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=27, width=72, command=self.reopen_summary_modal)
-        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(1, 1))
-
-        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=27, width=60, command=self.open_cash_counter)
-        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(1, 1))
-
-        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=27, width=68, command=self.open_downloads_archiver_dialog)
-        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(1, 1))
-
-        self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
-                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
-                                       command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
+        f_bot = ctk.CTkFrame(self.card_actions, fg_color="transparent")
+        f_bot.pack(fill="x", padx=13, pady=(2, 8))
+        
+        self.btn_chrome = ctk.CTkButton(f_bot, text=tr("open_chrome"), font=FONT_BTN_SUB, fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF", height=28, width=110, command=self.open_chrome_browser)
+        self.btn_chrome.pack(side="left")
+        
+        self.btn_reset = ctk.CTkButton(f_bot, text=tr("reset"), font=FONT_BTN_SUB, fg_color="transparent", hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", text_color="#EF4444", height=28, width=70, command=self.confirm_and_reset)
+        self.btn_reset.pack(side="right")
 
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
@@ -3365,9 +3422,9 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
         self.btn_excel.configure(text=L["open_excel"])
-        self.btn_arch_hist.configure(text=L["arch_hist_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
         self.btn_elevate.configure(text=L["btn_full_console"])
+        if hasattr(self, 'btn_admin_panel'): self.btn_admin_panel.configure(text=L["btn_admin_panel"])
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
@@ -3916,14 +3973,15 @@ class CustomTkinterApp(ctk.CTk):
             if self.processing_lock.locked(): self.processing_lock.release()
             self.run_on_main(lambda: self.btn_run.configure(state="normal"))
 
-    def open_excel(self):
-        if not self.is_supervisor:
-            messagebox.showwarning("Restricted", tr("restricted_admin"))
-            return
+    def open_excel_direct(self):
         if self.last_generated_file and os.path.exists(self.last_generated_file):
             os.startfile(self.last_generated_file)
         else:
             messagebox.showinfo("Notice", "Run extraction first!")
+            
+    def open_excel(self):
+        # Kept for compatibility if called elsewhere, but Admin Panel uses direct
+        self.open_excel_direct()
 
     def refresh_after_void_change(self):
         recs = self.last_detailed_records
