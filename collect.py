@@ -96,7 +96,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v4.30.0"
+APP_VERSION = "v4.60.0"
 APP_OWNER = "Ahmed Ramadan"
 
 ctk.set_appearance_mode("Dark")
@@ -430,7 +430,7 @@ LANGUAGES = {
         "cut": "Cut", "copy": "Copy", "paste": "Paste", "select_all": "Select All",
         "restricted_admin": "This feature is restricted to administrator only!", "done": "Done",
         "status_void": "Voided ❌", "status_dup": "Duplicate ×{n} ⚠️", "status_wrong": "Other Unit", "status_missing": "Missing: ", "status_manual": "Manual Receipt", "status_ok": "Valid Receipt",
-        "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
+        "btn_advanced_tools": "🛠️ Advanced Tools", "adv_login_prompt": "🔒 Enter Password for Advanced Tools", "adv_win_title": "Advanced Batching & Receipts", "adv_pick_folder": "Select Directory (Required)", "adv_btn_batch": "التقفيل (Batching)", "adv_btn_receipts": "إيصالات الدفع (Payment Receipts)", "adv_err_dir": "Please select a directory first!", "adv_placeholder": "Algorithm will be integrated here...", "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
@@ -486,7 +486,7 @@ LANGUAGES = {
         "cut": "قص", "copy": "نسخ", "paste": "لصق", "select_all": "تحديد الكل",
         "restricted_admin": "هذه الصلاحية متاحة للمشرف فقط!", "done": "تم",
         "status_void": "ملغي ❌", "status_dup": "مكرر ×{n} ⚠️", "status_wrong": "وحدة مختلفة", "status_missing": "ناقص: ", "status_manual": "معاملة يدوية", "status_ok": "إيصال سليم",
-        "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
+        "btn_advanced_tools": "🛠️ أدوات التقفيل", "adv_login_prompt": "🔒 أدخل كلمة المرور المتقدمة (للمشرف فقط)", "adv_win_title": "أدوات التقفيل وإيصالات الدفع", "adv_pick_folder": "تحديد مسار المجلد (إجباري)", "adv_btn_batch": "عملية التقفيل", "adv_btn_receipts": "فحص إيصالات الدفع", "adv_err_dir": "الرجاء اختيار المجلد أولاً!", "adv_placeholder": "سيتم دمج خوارزمية المعالجة (OpenCV/OCR) هنا في الخطوة القادمة...", "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
@@ -1183,6 +1183,8 @@ def archive_day_records(day_folder):
     return recs
 
 SUPERVISOR_HASHES = {hashlib.sha256("a2r1000".encode('utf-8')).hexdigest()}
+ADVANCED_ADMIN_HASH = hashlib.sha256("Ahmed@A2r460".encode("utf-8")).hexdigest()
+
 EMPLOYEE_PASSWORDS = [
     "ahmedramadan", "a2r", "ahmed.r",
     "1531", "20262", "2026", "16061993", "1558", "1964",
@@ -2234,7 +2236,123 @@ class AdminPasswordDialog(ctk.CTkToplevel):
         self.e.bind("<Return>", _chk)
         ctk.CTkButton(self, text="Unlock", font=FONT_BTN_SUB, fg_color=t["primary"], command=_chk).pack(pady=8)
 
-class CustomTkinterApp(ctk.CTk):
+
+class AdvancedLoginGate(ctk.CTkToplevel):
+    def __init__(self, parent, on_success):
+        super().__init__(parent)
+        self.parent = parent
+        self.on_success = on_success
+        self.title("Advanced Authorization")
+        self.resizable(False, False)
+        set_window_icon_safe(self)
+        center_window_relative(self, parent, 360, 205)
+
+        t = THEMES[parent.current_theme_name]
+        self.configure(fg_color=t["bg"])
+
+        ctk.CTkLabel(self, text="A2R ADVANCED TOOLS", font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 1))
+        ctk.CTkLabel(self, text=tr("adv_login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 6))
+
+        f_entry = ctk.CTkFrame(self, fg_color="transparent")
+        f_entry.pack(fill="x", padx=24, pady=4)
+
+        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", font=(FONT_FAMILY, 13, "bold"),
+                                  text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_pwd.bind("<Return>", lambda e: self.check_pwd())
+        attach_context_menu(self.e_pwd)
+
+        self.pwd_visible = False
+        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=35, command=self.toggle_eye, fg_color=t["card"], text_color=t["text"])
+        self.btn_eye.pack(side="right")
+
+        self.lbl_err = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_err.pack(pady=(1, 0))
+
+        btn_enter = ctk.CTkButton(self, text=tr("done"), font=FONT_BTN_MAIN,
+                                  fg_color="#4F46E5", hover_color="#4338CA", text_color="#FFFFFF", command=self.check_pwd)
+        btn_enter.pack(fill="x", padx=24, pady=(6, 4))
+
+        self.after(150, self.e_pwd.focus_set)
+
+    def toggle_eye(self):
+        if self.pwd_visible:
+            self.e_pwd.configure(show="•")
+            self.btn_eye.configure(text="👁️")
+            self.pwd_visible = False
+        else:
+            self.e_pwd.configure(show="")
+            self.btn_eye.configure(text="🙈")
+            self.pwd_visible = True
+
+    def check_pwd(self):
+        val = self.e_pwd.get().strip()
+        import hashlib
+        h_val = hashlib.sha256(val.encode('utf-8')).hexdigest()
+        if h_val == ADVANCED_ADMIN_HASH:
+            self.destroy()
+            self.on_success()
+        else:
+            self.lbl_err.configure(text=tr("access_denied"))
+            self.e_pwd.delete(0, 'end')
+            try: winsound.MessageBeep(winsound.MB_ICONHAND)
+            except: pass
+
+class AdvancedToolsWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title(tr("adv_win_title"))
+        self.resizable(False, False)
+        set_window_icon_safe(self)
+        center_window_relative(self, parent, 460, 240)
+        
+        t = THEMES[parent.current_theme_name]
+        self.configure(fg_color=t["bg"])
+
+        ctk.CTkLabel(self, text=tr("adv_win_title"), font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(pady=(14, 8))
+
+        f_dir = ctk.CTkFrame(self, fg_color="transparent")
+        f_dir.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(f_dir, text=tr("adv_pick_folder"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", pady=(0, 4))
+        
+        f_in = ctk.CTkFrame(f_dir, fg_color="transparent")
+        f_in.pack(fill="x")
+        
+        self.e_path = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=30, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        
+        btn_browse = ctk.CTkButton(f_in, text=tr("browse"), width=70, height=30, font=FONT_BTN_SUB, fg_color=t["primary"], command=self.browse_folder)
+        btn_browse.pack(side="left")
+
+        f_btns = ctk.CTkFrame(self, fg_color="transparent")
+        f_btns.pack(fill="x", padx=20, pady=15)
+        
+        btn_batch = ctk.CTkButton(f_btns, text=tr("adv_btn_batch"), height=40, font=FONT_BTN_MAIN, fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF", command=lambda: self.run_action("batch"))
+        btn_batch.pack(side="right", fill="x", expand=True, padx=(5, 0))
+        
+        btn_receipts = ctk.CTkButton(f_btns, text=tr("adv_btn_receipts"), height=40, font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=lambda: self.run_action("receipts"))
+        btn_receipts.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.lbl_status = ctk.CTkLabel(self, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"])
+        self.lbl_status.pack(pady=(0, 10))
+
+    def browse_folder(self):
+        f = filedialog.askdirectory()
+        if f:
+            self.e_path.delete(0, 'end')
+            self.e_path.insert(0, f)
+
+    def run_action(self, action_type):
+        path = self.e_path.get().strip()
+        if not path or not os.path.exists(path):
+            self.lbl_status.configure(text=tr("adv_err_dir"), text_color="#EF4444")
+            try: winsound.MessageBeep(winsound.MB_ICONHAND)
+            except: pass
+            return
+            
+        self.lbl_status.configure(text=tr("adv_placeholder"), text_color="#10B981")
+\nclass CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
         if val == "": return True
         return bool(re.match(r"^[\d,]*\.?\d*$", val))
@@ -2513,6 +2631,12 @@ class CustomTkinterApp(ctk.CTk):
         self._cancel_auto_minimize()
         ElevateLoginGate(self, self.unlock_full_console)
 
+    def request_advanced_tools(self):
+        AdvancedLoginGate(self, self.open_advanced_window)
+
+    def open_advanced_window(self):
+        AdvancedToolsWindow(self)
+
     def unlock_full_console(self, is_supervisor):
         self.is_supervisor = is_supervisor
 
@@ -2530,9 +2654,14 @@ class CustomTkinterApp(ctk.CTk):
             self.f_role_btn.configure(border_color="#EF4444")
             self.btn_excel.pack(side="left", padx=2)
             self.btn_arch_hist.pack(side="left", padx=2)
+            if not hasattr(self, 'btn_advanced_tools'):
+                self.btn_advanced_tools = ctk.CTkButton(self.btn_center_box, text=tr("btn_advanced_tools"), fg_color="#4F46E5", hover_color="#4338CA", width=105, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.request_advanced_tools)
+            self.btn_advanced_tools.pack(side="left", padx=2)
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
+            if hasattr(self, 'btn_advanced_tools'):
+                self.btn_advanced_tools.pack_forget()
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
