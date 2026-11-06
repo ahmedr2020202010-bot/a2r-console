@@ -2347,49 +2347,14 @@ class _FeatureWindow(ctk.CTkToplevel):
 
 
 # ───────────────────────── التقفيل ─────────────────────────
-class _EditClosingDialog(_Modal):
-    def __init__(self, parent, item, on_ok):
-        super().__init__(parent, "تعديل إيصال التقفيل", 460, 250)
-        t, F = self.t, _font()
-        self.item, self.on_ok = item, on_ok
-        ctk.CTkLabel(self, text=item.label, font=(F, 11, "bold"), text_color=t["accent"], wraplength=420).pack(pady=(12, 6))
-        fr = ctk.CTkFrame(self, fg_color="transparent")
-        fr.pack(fill="x", padx=20)
-        ctk.CTkLabel(fr, text="الماكينة:", font=(F, 11, "bold"), text_color=t["text"]).grid(row=0, column=1, sticky="e", pady=4)
-        self.cb = ttk.Combobox(fr, values=_terminal_choices(), state="readonly", width=38, justify="right")
-        self.cb.grid(row=0, column=0, padx=8, pady=4)
-        cur = E.terminal_label(item.tid) if item.tid else "— غير محدد —"
-        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
-        ctk.CTkLabel(fr, text="المبلغ (ج.م):", font=(F, 11, "bold"), text_color=t["text"]).grid(row=1, column=1, sticky="e", pady=4)
-        self.e = ctk.CTkEntry(fr, justify="center", width=200, font=(F, 12, "bold"))
-        self.e.grid(row=1, column=0, padx=8, pady=4, sticky="w")
-        self.e.insert(0, "%.2f" % item.amount if item.amount else "")
-        self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
-        self.lbl.pack()
-        ctk.CTkButton(self, text="حفظ", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
-                      text_color="#FFFFFF", command=self.save).pack(fill="x", padx=20, pady=8)
-
-    def save(self):
-        tid = _tid_from_choice(self.cb.get())
-        try:
-            amt = float(self.e.get().replace(",", "").strip())
-            if amt <= 0:
-                raise ValueError
-        except ValueError:
-            self.lbl.configure(text="اكتب مبلغ صحيح أكبر من صفر")
-            return
-        cb = self.on_ok
-        self.destroy()
-        cb(tid, E.round2(amt))
-
-
 class _ReceiptViewer(ctk.CTkToplevel):
-    """بيعرض صورة الإيصال المقروء مع زوم (تكبير/تصغير) وتحريك، عشان تتأكد من المبلغ."""
+    """نافذة واحدة: عرض الإيصال (زوم بالعجلة أو بالضغط على أي جزء) + تعديل الماكينة والمبلغ."""
 
     MIN_Z, MAX_Z = 0.1, 8.0
 
-    def __init__(self, parent, item):
+    def __init__(self, parent, item, on_save=None):
         super().__init__(parent)
+        self.item, self.on_save = item, on_save
         from PIL import Image as _Img, ImageTk as _ImgTk
         self._Img, self._ImgTk = _Img, _ImgTk
         t, F = _theme(parent), _font()
@@ -2398,13 +2363,15 @@ class _ReceiptViewer(ctk.CTkToplevel):
         _icon(self)
         self.configure(fg_color=t["bg"])
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        mw, mh = min(720, int(sw * 0.5)), int(sh * 0.82)
+        mw, mh = min(760, int(sw * 0.55)), int(sh * 0.86)
         self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 30))
         self.minsize(420, 380)
         info = "%s  |  %s  |  المبلغ المقروء: %s" % (
             item.label, E.terminal_label(item.tid) if item.tid else "ماكينة غير محددة",
             "%.2f" % item.amount if item.amount else "—")
-        ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20).pack(pady=(6, 2))
+        info_lbl = ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20)
+        info_lbl.pack(pady=(6, 2))
+        self._info_w = mw - 20
 
         # الصور المتاحة: الإيصال المقصوص + الصورة الكاملة (لو مختلفين)
         self._srcs = []
@@ -2441,6 +2408,27 @@ class _ReceiptViewer(ctk.CTkToplevel):
         self.lbl_zoom = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["muted"])
         self.lbl_zoom.pack()
 
+        # --- التعديل (في نفس النافذة)
+        self.lbl_info = info_lbl
+        ed = ctk.CTkFrame(self, fg_color=t["card"], border_color=t["border"], border_width=1)
+        ed.pack(fill="x", padx=8, pady=(2, 4))
+        row = ctk.CTkFrame(ed, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=6)
+        ctk.CTkButton(row, text="💾 حفظ", width=80, height=30, font=(F, 11, "bold"), fg_color=_GREEN,
+                      hover_color=_GREEN_H, text_color="#FFFFFF", command=self._save).pack(side="left", padx=2)
+        self.e_amt = ctk.CTkEntry(row, justify="center", width=100, font=(F, 12, "bold"))
+        self.e_amt.pack(side="right", padx=4)
+        self.e_amt.insert(0, "%.2f" % item.amount if item.amount else "")
+        ctk.CTkLabel(row, text="المبلغ:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
+        self.cb = ttk.Combobox(row, values=_terminal_choices(), state="readonly", width=26, justify="right")
+        self.cb.pack(side="right", padx=4)
+        cur = E.terminal_label(item.tid) if item.tid else "— غير محدد —"
+        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
+        ctk.CTkLabel(row, text="الماكينة:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
+        self.e_amt.bind("<Return>", lambda e: self._save())
+        self.lbl_msg = ctk.CTkLabel(ed, text="", font=(F, 10, "bold"), text_color=t["danger"])
+        self.lbl_msg.pack(pady=(0, 4))
+
         fr = tk.Frame(self, bg=t["bg"])
         fr.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         fr.grid_rowconfigure(0, weight=1)
@@ -2455,16 +2443,25 @@ class _ReceiptViewer(ctk.CTkToplevel):
         self._img_id = self.cv.create_image(0, 0, anchor="nw")
 
         self.cv.bind("<Configure>", lambda e: self._on_resize())
-        self.cv.bind("<ButtonPress-1>", lambda e: self.cv.scan_mark(e.x, e.y))
-        self.cv.bind("<B1-Motion>", lambda e: self.cv.scan_dragto(e.x, e.y, gain=1))
-        self.cv.bind("<MouseWheel>", self._wheel)
-        self.cv.bind("<Control-MouseWheel>", self._wheel_zoom)
+        self._press = None
+        self._moved = False
+        self.cv.bind("<ButtonPress-1>", self._on_press)
+        self.cv.bind("<B1-Motion>", self._on_drag)
+        self.cv.bind("<ButtonRelease-1>", self._on_release)
+        self.cv.bind("<Button-3>", lambda e: self._set_zoom(self._zoom / 1.6, e.x, e.y))
+        self.cv.bind("<MouseWheel>", self._wheel_zoom)          # العجلة = زوم إن / أوت
+        self.cv.bind("<Button-4>", self._wheel_zoom)            # لينكس
+        self.cv.bind("<Button-5>", self._wheel_zoom)
         self.cv.bind("<Shift-MouseWheel>", lambda e: self.cv.xview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.cv.bind("<Double-Button-1>", lambda e: self.fit())
         self.bind("<KeyPress-plus>", lambda e: self._step(1.25))
         self.bind("<KeyPress-equal>", lambda e: self._step(1.25))
         self.bind("<KeyPress-minus>", lambda e: self._step(0.8))
         self.bind("<Control-Key-0>", lambda e: self.fit())
+        self.lift()
+        try:
+            self.focus_force()
+        except Exception:
+            pass
         if not self._srcs:
             ctk.CTkLabel(self, text="مش قادر أعرض الصورة", text_color=t["danger"]).pack(pady=20)
         self.after(80, self.fit)
@@ -2538,15 +2535,47 @@ class _ReceiptViewer(ctk.CTkToplevel):
         self.cv.itemconfigure(self._img_id, image=self._photo)
         self.cv.coords(self._img_id, self._ox, self._oy)
         self.cv.configure(scrollregion=(0, 0, self._tot_w, self._tot_h))
-        self.lbl_zoom.configure(text="التكبير: %d%%   (Ctrl + عجلة الماوس للزوم • اسحب بالماوس للتحريك • دبل كليك = مناسب)"
+        self.lbl_zoom.configure(text="التكبير: %d%%   (عجلة الماوس = زوم • اضغط على أي جزء لتكبيره • كليك يمين = تصغير • اسحب للتحريك)"
                                 % round(self._zoom * 100))
 
-    def _wheel(self, e):
-        self.cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+    def _on_press(self, e):
+        self._press, self._moved = (e.x, e.y), False
+        self.cv.scan_mark(e.x, e.y)
+
+    def _on_drag(self, e):
+        if self._press and (abs(e.x - self._press[0]) > 4 or abs(e.y - self._press[1]) > 4):
+            self._moved = True
+        if self._moved:
+            self.cv.scan_dragto(e.x, e.y, gain=1)
+
+    def _on_release(self, e):
+        # ضغطة من غير سحب = تكبير الجزء اللي اتضغط عليه
+        if self._press and not self._moved:
+            self._set_zoom(self._zoom * 1.6, e.x, e.y)
+        self._press = None
 
     def _wheel_zoom(self, e):
-        self._set_zoom(self._zoom * (1.15 if e.delta > 0 else 1 / 1.15), e.x, e.y)
+        up = (getattr(e, "delta", 0) > 0) or getattr(e, "num", 0) == 4
+        self._set_zoom(self._zoom * (1.15 if up else 1 / 1.15), e.x, e.y)
         return "break"
+
+    def _save(self):
+        tid = _tid_from_choice(self.cb.get())
+        try:
+            amt = float(self.e_amt.get().replace(",", "").strip())
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.lbl_msg.configure(text="اكتب مبلغ صحيح أكبر من صفر", text_color=self.t["danger"])
+            return
+        amt = E.round2(amt)
+        if self.on_save:
+            self.on_save(self.item, tid, amt)
+        it = self.item
+        self.lbl_info.configure(text="%s  |  %s  |  المبلغ المقروء: %s" % (
+            it.label, E.terminal_label(it.tid) if it.tid else "ماكينة غير محددة",
+            "%.2f" % it.amount if it.amount else "—"))
+        self.lbl_msg.configure(text="✓ تم الحفظ", text_color=self.t["success"])
 
     def rotate(self):
         if not self._srcs:
@@ -2591,17 +2620,16 @@ class ClosingWindow(_FeatureWindow):
         cols = [("n", "م"), ("file", "الملف"), ("tid", "الماكينة"), ("unit", "الوحدة"), ("amount", "المبلغ"),
                 ("status", "الحالة")]
         self.tv = self._tree(self, cols, [40, 190, 90, 110, 85, 230], height=6)
-        self.tv.bind("<Double-1>", lambda e: self.edit_selected())
-        self.b_edit = self._btn(bt, "✏️ تعديل", self.edit_selected, color=t["warning"], w=10)
-        self.b_view = self._btn(bt, "🔍 عرض الإيصال", self.view_selected, color=t["card"], w=10)
+        self.tv.bind("<Double-1>", lambda e: self.view_selected())
+        self.b_view = self._btn(bt, "🔍 عرض وتعديل", self.view_selected, color=t["warning"], w=10)
         self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=10)
         self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=10)
         self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=10)
         self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=10)
         # صف واحد، أعمدة متساوية، مرتبين من اليمين لليسار
-        bt.grid_columnconfigure(tuple(range(6)), weight=1, uniform="cb")
-        for i, b in enumerate((self.b_edit, self.b_view, self.b_rebuild, self.b_folder, self.b_pdf, self.b_xlsx)):
-            b.grid(row=0, column=5 - i, padx=3, sticky="ew")
+        bt.grid_columnconfigure(tuple(range(5)), weight=1, uniform="cb")
+        for i, b in enumerate((self.b_view, self.b_rebuild, self.b_folder, self.b_pdf, self.b_xlsx)):
+            b.grid(row=0, column=4 - i, padx=3, sticky="ew")
 
     def _refresh_out_label(self):
         tpl = self.template or E.find_template([self.out_dir])
@@ -2638,12 +2666,12 @@ class ClosingWindow(_FeatureWindow):
         _open_path(p)
 
     def show_folder(self):
-        p = self._out_file("xlsx") or self._out_file("pdf")
-        if p:
-            _reveal(p)
+        """بيفتح فولدر الملفات اللي اتغيّر اسمها بعد التسمية (raw_images: رقم الماكينة.jpg)."""
+        raw = os.path.join(self.out_dir, "raw_images")
+        if os.path.isdir(raw):
+            _open_path(raw)
         else:
-            os.makedirs(self.out_dir, exist_ok=True)
-            _open_path(self.out_dir)
+            messagebox.showinfo("A2R", "لسه ما فيش ملفات متسمّاة. اضغط «بدء القراءة» الأول.", parent=self)
 
     def view_selected(self):
         sel = self.tv.selection()
@@ -2651,7 +2679,12 @@ class ClosingWindow(_FeatureWindow):
         if item is None:
             messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
             return
-        _ReceiptViewer(self, item)
+        try:
+            if getattr(self, "_viewer", None) is not None and self._viewer.winfo_exists():
+                self._viewer.destroy()
+        except Exception:
+            pass
+        self._viewer = _ReceiptViewer(self, item, on_save=self.apply_edit)
 
     # --- التشغيل
     def start(self):
@@ -2747,30 +2780,19 @@ class ClosingWindow(_FeatureWindow):
         self.txt.insert("1.0", ("ملاحظات للمراجعة (%d):\n• " % len(lines) + "\n• ".join(lines)) if lines else "مفيش ملاحظات ✓")
         self.txt.configure(state="disabled")
 
-    def edit_selected(self):
-        sel = self.tv.selection()
-        if not sel:
-            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
-            return
-        item = self._iid.get(sel[0])
-        if item is None:
-            return
-
-        def ok(tid, amt):
-            if tid in E.TERMINALS:
-                i = E.TERMINALS[tid]
-                item.det = (tid, i.order, i.row, i.unit, "manual")
-            else:
-                item.det = (None, None, None, None, "manual")
-            item.amount, item.batches, item.ok, item.alt, item.how = amt, [amt], True, None, "manual"
-            _save_fix(item.key, tid, amt)
-            self.kept, self.warnings = E.renumber(self.raw_all)
-            self.outputs = dict(self.outputs or {})
-            self._fill()
-            self.lbl_status.configure(text="اتعدّل. اضغط «إعادة بناء الملفات» عشان الـ PDF والإكسيل يتحدّثوا.",
-                                      text_color=self.t["warning"])
-
-        _EditClosingDialog(self, item, ok)
+    def apply_edit(self, item, tid, amt):
+        if tid in E.TERMINALS:
+            i = E.TERMINALS[tid]
+            item.det = (tid, i.order, i.row, i.unit, "manual")
+        else:
+            item.det = (None, None, None, None, "manual")
+        item.amount, item.batches, item.ok, item.alt, item.how = amt, [amt], True, None, "manual"
+        _save_fix(item.key, tid, amt)
+        self.kept, self.warnings = E.renumber(self.raw_all)
+        self.outputs = dict(self.outputs or {})
+        self._fill()
+        self.lbl_status.configure(text="اتعدّل. اضغط «إعادة بناء» عشان الـ PDF والإكسيل يتحدّثوا.",
+                                  text_color=self.t["warning"])
 
     def rebuild(self):
         if not self.kept:
@@ -2842,7 +2864,7 @@ class PaymentsWindow(_FeatureWindow):
         t, F = self.t, self.F
         self.results = []
         self.dest = os.path.join(_documents_dir(), "وحدات")
-        ctk.CTkLabel(self, text="🧾 إيصالات الدفع:  ① إعادة التسمية من رقم الماكينة   ②  عدّ الإيصالات", font=(F, 16, "bold"),
+        ctk.CTkLabel(self, text="🧾 إيصالات الدفع", font=(F, 16, "bold"),
                      text_color=t["accent"]).pack(pady=(10, 0))
         self._build_source_bar(self)
         fr = ctk.CTkFrame(self, fg_color="transparent")
@@ -2863,7 +2885,7 @@ class PaymentsWindow(_FeatureWindow):
                 ("name", "الاسم الجديد"), ("status", "الحالة")]
         self.tv = self._tree(self, cols, [34, 150, 140, 55, 52, 52, 65, 65, 55, 190, 80], height=11)
         self.tv.bind("<<TreeviewSelect>>", lambda e: self._show_notes())
-        self.tv.bind("<Double-1>", lambda e: self.edit_selected())
+        self.tv.bind("<Double-1>", lambda e: self.open_selected())   # دبل كليك = فتح الـ PDF
         self.txt = ctk.CTkTextbox(self, height=110, font=(F, 10), fg_color=t["input"], text_color=t["text"])
         self.txt.pack(fill="x", padx=12, pady=4)
         self.txt.configure(state="disabled")
@@ -2872,8 +2894,7 @@ class PaymentsWindow(_FeatureWindow):
         bt = ctk.CTkFrame(self, fg_color="transparent")
         bt.pack(fill="x", padx=12, pady=(2, 10))
         for txt, cmd, col, w in (("💾 حفظ تقرير TXT", self.save_report, t["card"], 140),
-                                 ("📄 فتح الملف", self.open_selected, t["card"], 110),
-                                 ("✏️ تعديل المحدد", self.edit_selected, t["warning"], 140)):
+                                 ("✏️ تعديل ملف الإيصالات", self.edit_selected, t["warning"], 190)):
             self._btn(bt, txt, cmd, color=col, w=w).pack(side="right", padx=3)
 
     def _set_busy(self, busy):
