@@ -2352,7 +2352,8 @@ class AdvancedToolsWindow(ctk.CTkToplevel):
             return
             
         self.lbl_status.configure(text=tr("adv_placeholder"), text_color="#10B981")
-\nclass CustomTkinterApp(ctk.CTk):
+
+class CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
         if val == "": return True
         return bool(re.match(r"^[\d,]*\.?\d*$", val))
