@@ -14,7 +14,7 @@ numpy==2.5.4
 pytesseract==0.3.13
 rapidocr_onnxruntime==1.4.4
 onnxruntime==1.31.1
-pypdfium2==5.15.0
+pypdfium2==5.15.1
 # اعتماديات فرعية (تُسحب تلقائيًا) مثبّتة كذلك لثبات النتيجة
 altgraph==0.17.5
 charset-normalizer==3.5.2
