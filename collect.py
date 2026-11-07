@@ -99,6 +99,26 @@ except ImportError:
 APP_VERSION = "v51"
 APP_OWNER = "Ahmed Ramadan"
 
+_SILENT_SEEN = {}
+
+def _log_silent(ctx, e):
+    """بديل `except Exception: pass`: بيسجّل الخطأ في app_log.txt بدل ما يخفيه، من غير ما يغيّر سلوك البرنامج.
+    كل موضع بيتسجّل مرة كل 10 دقايق بس (السجل ميتملاش)، وأخطاء Tcl الخاصة بإغلاق النوافذ بتتجاهل."""
+    try:
+        if type(e).__name__ == "TclError":
+            return
+        if not logging.getLogger().handlers:      # السجل لسه متجهّزش (أثناء الاستيراد): متفعلش basicConfig بالغلط
+            return
+        key = (ctx, type(e).__name__)
+        now = time.time()
+        if now - _SILENT_SEEN.get(key, 0) < 600:
+            return
+        _SILENT_SEEN[key] = now
+        logging.error(f"[silent:{ctx}] {type(e).__name__}: {e}")
+    except Exception:
+        pass
+
+
 
 # ===== v51: أدوات المشرف (التقفيل + إيصالات الدفع) — مدمجة جوه collect.py =====
 import types as _a2r_types
@@ -3233,8 +3253,8 @@ except Exception as _pos_exc:
     POS_TOOLS_ERROR = repr(_pos_exc)
     try:
         logging.error("POS tools failed to load: %s", POS_TOOLS_ERROR)
-    except Exception:
-        pass
+    except Exception as _e:
+        _log_silent("module#1", _e)
 ctk.set_appearance_mode("Dark")
 
 if getattr(sys, 'frozen', False):
@@ -3273,16 +3293,16 @@ def set_window_icon_safe(window):
                     photo = ImageTk.PhotoImage(img)
                     window._a2r_icon_ref = photo
                     window.wm_iconphoto(True, photo)
-            except Exception:
-                pass
+            except Exception as _e:
+                _log_silent("_apply#1", _e)
 
     _apply()
     try:
         # customtkinter يعيد وضع أيقونته الافتراضية بعد لحظات، فنعيد تطبيق أيقونتنا
         window.after(300, _apply)
         window.after(1000, _apply)
-    except Exception:
-        pass
+    except Exception as _e:
+        _log_silent("set_window_icon_safe#1", _e)
 def setup_windows_autostart():
     if not WINREG_AVAILABLE or sys.platform != "win32":
         return
@@ -3294,8 +3314,8 @@ def setup_windows_autostart():
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, "A2R_Console", 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(key)
-    except Exception:
-        pass
+    except Exception as _e:
+        _log_silent("setup_windows_autostart#1", _e)
 def configure_printer_57x90_silent():
     if sys.platform != "win32":
         return False, "Windows required"
@@ -3336,16 +3356,16 @@ MANUAL_NAME_RE = re.compile(r"^[_]?\d+(?:\.\d{2})?_\d{6}\.pdf$", re.IGNORECASE)
 
 SOUND_MUTED = True
 
+from logging.handlers import RotatingFileHandler
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
-    encoding="utf-8",
     format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")],
 )
 
 def log_exception(context, exc):
     try: logging.error(f"[{context}] {exc}")
-    except Exception: pass
+    except Exception as _e: _log_silent("log_exception#1", _e)
 
 def db_connect():
     """اتصال موحّد بقاعدة البيانات: مهلة انتظار 15 ثانية بدل الفشل الفوري لو القاعدة مشغولة (database is locked)."""
@@ -3688,7 +3708,7 @@ def tr(key, **kwargs):
     text = LANGUAGES.get(CURRENT_LANG, LANGUAGES["en"]).get(key, key)
     if kwargs:
         try: return text.format(**kwargs)
-        except Exception: pass
+        except Exception as _e: _log_silent("tr#1", _e)
     return text
 
 def format_arabic_for_dropdown(text):
@@ -3696,8 +3716,8 @@ def format_arabic_for_dropdown(text):
     if REPORTLAB_AVAILABLE and re.search(r"[\u0621-\u064A]", text):
         try:
             return get_display(arabic_reshaper.reshape(text))
-        except Exception:
-            pass
+        except Exception as _e:
+            _log_silent("format_arabic_for_dropdown#1", _e)
     return text
 
 class SafeArabicComboBox(ctk.CTkComboBox):
@@ -3746,7 +3766,7 @@ def play_sound_matched():
             winsound.Beep(987, 100)
             winsound.Beep(1318, 120)
             winsound.Beep(1760, 160)
-        except Exception: pass
+        except Exception as _e: _log_silent("_tone#1", _e)
     threading.Thread(target=_tone, daemon=True).start()
 
 def play_sound_diff():
@@ -3755,7 +3775,7 @@ def play_sound_diff():
         try:
             winsound.Beep(520, 150)
             winsound.Beep(440, 200)
-        except Exception: pass
+        except Exception as _e: _log_silent("_tone#2", _e)
     threading.Thread(target=_tone, daemon=True).start()
 
 def _entry_widget(widget):
@@ -3931,7 +3951,7 @@ def parse_print_time(time_str):
     for fmt, pat in patterns:
         if re.match(pat, time_str):
             try: return datetime.datetime.strptime(time_str, fmt)
-            except Exception: pass
+            except Exception as _e: _log_silent("parse_print_time#1", _e)
     return None
 
 def extract_date_from_text(txt):
@@ -3947,7 +3967,7 @@ def extract_date_from_text(txt):
         for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
             try:
                 return datetime.datetime.strptime(d_str, fmt).date()
-            except Exception: pass
+            except Exception as _e: _log_silent("extract_date_from_text#1", _e)
     return None
 
 def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
@@ -3963,7 +3983,7 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
                 pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                 font_name = "ReceiptArabic"
                 break
-            except Exception: pass
+            except Exception as _e: _log_silent("create_manual_receipt_pdf#1", _e)
 
     def _ar(t):
         try: return get_display(arabic_reshaper.reshape(str(t)))
@@ -4038,7 +4058,7 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
                 pdfmetrics.registerFont(TTFont("SlipArabic", f_cand))
                 font_name = "SlipArabic"
                 break
-            except Exception: pass
+            except Exception as _e: _log_silent("create_photocopy_slip_pdf#1", _e)
 
     def _ar(t):
         try: return get_display(arabic_reshaper.reshape(str(t)))
@@ -4307,7 +4327,7 @@ def archive_search(query, include_void=True, limit=3000):
     if not q: return []
     amt = None
     try: amt = float(str(query).strip().replace(",", ""))
-    except Exception: pass
+    except Exception as _e: _log_silent("archive_search#1", _e)
     out = []
     for r, n_plate, n_insured, n_file in _archive_search_rows():
         path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
@@ -4322,7 +4342,7 @@ def parse_flex_date(s):
     s = (s or "").strip()
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
         try: return datetime.datetime.strptime(s, fmt).date()
-        except Exception: pass
+        except Exception as _e: _log_silent("parse_flex_date#1", _e)
     return None
 
 # ================= كنس الأرشيف: أي ملف مش بتاع النهارده يتنقل للأرشيف =================
@@ -4407,7 +4427,7 @@ def archive_sweep(folder_path, progress=None):
                 cropped = path[:-4] + "_cropped.pdf"
                 if os.path.exists(cropped):
                     try: os.remove(cropped)
-                    except Exception: pass
+                    except Exception as _e: _log_silent("archive_sweep#1", _e)
         except Exception as e:
             log_exception(f"sweep_move:{fname}", e)   # هيتحاول تاني في الكنسة الجاية
     return moved, touched
@@ -4815,7 +4835,7 @@ def pos_ocr_init():
         errs.append(f"pytesseract: {type(e).__name__}: {e}")
     _OCR["err"] = "\n".join(errs)
     try: log_exception("pos_ocr_init", Exception(_OCR["err"]))
-    except Exception: pass
+    except Exception as _e: _log_silent("pos_ocr_init#1", _e)
     return None
 
 def pos_prepare_image(img, enhance=False):
@@ -4894,7 +4914,7 @@ def pos_pdf_pages(pdf_path, dpi=200, max_pages=400):
             yield page.render(scale=scale).to_pil().convert("RGB")
     finally:
         try: pdf.close()
-        except Exception: pass
+        except Exception as _e: _log_silent("pos_pdf_pages#1", _e)
 
 POS_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 
@@ -5216,7 +5236,7 @@ def pos_closing_build(items, out_dir, template_path=None):
                 ws[f"D{rw}"] = res["totals"][rw]
                 ws[f"F{rw}"] = f"=D{rw}+IF(ISBLANK(E{rw}),0,E{rw})"
             try: wb.calculation.fullCalcOnLoad = True
-            except Exception: pass
+            except Exception as _e: _log_silent("pos_closing_build#1", _e)
             xf = os.path.join(out_dir, f"الاسكندريه {report_date}.xlsx"); wb.save(xf); res["xlsx"] = xf
         except Exception as e:
             log_exception("pos_fill_template", e); res["notes"].append(f"فشل ملء القالب: {e}")
@@ -5225,7 +5245,7 @@ def pos_closing_build(items, out_dir, template_path=None):
 def pos_make_tree(parent, t, columns, headers, widths):
     style = ttk.Style()
     try: style.theme_use("clam")
-    except Exception: pass
+    except Exception as _e: _log_silent("pos_make_tree#1", _e)
     style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
                     font=(FONT_FAMILY, 10, "bold"), rowheight=28)
     style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"], font=(FONT_FAMILY, 11, "bold"), relief="flat")
@@ -5262,7 +5282,7 @@ def sup_register_fail():
     """5 محاولات فاشلة متتالية = قفل 30 ثانية (يتضاعف لحد 10 دقايق). النجاح بيصفّر العدّاد."""
     _SUP_STATE["fails"] += 1
     try: logging.warning("Supervisor gate: failed attempt #%d", _SUP_STATE["fails"])
-    except Exception: pass
+    except Exception as _e: _log_silent("sup_register_fail#1", _e)
     if _SUP_STATE["fails"] >= 5:
         _SUP_STATE["fails"] = 0
         _SUP_STATE["locks"] += 1
@@ -6128,7 +6148,7 @@ def write_report(records, out_file):
     except Exception:
         alt_path = out_file.replace(".xlsx", f"_{int(time.time())}.xlsx")
         try: wb.save(alt_path)
-        except Exception: pass
+        except Exception as _e: _log_silent("write_report#1", _e)
     return out_file
 
 def _content_stream_bytes(data, page_body):
@@ -6298,7 +6318,7 @@ class ElevateLoginGate(ctk.CTkToplevel):
             self.lbl_err.configure(text=tr("access_denied"))
             self.e_pwd.delete(0, 'end')
             try: winsound.MessageBeep(winsound.MB_ICONHAND)
-            except Exception: pass
+            except Exception as _e: _log_silent("check_pwd#1", _e)
 
 class AdminPasswordDialog(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
@@ -6329,7 +6349,7 @@ class AdminPasswordDialog(ctk.CTkToplevel):
             else:
                 sup_register_fail()
                 try: winsound.MessageBeep(winsound.MB_ICONHAND)
-                except Exception: pass
+                except Exception as _e: _log_silent("_chk#1", _e)
                 messagebox.showerror("Access Denied", tr("restricted_admin"))
                 self.destroy()
 
@@ -6498,8 +6518,8 @@ class CustomTkinterApp(ctk.CTk):
         if self._auto_minimize_timer:
             try:
                 self.after_cancel(self._auto_minimize_timer)
-            except Exception:
-                pass
+            except Exception as _e:
+                _log_silent("_cancel_auto_minimize#1", _e)
             self._auto_minimize_timer = None
 
     def _schedule_auto_minimize(self, delay_ms):
@@ -6514,16 +6534,16 @@ class CustomTkinterApp(ctk.CTk):
         try:
             if self.state() == "normal":
                 self.iconify()
-        except Exception:
-            pass
+        except Exception as _e:
+            _log_silent("_auto_minimize_to_taskbar#1", _e)
 
     def _create_tray_image(self):
         ico_path = get_app_icon_path()
         if ico_path:
             try:
                 return Image.open(ico_path).convert("RGBA")
-            except Exception:
-                pass
+            except Exception as _e:
+                _log_silent("_create_tray_image#1", _e)
         img = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         d.ellipse([4, 4, 60, 60], fill="#080E17", outline="#38BDF8", width=3)
@@ -6541,8 +6561,8 @@ class CustomTkinterApp(ctk.CTk):
                         "ميزة النزول بجوار الساعة غير متاحة في هذه النسخة (مكتبة pystray/Pillow غير مضمّنة في البناء).\n"
                         "سيتم تصغير البرنامج إلى شريط المهام بدلاً من ذلك.\n\n"
                         f"Details: {PYSTRAY_IMPORT_ERROR or 'module not found'}")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    _log_silent("hide_to_system_tray#1", _e)
             self.iconify()
             return
         if self.tray_icon is None:
@@ -6577,8 +6597,8 @@ class CustomTkinterApp(ctk.CTk):
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
-            except Exception:
-                pass
+            except Exception as _e:
+                _log_silent("quit_app_completely#1", _e)
         self.run_on_main(self.destroy)
 
     def fix_printer_paper_action(self):
@@ -6607,9 +6627,9 @@ class CustomTkinterApp(ctk.CTk):
 
     def _sync_watch_path(self):
         try: self._watch_path = self.get_clean_path()
-        except Exception: pass
+        except Exception as _e: _log_silent("_sync_watch_path#1", _e)
         try: self.after(1000, self._sync_watch_path)
-        except Exception: pass
+        except Exception as _e: _log_silent("_sync_watch_path#2", _e)
 
     def request_full_console(self):
         self._cancel_auto_minimize()
@@ -6695,7 +6715,7 @@ class CustomTkinterApp(ctk.CTk):
             center_window_relative(win, self, 430, 170)
             win.configure(fg_color=t["bg"])
             try: win.attributes("-topmost", True)
-            except Exception: pass
+            except Exception as _e: _log_silent("auto_archive_on_login#1", _e)
             win.protocol("WM_DELETE_WINDOW", lambda: None)  # منع الإغلاق أثناء الأرشفة
 
             ctk.CTkLabel(win, text=tr("arch_title"), font=(FONT_FAMILY, 13, "bold"),
@@ -7206,8 +7226,8 @@ class CustomTkinterApp(ctk.CTk):
         if POS_TOOLS_AVAILABLE:
             try:
                 refresh_pos_tools_button(self)
-            except Exception:
-                pass
+            except Exception as _e:
+                _log_silent("apply_language#1", _e)
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
@@ -7350,7 +7370,7 @@ class CustomTkinterApp(ctk.CTk):
                                             self.printed_count_today += 1
                                             self.run_on_main(lambda: self.lbl_mini_counter.configure(
                                                 text=tr("mini_printed_count", count=self.printed_count_today)))
-                                    except Exception: pass
+                                    except Exception as _e: _log_silent("_routine#1", _e)
 
                     if self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode:
                         try:
@@ -7361,7 +7381,7 @@ class CustomTkinterApp(ctk.CTk):
                             elif current_sig != self.last_pdf_state_sig:
                                 self.last_pdf_state_sig = current_sig
                                 self.run_on_main(self.start_thread)
-                        except Exception: pass
+                        except Exception as _e: _log_silent("_routine#2", _e)
                 except Exception as e:
                     log_exception("watchdog_loop", e)
 
@@ -7398,7 +7418,7 @@ class CustomTkinterApp(ctk.CTk):
             if temp_copy:
                 time.sleep(1.0)
                 try: os.remove(temp_copy)
-                except Exception: pass
+                except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
 
     def open_downloads_archiver_dialog(self):
         try:
@@ -7482,8 +7502,8 @@ class CustomTkinterApp(ctk.CTk):
                                 day_dir = os.path.join(y_dir, m_entry, d_str)
                                 if os.path.isdir(day_dir):
                                     return day_dir
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        _log_silent("_find_day_archive_folder#1", _e)
                 return None
 
             def _open_selected_day_summary():
@@ -7601,7 +7621,7 @@ class CustomTkinterApp(ctk.CTk):
                         pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                         font_name = "ReceiptArabic"
                         break
-                    except Exception: pass
+                    except Exception as _e: _log_silent("_generate_day_summary_pdf#1", _e)
 
             def _ar(txt):
                 try: return get_display(arabic_reshaper.reshape(str(txt)))
@@ -7679,10 +7699,10 @@ class CustomTkinterApp(ctk.CTk):
                 p_lbl.configure(text="100%")
                 s_lbl.configure(text=f"✓ Archive complete — {moved_count} file(s) archived.")
                 try: win.after(1500, win.destroy)
-                except Exception: pass
+                except Exception as _e: _log_silent("_complete#1", _e)
                 return
             try: win.destroy()
-            except Exception: pass
+            except Exception as _e: _log_silent("_complete#2", _e)
             play_sound_matched()
             messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nSummary PDFs updated for all affected days.")
 
@@ -7895,7 +7915,7 @@ class CustomTkinterApp(ctk.CTk):
         center_window_relative(win, self, 1100, 650)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
-        except Exception: pass
+        except Exception as _e: _log_silent("open_archive_history#1", _e)
 
         ALL = T2("الكل", "All")
         st = {"stats": [], "debounce": None}
@@ -7909,7 +7929,7 @@ class CustomTkinterApp(ctk.CTk):
         def _set_status(txt):
             try:
                 if win.winfo_exists(): status_lbl.configure(text=txt)
-            except Exception: pass
+            except Exception as _e: _log_silent("_set_status#1", _e)
 
         def run_maintenance(manual=False):
             def prog(i, n):
@@ -7942,7 +7962,7 @@ class CustomTkinterApp(ctk.CTk):
         # ---------- ستايل الجداول ----------
         style = ttk.Style()
         try: style.theme_use("clam")
-        except Exception: pass
+        except Exception as _e: _log_silent("open_archive_history#2", _e)
         style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
                         fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
         style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
@@ -8135,7 +8155,7 @@ class CustomTkinterApp(ctk.CTk):
         def _debounced(*_):
             if st["debounce"]:
                 try: win.after_cancel(st["debounce"])
-                except Exception: pass
+                except Exception as _e: _log_silent("_debounced#1", _e)
             st["debounce"] = win.after(300, do_search)
         s_entry.bind("<KeyRelease>", _debounced)
         s_entry.bind("<Return>", do_search)
@@ -8198,7 +8218,7 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkButton(dlg, text=T2("دخول", "Unlock"), width=120, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
                       hover_color=t["primary_hover"], text_color="#FFFFFF", command=submit).pack(pady=8)
         try: dlg.lift(); dlg.grab_set(); ent.focus_set()
-        except Exception: pass
+        except Exception as _e: _log_silent("_pos_gate#1", _e)
         self.wait_window(dlg)
         return ok["v"]
 
@@ -8257,7 +8277,7 @@ class CustomTkinterApp(ctk.CTk):
         center_window_relative(win, self, 1100, 720)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
-        except Exception: pass
+        except Exception as _e: _log_silent("open_pos_closing#1", _e)
         st = {"sources": [], "out": "", "items": [], "warnings": [], "excluded": [], "stop": False, "busy": False}
         FT = [("Images / PDF", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf")]
 
@@ -8375,7 +8395,7 @@ class CustomTkinterApp(ctk.CTk):
             ctk.CTkButton(r, text=T2("💾 حفظ", "💾 Save"), width=110, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(side="left", padx=4)
             ctk.CTkButton(r, text=T2("🖼️ فتح الصورة", "🖼️ Open image"), width=120, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=open_img).pack(side="left", padx=4)
             try: d.lift(); d.grab_set()
-            except Exception: pass
+            except Exception as _e: _log_silent("edit_selected#1", _e)
         tree.bind("<Double-1>", edit_selected)
 
         def build():
@@ -8400,7 +8420,7 @@ class CustomTkinterApp(ctk.CTk):
                     status.configure(text=T2("تم الإنشاء ✓", "Built ✓"))
                     messagebox.showinfo(T2("تم", "Done"), msg)
                     try: os.startfile(st["out"])
-                    except Exception: pass
+                    except Exception as _e: _log_silent("fin#1", _e)
                 self.after(0, fin)
             threading.Thread(target=work, daemon=True).start()
 
@@ -8421,7 +8441,7 @@ class CustomTkinterApp(ctk.CTk):
         center_window_relative(win, self, 1150, 720)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
-        except Exception: pass
+        except Exception as _e: _log_silent("open_pos_payments#1", _e)
         st = {"sources": [], "out": "", "res": [], "stop": False, "busy": False}
         FT = [("PDF", "*.pdf")]
         status = ctk.CTkLabel(win, text=T2("اختر ملفات الـ PDF (أو فولدر) ومكان الإخراج، ثم اضغط بدء.", "Pick PDFs and output, then Start."),
@@ -8539,7 +8559,7 @@ class CustomTkinterApp(ctk.CTk):
                 d.destroy(); fill_tree()
             ctk.CTkButton(d, text=T2("💾 حفظ", "💾 Save"), width=120, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(pady=12)
             try: d.lift(); d.grab_set()
-            except Exception: pass
+            except Exception as _e: _log_silent("edit_selected#2", _e)
         tree.bind("<Double-1>", edit_selected)
 
         def save_copies():
@@ -8552,7 +8572,7 @@ class CustomTkinterApp(ctk.CTk):
                 except Exception as e: log_exception("pos_save_copy", e)
             messagebox.showinfo(T2("تم", "Done"), T2(f"اتحفظ {n} ملف باسمه الجديد (الأصول ماتلمستش).", f"Saved {n} renamed copies (originals untouched)."))
             try: os.startfile(st["out"])
-            except Exception: pass
+            except Exception as _e: _log_silent("save_copies#1", _e)
 
         def export_xlsx():
             if not st["res"]: return
@@ -8677,7 +8697,7 @@ class CustomTkinterApp(ctk.CTk):
 
         style = ttk.Style()
         try: style.theme_use("clam")
-        except Exception: pass
+        except Exception as _e: _log_silent("open_records_viewer#1", _e)
         style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
                         fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
         style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
@@ -8910,7 +8930,7 @@ class CustomTkinterApp(ctk.CTk):
                     self.send_to_thermal_printer_57x90(full_path)
 
                 try: os.startfile(full_path)
-                except Exception: pass
+                except Exception as _e: _log_silent("save#1", _e)
                 win.destroy()
             except Exception as ex_save:
                 messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}")
@@ -9008,7 +9028,7 @@ class CustomTkinterApp(ctk.CTk):
                         pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
                         font_name = "ReceiptArabic"
                         break
-                    except Exception: pass
+                    except Exception as _e: _log_silent("export_pdf_summary#1", _e)
 
             def _ar(txt):
                 try: return get_display(arabic_reshaper.reshape(str(txt)))
@@ -9115,7 +9135,7 @@ class CustomTkinterApp(ctk.CTk):
             manual_str = e_manual_cash.get().strip().replace(",", "")
             if manual_str:
                 try: c_sum = float(manual_str)
-                except Exception: pass
+                except Exception as _e: _log_silent("recalc#1", _e)
 
             current_calculated[0] = c_sum
             lbl_tot_cash.configure(text=tr("cash_tot_lbl", sum=c_sum))
@@ -9124,7 +9144,7 @@ class CustomTkinterApp(ctk.CTk):
             pos_str = e_pos_in.get().strip().replace(",", "")
             if pos_str:
                 try: pos_val = float(pos_str)
-                except Exception: pass
+                except Exception as _e: _log_silent("recalc#2", _e)
 
             comb = c_sum + pos_val
             current_calculated[1] = comb
