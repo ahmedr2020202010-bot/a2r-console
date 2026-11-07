@@ -27,17 +27,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Record installed package versions
-        shell: pwsh
-        run: |
-          pip freeze | Tee-Object -FilePath requirements-lock.txt
-
-      - name: Upload package versions
-        uses: actions/upload-artifact@v4
-        with:
-          name: requirements-lock
-          path: requirements-lock.txt
-
       - name: Install Tesseract and stage it for bundling
         shell: pwsh
         run: |
@@ -112,9 +101,11 @@ jobs:
 
       - name: Upload exe (Actions artifact)
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: A2R_Console
           path: dist/A2R_Console.exe
+          retention-days: 3
 
       - name: Publish GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
