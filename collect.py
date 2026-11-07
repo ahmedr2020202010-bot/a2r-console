@@ -6193,6 +6193,35 @@ def get_print_time_bottom(pdf_path):
     if best is None: return None
     return best, float(pm.group(2))
 
+PRINT_TARGET_W_PT = 57 / 25.4 * 72   # عرض الطباعة المطلوب: 57 مم
+
+def scale_pdf_to_print_width(src_pdf, target_w=PRINT_TARGET_W_PT):
+    """نسخة مؤقتة من الـ PDF مصغّرة لعرض 57 مم. الإيصالات بتتصمم بعرض 80 مم، وكان الحجم النهائي بيتحدد من
+    مقاس الورق المعرّف في كل جهاز (fit): 57x90 بيطلّع الحجم الصح، و80 مم بيطلّعه كبير. دلوقتي البرنامج هو اللي
+    بيحدد الحجم. بترجع None لو الصفحة أصلًا بعرض 57 مم أو أقل، أو لو pypdf مش متاح (وساعتها الطباعة زي ما كانت)."""
+    if not PYPDF_AVAILABLE:
+        return None
+    try:
+        reader = PdfReader(src_pdf)
+        if not reader.pages:
+            return None
+        w = float(reader.pages[0].mediabox.width)
+        if w <= target_w + 2:
+            return None
+        f = target_w / w
+        writer = PdfWriter()
+        for pg in reader.pages:
+            pg.scale_by(f)
+            writer.add_page(pg)
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, "s_" + os.path.basename(src_pdf))
+        with open(dst, "wb") as fh:
+            writer.write(fh)
+        return dst
+    except Exception as e:
+        log_exception("scale_pdf_to_print_width", e)
+        return None
+
 def make_print_copy(src_pdf):
     try:
         data = bytearray(open(src_pdf, "rb").read())
@@ -7389,6 +7418,7 @@ class CustomTkinterApp(ctk.CTk):
 
     def send_to_thermal_printer_57x90(self, pdf_file_path):
         temp_copy = None
+        scaled_copy = None
         try:
             sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
             if not os.path.exists(sumatra_path):
@@ -7401,11 +7431,15 @@ class CustomTkinterApp(ctk.CTk):
                 if temp_copy:
                     target = temp_copy
 
+            scaled_copy = scale_pdf_to_print_width(target)
+            if scaled_copy:
+                target = scaled_copy
+
             if os.path.exists(sumatra_path):
                 cmd = [
                     sumatra_path,
                     "-print-to-default",
-                    "-print-settings", "paper=57 x 90 mm,fit",
+                    "-print-settings", "paper=57 x 90 mm,shrink",
                     "-silent",
                     target
                 ]
@@ -7415,10 +7449,12 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception(f"auto_print:{os.path.basename(pdf_file_path)}", e)
         finally:
-            if temp_copy:
+            if temp_copy or scaled_copy:
                 time.sleep(1.0)
-                try: os.remove(temp_copy)
-                except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
+                for _tmp in (temp_copy, scaled_copy):
+                    if _tmp:
+                        try: os.remove(_tmp)
+                        except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
 
     def open_downloads_archiver_dialog(self):
         try:
@@ -8988,7 +9024,7 @@ class CustomTkinterApp(ctk.CTk):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", "paper=57 x 90 mm,fit",
+                        "-print-settings", "paper=57 x 90 mm,shrink",
                         "-silent",
                         pdf_path
                     ]
