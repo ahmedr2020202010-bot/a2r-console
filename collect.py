@@ -4046,13 +4046,17 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
+SLIP_SIZE_MM = 70   # بون التصوير مربع 70×70 مم (داخل عرض الطباعة الفعلي لطابعة 80 مم)
+SLIP_FONT_CANDIDATES = [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
+
 def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
     if not REPORTLAB_AVAILABLE:
         return False
-    PAGE_W, PAGE_H = 160, 95
+    S = SLIP_SIZE_MM / 25.4 * 72
+    PAGE_W = PAGE_H = S
     c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
     font_name = "Helvetica-Bold"
-    for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+    for f_cand in SLIP_FONT_CANDIDATES:
         if os.path.exists(f_cand):
             try:
                 pdfmetrics.registerFont(TTFont("SlipArabic", f_cand))
@@ -4064,21 +4068,57 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
         try: return get_display(arabic_reshaper.reshape(str(t)))
         except Exception: return str(t)
 
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont(font_name, 17)
-    y = PAGE_H - 20
-    c.drawCentredString(PAGE_W / 2, y, _ar(emp_name))
+    # الإطار
+    margin = 7
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(2)
+    c.roundRect(margin, margin, S - 2 * margin, S - 2 * margin, 9, stroke=1, fill=0)
+
+    # الأسطر: الاسم الطويل بينزل لسطرين/تلاتة بدل ما يطلع بره الإطار، والخط بيصغر لو لزم
+    inner_w = S - 2 * margin - 18
+
+    def _fit_text(text, fn, base, min_single=16):
+        sz = base
+        while sz >= min_single:
+            if pdfmetrics.stringWidth(_ar(text), fn, sz) <= inner_w:
+                return [(_ar(text), fn, sz)]
+            sz -= 1
+        sz = min_single
+        rows, cur = [], ""
+        for w in str(text).split():
+            cand = (cur + " " + w).strip()
+            if cur and pdfmetrics.stringWidth(_ar(cand), fn, sz) > inner_w:
+                rows.append(cur)
+                cur = w
+            else:
+                cur = cand
+        if cur:
+            rows.append(cur)
+        out = []
+        for row in rows:
+            s_, txt = sz, _ar(row)
+            while s_ > 9 and pdfmetrics.stringWidth(txt, fn, s_) > inner_w:
+                s_ -= 1
+            out.append((txt, fn, s_))
+        return out
+
+    fitted = []
+    if emp_name:
+        fitted += _fit_text(emp_name, font_name, 25)
     if unit_name:
-        y -= 20
-        c.setFont(font_name, 14)
-        c.drawCentredString(PAGE_W / 2, y, _ar(unit_name))
+        fitted += _fit_text(unit_name, font_name, 21)
     if terminal_id:
-        y -= 17
-        c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(PAGE_W / 2, y, f"TID: {terminal_id}")
-    y -= 19
-    c.setFont("Helvetica-Bold", 13)
-    c.drawCentredString(PAGE_W / 2, y, date_str)
+        fitted += _fit_text(f"TID: {terminal_id}", "Helvetica-Bold", 18, min_single=10)
+    fitted += _fit_text(str(date_str), "Helvetica-Bold", 19, min_single=10)
+
+    gap = 10
+    total_h = sum(sz for _, _, sz in fitted) + gap * (len(fitted) - 1)
+    y_top = (PAGE_H + total_h) / 2
+    c.setFillColorRGB(0, 0, 0)
+    for txt, fn, sz in fitted:
+        c.setFont(fn, sz)
+        c.drawCentredString(PAGE_W / 2, y_top - sz * 0.8, txt)
+        y_top -= sz + gap
     c.save()
     return True
 
@@ -5990,12 +6030,13 @@ def annotate_records(records):
     dup_sig_seen = set()
     browser_dup = {}
     for r in sorted(active, key=lambda x: x["dt_key"]):
-        tx_sig = (r["plate"], r["time"], round(r["amount"], 2))
-        if r["plate"] != "-" and tx_sig in dup_sig_seen:
+        ident = dup_ident(r)
+        tx_sig = (ident, r["time"], round(r["amount"], 2))
+        if ident is not None and tx_sig in dup_sig_seen:
             browser_dup[id(r)] = True
         else:
             browser_dup[id(r)] = False
-            if r["plate"] != "-":
+            if ident is not None:
                 dup_sig_seen.add(tx_sig)
 
     for r in records:
@@ -6008,6 +6049,8 @@ def annotate_records(records):
             continue
 
         n = key_counts[r["_key"]]
+        if browser_dup.get(id(r), False) and n < 2:
+            n = 2   # نفس المعاملة بملف تاني (اسم مختلف): مش داخلة في الإجمالي، فتظهر "مكرر"
         r["dup_n"] = n
         r["is_duplicate"] = n > 1
         r["wrong_unit"] = bool(device_unit and r["unit"] not in (UNSPEC, device_unit))
@@ -6033,13 +6076,31 @@ def annotate_records(records):
 
     return device_unit
 
+def dup_ident(r):
+    """هوية المركبة لكشف التكرار: اللوحة، ولو فاضية فالشاسيه (ثابت للمركبة). None = مفيش هوية فمش بنقارن."""
+    if r["plate"] != "-":
+        return ("plate", r["plate"])
+    ch = (r.get("chassis") or "-").strip()
+    return ("chassis", ch) if ch not in ("-", "") else None
+
+def counted_ids(records):
+    """المعاملات اللي بتدخل في الإجمالي: كل إيصال نزل في Downloads (مبلغه بيتضاف)، ما عدا اللي اتلغى يدويًا.
+    التكرار (نفس اللوحة/الشاسيه + الوقت + المبلغ) مجرد علامة وتلوين في Records Viewer ومبيتشالش من الإجمالي؛
+    لو المستخدم شاف تكرار فعلًا بيلغي واحدة يدويًا. نفس الدالة بتحدد الإجمالي في الشاشة والإكسيل وبون الملخص."""
+    return {id(r) for r in records if not r.get("is_void")}
+
+def counted_totals(records):
+    """(مجموع المبالغ، عدد المعاملات) المحسوبة فعلًا في الإجمالي."""
+    ids = counted_ids(records)
+    return round(sum(r["amount"] for r in records if id(r) in ids), 2), len(ids)
+
 def build_summary(records, device_unit, date_label):
     units_summary = {}
     valid_total_sum = 0.0
     valid_count = 0
     void_count = 0
     void_sum = 0.0
-    seen_sigs = set()
+    counted = counted_ids(records)
 
     for r in records:
         if r.get("is_void"):
@@ -6052,12 +6113,9 @@ def build_summary(records, device_unit, date_label):
         u["total"] += r["amount"]
         u["manual_cnt" if r["is_manual"] else "pdf_cnt"] += 1
 
-        tx_sig = (r["plate"], r["time"], round(r["amount"], 2))
-        if tx_sig not in seen_sigs or r["plate"] == "-":
+        if id(r) in counted:
             valid_total_sum += r["amount"]
             valid_count += 1
-            if r["plate"] != "-":
-                seen_sigs.add(tx_sig)
 
     info = {
         "date_label": date_label,
@@ -6098,7 +6156,8 @@ def write_report(records, out_file):
 
     headers = ["م", "وحدة المرور", "رقم اللوحة", "اسم المؤمن له", "المبلغ (جنيه)",
                "وقت الطباعة", "رقم الشاسية", "رقم الموتور", "الماركة",
-               "الطراز", "المدة التأمينية", "اسم الملف", "نوع المعاملة"]
+               "الطراز", "المدة التأمينية", "اسم الملف", "نوع المعاملة", "داخل الإجمالي (1=نعم)"]
+    counted = counted_ids(records)
 
     ws.row_dimensions[1].height = 28
     for col_idx, h in enumerate(headers, 1):
@@ -6112,7 +6171,7 @@ def write_report(records, out_file):
         amt_value = -float(rec['amount']) if rec.get('is_void') else float(rec['amount'])
         row_data = [idx, rec['unit'], str(rec['plate']), rec['insured'], amt_value,
                     rec['time'], str(rec['chassis']), str(rec['motor']), rec['make'],
-                    rec['model'], rec['period'], rec['file'], rec['status_text']]
+                    rec['model'], rec['period'], rec['file'], rec['status_text'], 1 if id(rec) in counted else 0]
         style = KIND_STYLE.get(rec["kind"])
         for col_idx, val in enumerate(row_data, 1):
             cell = ws.cell(row=current_r, column=col_idx, value=val)
@@ -6124,21 +6183,21 @@ def write_report(records, out_file):
                 cell.number_format = '#,##0.00'
 
     last_data = max(2, current_r)
-    ws.auto_filter.ref = f"A1:M{last_data}"
+    ws.auto_filter.ref = f"A1:N{last_data}"
     ws.freeze_panes = "A2"
 
     current_r += 1
     tot_label = ws.cell(row=current_r, column=2, value="الصافي الفعلي العام")
     tot_label.font, tot_label.fill, tot_label.border = Font(name="Arial", size=12, bold=True), fill_total, thin_border
     
-    valid_count = sum(1 for r in records if not r.get('is_void'))
+    valid_count = len(counted)
     cnt_cell = ws.cell(row=current_r, column=4, value=valid_count)
     cnt_cell.font, cnt_cell.fill, cnt_cell.alignment, cnt_cell.border = Font(name="Arial", size=12, bold=True), fill_total, center, thin_border
-    sum_cell = ws.cell(row=current_r, column=5, value=f"=SUM(E2:E{last_data})")
+    sum_cell = ws.cell(row=current_r, column=5, value=f"=SUMPRODUCT(E2:E{last_data},N2:N{last_data})")
     sum_cell.font, sum_cell.fill, sum_cell.alignment, sum_cell.border = Font(name="Arial", size=12, bold=True, color="C00000"), fill_total, center, thin_border
     sum_cell.number_format = '#,##0.00'
 
-    for col_i in range(1, 14): ws.column_dimensions[get_column_letter(col_i)].width = 20
+    for col_i in range(1, 15): ws.column_dimensions[get_column_letter(col_i)].width = 20
     ws.column_dimensions['D'].width = 32
     ws.column_dimensions['L'].width = 30
     ws.column_dimensions['M'].width = 28
@@ -7639,8 +7698,7 @@ class CustomTkinterApp(ctk.CTk):
         if not REPORTLAB_AVAILABLE or not records_list: return
         pdf_path = os.path.join(day_folder_path, f"Samary_{date_str}.pdf")
         try:
-            total_sum = sum(r['amount'] for r in records_list if not r.get('is_void'))
-            total_cnt = sum(1 for r in records_list if not r.get('is_void'))
+            total_sum, total_cnt = counted_totals(records_list)
             pdf_cnt = sum(1 for r in records_list if not r.get('is_manual') and not r.get('is_void'))
             manual_cnt = sum(1 for r in records_list if r.get('is_manual') and not r.get('is_void'))
             void_cnt = sum(1 for r in records_list if r.get('is_void'))
@@ -8799,6 +8857,7 @@ class CustomTkinterApp(ctk.CTk):
             tree.delete(*tree.get_children())
             shown = 0
             shown_valid_sum = 0.0
+            counted = counted_ids(self.last_detailed_records)
 
             for i, r in enumerate(self.last_detailed_records):
                 amt_str = f"{r['amount']:.2f}"
@@ -8813,7 +8872,7 @@ class CustomTkinterApp(ctk.CTk):
                 tag = r["kind"] if r["kind"] in ("dup", "void") else ""
                 tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
-                if not r.get("is_void"):
+                if id(r) in counted:
                     shown_valid_sum += r["amount"]
 
             count_lbl.configure(text=tr("records_stats", shown=shown, net=shown_valid_sum, total=self.last_summary_info.get('total_sum', 0)))
