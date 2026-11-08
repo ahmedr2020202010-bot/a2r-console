@@ -3720,6 +3720,35 @@ def format_arabic_for_dropdown(text):
             _log_silent("format_arabic_for_dropdown#1", _e)
     return text
 
+MANUAL_MAX_AMOUNT = 10_000_000
+
+def parse_manual_amount(raw):
+    """نص المبلغ → رقم صالح أو None. بيرفض nan/inf والصفر والسالب والمبلغ الضخم جدًا (غالبًا غلطة كتابة).
+    '521,57' = فاصلة عشرية، و'1,500' = فاصل آلاف. والمبلغ بيتقرّب لخانتين عشان الملف والقاعدة يتطابقوا."""
+    s = str(raw or "").strip().replace("٫", ".")
+    if not s:
+        return None
+    if re.fullmatch(r"\d+,\d{1,2}", s):
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if not _math.isfinite(v) or v <= 0 or v > MANUAL_MAX_AMOUNT:
+        return None
+    return round(v, 2)
+
+def unique_manual_filename(dest, amt, now_dt):
+    """اسم الملف amount_HHMMSS.pdf. لو موجود (نفس المبلغ في نفس الثانية) بنزوّد ثانية عشان ميتكتبش فوق إيصال موجود."""
+    for _ in range(60):
+        base = f"{amt:.2f}_{now_dt.strftime('%H%M%S')}.pdf"
+        if not os.path.exists(os.path.join(dest, base)) and not os.path.exists(os.path.join(dest, "_" + base)):
+            return base, now_dt
+        now_dt += datetime.timedelta(seconds=1)
+    return base, now_dt
+
 class SafeArabicComboBox(ctk.CTkComboBox):
     def __init__(self, master, values=None, command=None, **kwargs):
         self._user_command = command
@@ -8989,17 +9018,25 @@ class CustomTkinterApp(ctk.CTk):
         cb_u.pack(fill="x", padx=18)
         attach_context_menu(cb_u)
 
+        busy = [False]   # منع الضغط المتكرر (Enter مرتين أو دبل كليك) أثناء الإنشاء والطباعة
+
         def save(event=None):
-            raw = e_a.get().strip().replace(",", "")
-            if not raw: return
+            if busy[0]:
+                return
+            busy[0] = True
+            try: btn_gen.configure(state="disabled")
+            except Exception as _e: _log_silent("manual_save_btn", _e)
+            done = False
             try:
-                amt = float(raw)
-                if amt <= 0: return
+                amt = parse_manual_amount(e_a.get())
+                if amt is None:
+                    if e_a.get().strip():
+                        messagebox.showwarning("Error", "Invalid amount")
+                    return
                 dest = self.get_clean_path()
-                now_dt = datetime.datetime.now()
+                file_base, now_dt = unique_manual_filename(dest, amt, datetime.datetime.now())
                 t_stamp = now_dt.strftime("%H%M%S")
                 date_tag = now_dt.strftime("%d-%m-%Y")
-                file_base = f"{amt:.2f}_{t_stamp}.pdf"
                 full_path = os.path.join(dest, file_base)
 
                 u_val = cb_u.get().strip() or "-"
@@ -9012,27 +9049,41 @@ class CustomTkinterApp(ctk.CTk):
 
                 self.printed_receipts_set.add(file_base)
                 create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
+                db_ok = True
                 try:
                     conn = db_connect()
-                    c = conn.cursor()
-                    c.execute("INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
-                              (u_val, p_val, n_val, amt, f"{date_tag} {t_stamp}", file_base))
-                    conn.commit()
-                    conn.close()
-                except Exception as ex_db: log_exception("insert_vault", ex_db)
+                    try:
+                        conn.execute("INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+                                     (u_val, p_val, n_val, amt, f"{date_tag} {t_stamp}", file_base))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                except Exception as ex_db:
+                    db_ok = False
+                    log_exception("insert_vault", ex_db)
+                if not db_ok:
+                    messagebox.showwarning("Warning", "The receipt was created, but its details (unit / plate / name) "
+                                                      "could not be saved. See app_log.txt.")
 
                 if self.auto_print_enabled:
                     self.send_to_thermal_printer_57x90(full_path)
 
                 try: os.startfile(full_path)
                 except Exception as _e: _log_silent("save#1", _e)
+                done = True
                 win.destroy()
             except Exception as ex_save:
                 messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}")
+            finally:
+                if not done:
+                    busy[0] = False
+                    try: btn_gen.configure(state="normal")
+                    except Exception as _e: _log_silent("manual_save_btn2", _e)
 
         e_a.bind("<Return>", save)
-        ctk.CTkButton(win, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN, fg_color=t["success"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", height=36, command=save).pack(fill="x", padx=18, pady=16)
+        btn_gen = ctk.CTkButton(win, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN, fg_color=t["success"],
+                                hover_color=t["primary_hover"], text_color="#FFFFFF", height=36, command=save)
+        btn_gen.pack(fill="x", padx=18, pady=16)
         win.after(100, lambda: e_a.focus_set())
 
     def print_slip(self):
