@@ -9814,8 +9814,9 @@ class CustomTkinterApp(ctk.CTk):
         win.title(tr("records_viewer_title") + (f" — {day_txt}" if day_txt else ""))
         win.resizable(True, True)
         set_window_icon_safe(win)
-        center_window_relative(win, self, 1340, 680)
-        win.minsize(1000, 480)
+        _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        center_window_relative(win, self, min(1340, _sw - 40), min(680, _sh - 110))   # على قد الشاشة
+        win.minsize(min(1000, _sw - 40), 420)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("_records_window#1", _e)
@@ -9990,10 +9991,11 @@ class CustomTkinterApp(ctk.CTk):
                 records.sort(key=lambda r: str(r.get(k, "")), reverse=reverse)
             refresh()
 
+        _COL_W = {"idx": 42, "unit": 125, "plate": 120, "insured": 190, "amount": 85, "time": 135, "make": 85,
+                  "model": 85, "chassis": 140, "motor": 105, "period": 185, "file": 190, "status": 125}
         for col in columns:
             tree.heading(col, text=headers.get(col, col), command=lambda c=col: sort_by(c))
-            w = 40 if col == "idx" else (150 if col in ("insured", "file", "status", "period") else (95 if col in ("amount", "time") else 85))
-            tree.column(col, width=w, anchor="center")
+            tree.column(col, width=_COL_W.get(col, 90), anchor="center", stretch=(col in ("insured", "file")))
 
         for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
             tree.tag_configure(kind, background=bg, foreground=fg)
