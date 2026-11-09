@@ -96,7 +96,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v51"
+APP_VERSION = "v52"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -158,6 +158,7 @@ import tempfile
 import datetime
 import subprocess
 from collections import Counter
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageOps
@@ -808,12 +809,14 @@ class Analysis:
         self.tid, self.how, self.row, self.unit = tid, how, row, unit
         self.val, self.ok, self.batches, self.date = val, ok, batches, date
         self.texts = []
+        self.txn = None     # عدد معاملات الباتش (من إيصال الإقفال)
 
 
 def analyze_lines(all_lines):
     pieces = split_columns(all_lines)
     multi = len(pieces) > 1
     all_texts, batches, seen = [], [], set()
+    txns = []
     all_ok = True
     for pc in pieces:
         r = ocr_piece(pc)
@@ -827,6 +830,7 @@ def analyze_lines(all_lines):
             continue
         seen.add(key)
         batches.append(r.val)
+        txns.append(batch_txn_of(r.texts))
         all_ok = all_ok and r.ok
     total = round2(sum(batches))
     ok = all_ok and bool(batches)
@@ -835,6 +839,7 @@ def analyze_lines(all_lines):
         all_texts.extend(r.texts)
         if r.val > 0 and (r.ok or not batches):
             total, ok, batches = r.val, r.ok, [r.val]
+            txns = [batch_txn_of(r.texts)]
     date = find_date_in(all_texts)
     tid = find_terminal_in(all_texts)
     how = "terminal"
@@ -853,6 +858,7 @@ def analyze_lines(all_lines):
             row, unit, how = u, ROW_NAMES.get(u), "name/merchant"
     a = Analysis(tid, how, row, unit, total, ok, batches, date)
     a.texts = all_texts
+    a.txn = sum(txns) if (txns and all(t is not None for t in txns)) else None
     return a
 
 
@@ -864,16 +870,20 @@ def merge_second_read(a, b):
         a.row, a.unit, a.how = b.row, b.unit, b.how
     if a.date is None:
         a.date = b.date
+    if a.txn is None:
+        a.txn = b.txn
     if b.val <= 0:
         return None
     if a.val <= 0:
         a.val, a.ok, a.batches = b.val, b.ok, list(b.batches)
+        a.txn = b.txn if b.txn is not None else a.txn
         return None
     if abs(a.val - b.val) < 0.005:
         a.ok = a.ok or b.ok
         return None
     if (not a.ok) and b.ok:
         a.val, a.ok, a.batches = b.val, True, list(b.batches)
+        a.txn = b.txn if b.txn is not None else a.txn
         return None
     if a.ok and not b.ok:
         return None
@@ -1054,135 +1064,472 @@ def machine_new_name(info, day, month):
     return ".".join(parts)
 
 
-class PayResult:
-    def __init__(self, src):
-        self.src = src
-        self.name = os.path.basename(src)
-        self.pages = 0
-        self.count = 0
+# ───────────────────────── إيصالات الدفع: نفس طريقة تطبيق الموبايل ─────────────────────────
+# الفكرة (منقولة من التطبيق):
+#  1) كل صفحة بتتقرا مرة واحدة (الصورة الأصلية جوه الـ PDF الممسوح من غير تحويل) على شرائح مضبوطة.
+#  2) العدد = عدّ بالهيكل (لوجو + TERMINAL + RRN + AMOUNT + APPROVED) في كل عمود.
+#  3) أوراق التعريف الصغيرة (اسم + TID + تاريخ) بتتجاهل، وإيصالات الإقفال/الملخص مش بتتعد.
+#  4) مراجعة بتسلسل أرقام RRN + تاريخ كل إيصال + مقارنة بعدد معاملات الباتش من التقفيل.
+
+CLOSING_TXN = {}   # رقم الماكينة -> عدد معاملات الباتش (من إيصالات الإقفال في التقفيل)
+
+
+def publish_closing_txn(items):
+    """بيحفظ عدد معاملات الباتش لكل ماكينة (من التقفيل) علشان إيصالات الدفع تقارنه بالعدد الفعلي."""
+    sums, bad = {}, set()
+    for it in items:
+        if getattr(it, "skip", False):
+            continue
+        n = getattr(it, "order", None) or (TERMINALS[it.tid].order if getattr(it, "tid", None) in TERMINALS else None)
+        if n is None:
+            continue
+        t = getattr(it, "txn", None)
+        if t is None:
+            bad.add(n)
+            continue
+        sums[n] = sums.get(n, 0) + t
+    for n in bad:
+        sums.pop(n, None)
+    CLOSING_TXN.clear()
+    CLOSING_TXN.update(sums)
+    return sums
+
+
+def _txn_num(s):
+    t = s.strip().replace("O", "0").replace("o", "0")
+    t = re.sub(r"[Il|]", "1", t)
+    try:
+        return int(t)
+    except ValueError:
+        return None
+
+
+def batch_txn_of(texts):
+    """عدد معاملات الباتش من إيصال الإقفال: GRAND TOTALS / Sale (010) (ولو مجموع الكروت بيتطابق معاه)."""
+    grand_re = re.compile(r"GRAND|TOTALS", re.I)
+    paren = re.compile(r"\(\s*([0-9OoIl|]{1,5})\s*\)")
+    tot_re = re.compile(r"TOTAL(?!\s*NET)[^()\n]{0,12}\(\s*([0-9OoIl|]{1,5})\s*\)", re.I)
+    grands, sums = [], []
+    for raw in texts:
+        gm = grand_re.search(raw)
+        if gm:
+            m = paren.search(raw[gm.start():])
+            v = _txn_num(m.group(1)) if m else None
+            if v is not None and 0 < v < 100000:
+                grands.append(v)
+        pre = raw[:gm.start()] if gm else raw
+        s, n = 0, 0
+        for m in tot_re.finditer(pre):
+            v = _txn_num(m.group(1))
+            if v is not None:
+                s += v
+                n += 1
+        if n > 0 and s > 0:
+            sums.append(s)
+    g = most_common(grands)[0] if grands else None
+    s = most_common(sums)[0] if sums else None
+    if g is not None and s is not None and g != s:
+        return None          # القراءتين متعارضتين: الأفضل تتكتب بإيدك
+    return g if g is not None else s
+
+
+# ───────────── قراءة الصفحة (RapidOCR أولاً، Tesseract بديل) ─────────────
+_RAPID = {"eng": None, "tried": False}
+_RAPID_LOCK = threading.Lock()
+_TILE_MAX = 1900     # RapidOCR بيصغّر أي صورة أكبر من ~2000 بكسل، فالصفحة بتتقسم بلاطات أصغر من كده
+
+
+def _rapid():
+    if not _RAPID["tried"]:
+        _RAPID["tried"] = True
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _RAPID["eng"] = RapidOCR()
+        except Exception:
+            _RAPID["eng"] = None
+    return _RAPID["eng"]
+
+
+def pay_ocr_ready():
+    """(ok, message): إيصالات الدفع بتشتغل بـ RapidOCR أو Tesseract (أي واحد منهم)."""
+    if _rapid() is not None or find_tesseract():
+        return True, ""
+    return False, "مفيش محرك OCR: لا RapidOCR ولا Tesseract. اتأكد إن البرنامج اتبنى بالمكتبات كاملة."
+
+
+def _ocr_image_lines(im, scale=1.0, dx=0.0, dy=0.0):
+    """OCR لصورة واحدة -> OcrLine بإحداثيات الصفحة الأصلية."""
+    out = []
+    eng = _rapid()
+    if eng is not None and np is not None:
+        with _RAPID_LOCK:
+            res = eng(np.array(im.convert("RGB")))
+        items = (res[0] if isinstance(res, (tuple, list)) else None) or []
+        for box, txt, _sc in items:
+            t = str(txt).strip()
+            if not t:
+                continue
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            out.append(OcrLine(t, dx + min(xs) / scale, dx + max(xs) / scale,
+                               dy + min(ys) / scale, dy + max(ys) / scale))
+        return out
+    for l in tess_lines(im.convert("L"), 6):
+        out.append(OcrLine(l.text, dx + l.left / scale, dx + l.right / scale,
+                           dy + l.top / scale, dy + l.bottom / scale))
+    return out
+
+
+def _tile_boxes(w, h, cols=5, max_tile=_TILE_MAX):
+    cw = w / float(cols)
+    rows = max(1, int(math.ceil(h / float(max_tile))))
+    rh = h / float(rows)
+    boxes = []
+    for i in range(cols):
+        x0 = max(0, int(i * cw - cw * 0.12))
+        x1 = min(w, int((i + 1) * cw + cw * 0.12))
+        for j in range(rows):
+            y0 = max(0, int(j * rh - rh * 0.06))
+            y1 = min(h, int((j + 1) * rh + rh * 0.06))
+            boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
+def _merge_lines(lines):
+    """نفس السطر اتقرا من بلاطتين متداخلتين: يفضل مرة واحدة (الأطول)."""
+    out = []
+    for l in sorted(lines, key=lambda x: (x.cy, x.left)):
+        dup = None
+        for k in range(len(out) - 1, max(-1, len(out) - 80), -1):
+            o = out[k]
+            if abs(o.cy - l.cy) > max(o.h, l.h, 1.0) * 0.7:
+                break
+            ov = min(o.right, l.right) - max(o.left, l.left)
+            if ov > 0 and ov >= 0.6 * min(o.right - o.left, l.right - l.left):
+                dup = k
+                break
+        if dup is None:
+            out.append(l)
+        elif len(l.text) > len(out[dup].text):
+            out[dup] = l
+    return out
+
+
+def read_page(im, mode="fast"):
+    """يرجّع (w, h, lines). fast = بلاطات بالدقة الأصلية. accurate = الصفحة كلها + بلاطات مكبّرة 1.5x."""
+    im = ImageOps.exif_transpose(im).convert("RGB")
+    w, h = im.size
+    lines = []
+    f = 1.5 if mode == "accurate" else 1.0
+    if mode == "accurate":
+        s = min(1.0, float(_TILE_MAX) / max(w, h))
+        small = im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS) if s < 1.0 else im
+        lines += _ocr_image_lines(small, s)
+    for (x0, y0, x1, y1) in _tile_boxes(w, h, max_tile=_TILE_MAX / f):
+        tile = im.crop((x0, y0, x1, y1))
+        if f != 1.0:
+            tile = tile.resize((int(tile.width * f), int(tile.height * f)), Image.LANCZOS)
+        lines += _ocr_image_lines(tile, f, x0, y0)
+    return w, h, _merge_lines(lines)
+
+
+def _page_text(lines, w):
+    """نص الصفحة مرتب عمود عمود (كل عمود = إيصالات فوق بعض)."""
+    cw = max(1.0, w / 5.0)
+    ls = sorted(lines, key=lambda l: (int(((l.left + l.right) / 2.0) / cw), l.cy))
+    return "\n".join(l.text for l in ls)
+
+
+# ───────────── أوراق التعريف + العد بالهيكل ─────────────
+_SLIP_PAY = re.compile(r"TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL|SALE|GRAND|CARD|REPRINT")
+
+
+def is_id_slip(lines):
+    """ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) جوه الملف: مش إيصال دفع فمتتعدّش."""
+    if not lines or len(lines) > 16:
+        return False
+    allt = "\n".join(l.text.upper() for l in lines)
+    if _SLIP_PAY.search(allt):
+        return False
+    if re.search(r"(?<!\d)\d{12}(?!\d)", re.sub(r"[ \t]", "", allt)):
+        return False
+    if re.search(r"\bT\s?[I1L|]\s?D\b\W{0,4}[\dOo]{7,9}", allt) or re.search(r"\bT\s?[I1L|]\s?D\b", allt):
+        return True
+    has_date = re.search(r"\d{2}\s?[/.\-]\s?\d{2}\s?[/.\-]\s?20\d{2}", allt)
+    return bool(has_date) and len(lines) <= 8 and find_terminal_in([allt]) is not None
+
+
+_S_NAME = re.compile(r"NATIONAL|BANK\s*OF\s*EGYPT")
+_S_RRN = re.compile(r"(?<![A-Z])R{1,2}N\W{0,3}\d")
+_S_AMT = re.compile(r"^\s*AMOUNT\b")
+_S_AMT_BAD = re.compile(r"FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b")
+
+
+def struct_count(lines):
+    """عدّ الإيصالات بالهيكل: كل إيصال له لوجو + Terminal + RRN + AMOUNT + Approved (مرة واحدة).
+    بنقسم العلامات أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات.
+    يرجّع dict: sm (عدد الأعمدة)، mx (أكبر نوع علامة)، h."""
+    out = {"sm": 0, "mx": 0, "h": 3000.0, "types": {}}
+    if not lines:
+        return out
+    h = max(l.bottom for l in lines)
+    w = max(l.right for l in lines)
+    out["h"] = h
+    marks = []
+    for l in lines:
+        u = l.text.upper()
+        cx = (l.left + l.right) / 2.0
+        kinds = []
+        if _S_NAME.search(u):
+            kinds.append("logo")
+        if "TERMINAL" in u:
+            kinds.append("term")
+        if _S_RRN.search(u):
+            kinds.append("rrn")
+        if _S_AMT.search(u) and not _S_AMT_BAD.search(u):
+            kinds.append("amount")
+        if "APPROVED" in u:
+            kinds.append("appr")
+        for k in kinds:
+            marks.append((k, cx, l.cy, l.left, l.right))
+    ded = []
+    for m in marks:
+        dup = False
+        for o in ded:
+            if o[0] == m[0] and o[3] < m[4] and m[3] < o[4] and abs(o[2] - m[2]) < h * 0.02:
+                dup = True
+                break
+        if not dup:
+            ded.append(m)
+    for m in ded:
+        out["types"][m[0]] = out["types"].get(m[0], 0) + 1
+    if not ded:
+        return out
+    out["mx"] = max(out["types"].values())
+    ded.sort(key=lambda m: m[1])
+    cols, cur = [], [ded[0]]
+    for m in ded[1:]:
+        if m[1] - cur[-1][1] > w * 0.07:
+            cols.append(cur)
+            cur = []
+        cur.append(m)
+    cols.append(cur)
+    n = 0
+    for c in cols:
+        cnt = {}
+        for m in c:
+            cnt[m[0]] = cnt.get(m[0], 0) + 1
+        n += max(cnt.values())
+    out["sm"] = n
+    return out
+
+
+# ───────────── نقاط الارتكاز (RRN) والتسلسل ─────────────
+class ScanSummary:
+    def __init__(self):
+        self.full = 0
+        self.partial = 0
+        self.rrn_day = {}
+        self.non_payment = False
         self.tid = None
-        self.votes = {}
         self.day = self.month = None
-        self.new_name = None
-        self.out_path = None
+        self.other_day = []
         self.seq_min = self.seq_max = None
         self.seq_missing = []
-        self.other_day = []
-        self.notes = []
-        self.ok = True
-        # المرحلة 2 (العد): تفصيل الصفحات
-        self.counted = False
-        self.n15 = self.n10 = self.last = None
-        self.page_counts = []
-        self.id_notes = []
-        self.id_ok = True
 
     @property
-    def order(self):
-        return TERMINALS[self.tid].order if self.tid in TERMINALS else 99
+    def count(self):
+        return self.full + self.partial
 
-    def snapshot_identity(self):
-        self.id_notes, self.id_ok = list(self.notes), self.ok
+    @property
+    def range_len(self):
+        return None if self.seq_min is None else self.seq_max - self.seq_min + 1
+
+    @property
+    def agree(self):
+        return self.range_len is None or self.count == self.range_len
+
+    @property
+    def range_text(self):
+        if self.seq_min is None:
+            return ""
+        return " • التسلسل %06d-%06d (%d)" % (self.seq_min, self.seq_max, self.range_len)
+
+    def missing_text(self, k=10):
+        miss = "، ".join("%06d" % n for n in self.seq_missing[:k])
+        return (" - أرقام مش لاقيها: %s%s" % (miss, " ..." if len(self.seq_missing) > k else "")) if self.seq_missing else ""
 
 
-def scan_payment_pdf(pdf, workdir, progress=None, stop=lambda: False, max_pages=60):
-    r = PayResult(pdf)
-    imgs = pdf_to_images(pdf, workdir, dpi=300, last=max_pages, max_side=3700)
-    r.pages = len(imgs)
-    votes, days, rrn_day, total = {}, {}, {}, 0
-    texts = []
-    for i, p in enumerate(imgs):
-        if stop():
-            break
-        if progress:
-            progress("صفحة %d من %d" % (i + 1, len(imgs)))
-        w, h, L = _ocr_tiles(p)
-        c, rr = count_page(w, h, L)
-        total += c
-        rrn_day.update(rr)
-        page_text = "\n".join(t for t, *_ in L)
-        texts.append(page_text)
-        for k, v in tid_votes(page_text).items():
-            votes[k] = votes.get(k, 0) + v
-        for m in _DATE_RE.finditer(page_text):
-            k = day_key(m.group(0))
-            if k:
-                days[k] = days.get(k, 0) + 1
+class PayCollector:
+    def __init__(self):
+        self.pages = []
+        self.slips = 0
+        self.texts = []
+        self.page_h = 3000.0
+
+    def new_page(self, h):
+        self.pages.append([])
+        self.page_h = float(h) if h else 3000.0
+
+    def _add(self, rrn, day, l, r, cy):
+        for a in self.pages[-1]:
+            if a["l"] < r and l < a["r"] and abs(a["cy"] - cy) < self.page_h * 0.012:
+                a["rrn"] = a["rrn"] or rrn
+                a["day"] = a["day"] or day
+                return
+        self.pages[-1].append({"rrn": rrn, "day": day, "l": l, "r": r, "cy": cy})
+
+    def collect(self, lines):
+        if not self.pages:
+            self.new_page(3000.0)
+        self.texts.append("\n".join(l.text for l in lines))
+        dates = [l for l in lines if day_key(l.text)]
+        for l in lines:
+            a = rrn_of(l.text)
+            if a is None:
+                continue
+            day = day_key(l.text)
+            if day is None:
+                best, bd = None, 1e18
+                for d in dates:
+                    dy = abs(d.cy - l.cy)
+                    if dy > l.h * 5:
+                        continue
+                    if not (d.left < l.right + 60 and l.left < d.right + 60):
+                        continue
+                    if dy < bd:
+                        bd, best = dy, d
+                if best is not None:
+                    day = day_key(best.text)
+            self._add(None if a == "P" else a, day, l.left, l.right, l.cy)
+
+    def finish(self):
+        r = ScanSummary()
+        seen, days, partial_days = set(), {}, []
+        for a in (x for p in self.pages for x in p):
+            if a["rrn"]:
+                if a["rrn"] not in seen:
+                    seen.add(a["rrn"])
+                    r.full += 1
+                    r.rrn_day[a["rrn"]] = a["day"]
+                    if a["day"]:
+                        days[a["day"]] = days.get(a["day"], 0) + 1
+            else:
+                r.partial += 1
+                if a["day"]:
+                    partial_days.append(a["day"])
+                    days[a["day"]] = days.get(a["day"], 0) + 1
+        allt = "\n".join(self.texts)
+        r.non_payment = bool(re.search(
+            r"GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF", allt, re.I))
+        r.tid = _tid_of_text(allt)
+        if not days:
+            for m in _DATE_RE.finditer(allt):
+                k = day_key(m.group(0))
+                if k:
+                    days[k] = days.get(k, 0) + 1
+        if days:
+            best = max(days.items(), key=lambda e: e[1])[0]
+            r.day, r.month = best.split(".")
+            for rrn, d in r.rrn_day.items():
+                if d and d != best:
+                    r.other_day.append("إيصال %s بتاريخ %s" % (rrn[6:], d))
+            for d in partial_days:
+                if d != best:
+                    r.other_day.append("إيصال (رقمه مش واضح) بتاريخ %s" % d)
+        nums = sorted(int(k[6:]) for k in r.rrn_day)
+        if len(nums) >= 2:
+            best_start, best_len, start = 0, 1, 0
+            for i in range(1, len(nums) + 1):
+                if i == len(nums) or nums[i] - nums[i - 1] > 15:
+                    if i - start > best_len:
+                        best_len, best_start = i - start, start
+                    start = i
+            cl = nums[best_start:best_start + best_len]
+            r.seq_min, r.seq_max = cl[0], cl[-1]
+            have = set(cl)
+            r.seq_missing = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
+        return r
+
+
+def _tid_of_text(text):
+    """الماكينة: أكتر Terminal ID معروف متكرر في النص."""
+    tc = {}
+    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
+        c = TID_FIX.get(m.group(1), m.group(1))
+        if c in TERMINALS:
+            tc[c] = tc.get(c, 0) + 1
+    if tc:
+        return max(tc.items(), key=lambda e: e[1])[0]
+    return find_terminal_in([text]) or find_terminal_fuzzy_in([text], None)
+
+
+def _day_of_text(text):
+    days = {}
+    for m in _DATE_RE.finditer(text):
+        k = day_key(m.group(0))
+        if k:
+            days[k] = days.get(k, 0) + 1
+    if not days:
+        return None, None
+    best = max(days.items(), key=lambda e: e[1])[0]
+    d, mo = best.split(".")
+    return d, mo
+
+
+def plausible_day(d, m):
+    """تاريخ إيصال في المستقبل = قراءة غلط."""
+    if not d or not m:
+        return True
+    try:
+        di, mi = int(d), int(m)
+    except ValueError:
+        return False
+    today = datetime.date.today()
+    for y in (today.year, today.year - 1):
         try:
-            os.remove(p)
-        except OSError:
-            pass
-    r.count, r.votes = total, votes
-    allt = "\n".join(texts)
-    if votes:
-        r.tid = max(votes.items(), key=lambda e: e[1])[0]
-    else:
-        row = find_unit_extra_in([allt])
-        same = [k for k, v in TERMINALS.items() if v.row == row] if row else []
-        if len(same) == 1:
-            r.tid = same[0]
-            r.notes.append("Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم - راجع")
-            r.ok = False
-    top = max(votes.values()) if votes else 0
-    if days:
-        best = max(days.items(), key=lambda e: e[1])[0]
-        r.day, r.month = best.split(".")
-        for rrn, d in rrn_day.items():
-            if d and d != best:
-                r.other_day.append("إيصال %s بتاريخ %s" % (rrn[6:], d))
-    if r.tid is None:
-        r.ok = False
-        r.notes.append("مش قادر أعرف الماكينة من الـ PDF")
-    elif top < 2 and not r.notes:
-        r.ok = False
-        r.notes.append("قراءة ضعيفة للـ Terminal ID - راجع")
-    if r.day is None:
-        r.ok = False
-        r.notes.append("مش قادر أعرف التاريخ من الـ PDF")
-    # تسلسل أرقام الإيصالات (آخر 6 أرقام من RRN)
-    nums = sorted(int(k[6:]) for k in rrn_day)
-    if len(nums) >= 2:
-        best_start, best_len, start = 0, 1, 0
-        for i in range(1, len(nums) + 1):
-            if i == len(nums) or nums[i] - nums[i - 1] > 15:
-                if i - start > best_len:
-                    best_len, best_start = i - start, start
-                start = i
-        cl = nums[best_start:best_start + best_len]
-        r.seq_min, r.seq_max = cl[0], cl[-1]
-        have = set(cl)
-        r.seq_missing = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
-        span = r.seq_max - r.seq_min + 1
-        if span != r.count and span <= r.count + 15:
-            miss = "، ".join("%06d" % n for n in r.seq_missing[:12])
-            r.notes.append("العدد المقدّر %d بينما التسلسل من %06d إلى %06d (%d رقم). أرقام مش لاقيها: %s%s "
-                           "(ممكن إيصالات ناقصة فعلاً أو أرقام ما اتقرتش، راجع الملف)" % (
-                               r.count, r.seq_min, r.seq_max, span, miss, " ..." if len(r.seq_missing) > 12 else ""))
-    if r.other_day:
-        r.ok = False
-        r.notes.append("إيصالات بتاريخ مختلف: " + " ، ".join(r.other_day[:6]))
-    return r
+            dt = datetime.date(y, mi, di)
+        except ValueError:
+            continue
+        if dt <= today + datetime.timedelta(days=1):
+            if y == today.year or (today - dt).days <= 90:
+                return True
+    return False
 
 
-def apply_payment_name(results, r, dest_dir):
-    """يسمّي ويكوّب الملف باسم الماكينة. لو اسم مكرر من ملف تاني بيزوّد _2."""
-    r.new_name = r.out_path = None
-    if r.tid not in TERMINALS or not r.day or not r.month:
-        return
-    base = machine_new_name(TERMINALS[r.tid], r.day, r.month)
-    final, k = base, 2
-    while any(x is not r and x.new_name == final for x in results):
-        final = "%s_%d" % (base, k)
-        k += 1
-    os.makedirs(dest_dir, exist_ok=True)
-    dst = os.path.join(dest_dir, final + ".pdf")
-    if os.path.abspath(dst) != os.path.abspath(r.src):
-        shutil.copy2(r.src, dst)
-    r.new_name, r.out_path = final, dst
+# ───────────── مصدر صفحات الـ PDF ─────────────
+def pdf_jpeg_pages(path):
+    """صور الصفحات الأصلية (JPEG) من PDF ممسوح (CamScanner وغيره): من غير تحويل ولا رسم."""
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+    except OSError:
+        return []
+    out, pos = [], 0
+    while True:
+        i = b.find(b"/DCTDecode", pos)
+        if i < 0:
+            break
+        s = b.find(b"stream", i)
+        if s < 0:
+            break
+        st = s + 6
+        if b[st:st + 2] == b"\r\n":
+            st += 2
+        elif b[st:st + 1] in (b"\n", b"\r"):
+            st += 1
+        e = b.find(b"endstream", st)
+        if e < 0:
+            break
+        en = e
+        while en > st and b[en - 1] in (10, 13, 32):
+            en -= 1
+        if en - st > 20000 and b[st:st + 2] == b"\xff\xd8" and b[en - 2:en] == b"\xff\xd9":
+            out.append(b[st:en])
+        pos = e + 9
+    return out
 
 
-
-# ───────────────────────── إيصالات الدفع: مرحلتين (1 تعريف + إعادة تسمية / 2 عد) ─────────────────────────
 def _pdf_page_count(pdf):
     try:
         from pypdf import PdfReader
@@ -1196,181 +1543,506 @@ def _pdf_page_count(pdf):
         return 0
 
 
-def _finish_identity(r, votes, days, allt):
-    """يحدد الماكينة واليوم من الأصوات."""
-    if votes:
-        r.tid = max(votes.items(), key=lambda e: e[1])[0]
-    else:
-        row = find_unit_extra_in([allt])
-        same = [k for k, v in TERMINALS.items() if v.row == row] if row else []
-        if len(same) == 1:
-            r.tid = same[0]
-            r.notes.append("Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم - راجع")
-            r.ok = False
-    top = max(votes.values()) if votes else 0
-    if days:
-        best = max(days.items(), key=lambda e: e[1])[0]
-        r.day, r.month = best.split(".")
-    if r.tid is None:
-        r.ok = False
-        r.notes.append("مش قادر أعرف الماكينة من الـ PDF")
-    elif top < 2 and not r.notes:
-        r.ok = False
-        r.notes.append("قراءة ضعيفة للـ Terminal ID - راجع")
-    if r.day is None:
-        r.ok = False
-        r.notes.append("مش قادر أعرف التاريخ من الـ PDF")
+class PageSource:
+    """صفحات PDF واحدة واحدة: صورة JPEG الأصلية لو ممسوح، وإلا رسم الصفحة (pdftoppm / pypdfium2)."""
 
+    def __init__(self, pdf, workdir, fast=True, dpi=200):
+        self.pdf, self.wd, self.dpi = pdf, workdir, dpi
+        self.jpegs = pdf_jpeg_pages(pdf) if fast else []
+        self.scanned = bool(self.jpegs)
+        self.n = len(self.jpegs) if self.scanned else (_pdf_page_count(pdf) or 0)
 
-def identify_payment_pdf(pdf, workdir, progress=None, stop=lambda: False, max_probe=4):
-    """المرحلة 1: يعرّف الماكينة (Terminal ID) واليوم من أول صفحات الملف بس، من غير عدّ."""
-    r = PayResult(pdf)
-    r.pages = _pdf_page_count(pdf)
-    votes, days, texts = {}, {}, []
-    limit = min(max_probe, r.pages) if r.pages else max_probe
-    for pg in range(1, limit + 1):
-        if stop():
-            break
-        if progress:
-            progress("قراءة رقم الماكينة من صفحة %d" % pg)
-        for p in pdf_to_images(pdf, workdir, dpi=300, first=pg, last=pg, max_side=3700):
-            try:
-                w, h, L = _ocr_tiles(p)
-                page_text = "\n".join(t for t, *_ in L)
-                texts.append(page_text)
-                for k, v in tid_votes(page_text).items():
-                    votes[k] = votes.get(k, 0) + v
-                for m in _DATE_RE.finditer(page_text):
-                    k = day_key(m.group(0))
-                    if k:
-                        days[k] = days.get(k, 0) + 1
-            finally:
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        if votes and max(votes.values()) >= 3 and days:
-            break
-    _finish_identity(r, votes, days, "\n".join(texts))
-    return r
-
-
-def _snap_page(raw):
-    """صفحة كاملة لازم تكون 15 أو 10. يرجّع أقرب قيمة (فرق أقصاه 2) أو None."""
-    best = min((10, 15), key=lambda k: abs(raw - k))
-    return best if abs(raw - best) <= 2 else None
-
-
-def count_payment_pdf(r, workdir, progress=None, stop=lambda: False, max_pages=80):
-    """المرحلة 2: يعدّ كل صفحة. الصفحات الكاملة = 15 أو 10 (بنقرّب لأقرب قيمة)، وآخر صفحة بتتعد زي ما هي."""
-    pdf = r.src
-    total_pages = r.pages or _pdf_page_count(pdf)
-    r.pages = total_pages
-    n_loop = min(total_pages, max_pages) if total_pages else max_pages
-    raws, rrn_day, votes, days = [], {}, {}, {}
-    for pg in range(1, n_loop + 1):
-        if stop():
-            return False
-        if progress:
-            progress("عدّ صفحة %d من %s" % (pg, total_pages or "؟"))
-        imgs = pdf_to_images(pdf, workdir, dpi=300, first=pg, last=pg, max_side=3700)
+    def get(self, i):
+        if self.scanned:
+            if i >= len(self.jpegs):
+                return None
+            with Image.open(io.BytesIO(self.jpegs[i])) as t:
+                return t.convert("RGB")
+        imgs = pdf_to_images(self.pdf, self.wd, dpi=self.dpi, first=i + 1, last=i + 1, max_side=3400)
         if not imgs:
-            break
-        p = imgs[0]
+            return None
         try:
-            w, h, L = _ocr_tiles(p)
-            c, rr = count_page(w, h, L)
-            raws.append(c)
-            rrn_day.update(rr)
-            page_text = "\n".join(t for t, *_ in L)
-            for k, v in tid_votes(page_text).items():
-                votes[k] = votes.get(k, 0) + v
-            for m in _DATE_RE.finditer(page_text):
-                k = day_key(m.group(0))
-                if k:
-                    days[k] = days.get(k, 0) + 1
+            with Image.open(imgs[0]) as t:
+                return t.convert("RGB")
         finally:
             for q in imgs:
                 try:
                     os.remove(q)
                 except OSError:
                     pass
-    r.notes = list(r.id_notes)
-    r.ok = r.id_ok
-    if not raws:
-        r.ok = False
-        r.notes.append("مفيش صفحات اتقرت من الملف")
-        return True
-    if r.tid is None and votes:
-        r.tid = max(votes.items(), key=lambda e: e[1])[0]
-    if r.day is None and days:
-        r.day, r.month = max(days.items(), key=lambda e: e[1])[0].split(".")
-    r.n15 = r.n10 = 0
-    r.last = None
-    total = 0
-    r.page_counts = []
-    fixes, odd = [], []
-    last_i = len(raws) - 1
-    for i, raw in enumerate(raws):
-        if i == last_i:
-            cnt, kind = raw, "last"
-            r.last = raw
-        else:
-            k = _snap_page(raw)
-            if k is None:
-                cnt, kind = raw, "?"
-                odd.append("ص%d (اتقرت %d)" % (i + 1, raw))
-            else:
-                cnt, kind = k, k
-                if k == 15:
-                    r.n15 += 1
-                else:
-                    r.n10 += 1
-                if raw != k:
-                    fixes.append("ص%d اتقرت %d واتصنفت %d" % (i + 1, raw, k))
-        total += cnt
-        r.page_counts.append((i + 1, raw, cnt, kind))
+
+
+# ───────────── نتيجة ملف إيصالات ─────────────
+class PayResult:
+    def __init__(self, src):
+        self.src = src
+        self.name = os.path.basename(src)
+        try:
+            self.size = os.path.getsize(src)
+        except OSError:
+            self.size = 0
+        self.pages = 0
+        self.count = -1             # -1 = لسه ما اتعدّش
+        self.tid = None
+        self.votes = {}
+        self.alt_tids = []
+        self.day = self.month = None
+        self.new_name = None
+        self.out_path = None
+        self.seq_min = self.seq_max = None
+        self.seq_missing = []
+        self.other_day = []
+        self.id_notes = []
+        self.cnt_notes = []
+        self.id_ok = True
+        self.cnt_ok = True
+        self.detail = ""
+        self.verdict = 0            # 0 = لسه ما اتراجعش، 1 = صح، -1 = غلط (مستبعد)
+        self.expected = None        # "الصح" بإيدك (عدد الباتش)
+        self.n15 = self.n10 = self.last = None
+        self.page_counts = []
+
+    key = property(lambda self: "%s:%d" % (self.name, self.size))
+    excluded = property(lambda self: self.verdict < 0)
+    pending = property(lambda self: self.count < 0 and self.verdict >= 0)
+    counted = property(lambda self: self.count >= 0)
+    ok = property(lambda self: self.verdict != 0 or (self.id_ok and self.cnt_ok))
+    notes = property(lambda self: list(self.id_notes) + list(self.cnt_notes))
+
+    @property
+    def order(self):
+        return TERMINALS[self.tid].order if self.tid in TERMINALS else 99
+
+
+def apply_payment_name(results, r, dest_dir):
+    """يسمّي ويكوّب الملف باسم الماكينة. لو اسم مكرر من ملف تاني بيزوّد _2."""
+    old = r.out_path
+    try:
+        if (old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(r.src)
+                and os.path.abspath(old).startswith(os.path.abspath(dest_dir))):
+            os.remove(old)
+    except OSError:
+        pass
+    r.new_name = r.out_path = None
+    miss_t, miss_d = "مش قادر أعرف الماكينة من الـ PDF", "مش قادر أعرف التاريخ من الـ PDF"
+    r.id_notes = [n for n in r.id_notes if n not in (miss_t, miss_d)]
+    if r.tid not in TERMINALS:
+        r.id_ok = False
+        r.id_notes.append(miss_t)
+        return
+    if not r.day or not r.month:
+        r.id_ok = False
+        r.id_notes.append(miss_d)
+        return
+    base = machine_new_name(TERMINALS[r.tid], r.day, r.month)
+    final, k = base, 2
+    while any(x is not r and not x.excluded and x.new_name == final for x in results):
+        final = "%s_%d" % (base, k)
+        k += 1
+    os.makedirs(dest_dir, exist_ok=True)
+    dst = os.path.join(dest_dir, final + ".pdf")
+    if os.path.abspath(dst) != os.path.abspath(r.src):
+        shutil.copy2(r.src, dst)
+    r.new_name, r.out_path = final, dst
+
+
+# ───────────── المرحلة 1: تعريف الماكينة واليوم ─────────────
+def identify_payment_pdf(pdf, workdir, progress=None, stop=lambda: False, max_probe=25, fast=True):
+    """بيقرا صفحات الملف (لحد 6، ولو مفيش ماكينة يكمّل لحد 25) ويصوّت على Terminal ID."""
+    r = PayResult(pdf)
+    src = PageSource(pdf, workdir, fast)
+    r.pages = src.n
+    votes, texts = {}, []
+    limit = min(max_probe, src.n) if src.n else max_probe
+    pi = 0
+    while pi < limit:
+        if stop():
+            break
+        if pi >= 6 and votes:
+            break
+        if progress:
+            progress("قراءة رقم الماكينة من صفحة %d" % (pi + 1))
+        im = src.get(pi)
+        if im is None:
+            break
+        w, h, lines = read_page(im, "fast")
+        txt = _page_text(lines, w)
+        texts.append(txt)
+        for k, v in tid_votes(txt).items():
+            votes[k] = votes.get(k, 0) + v
+        pi += 1
+        d, _m = _day_of_text("\n".join(texts))
+        rk = sorted(votes.items(), key=lambda e: -e[1])
+        # وقف بدري لو الماكينة واضحة (Terminal ID مقروء بوضوح) واليوم معروف
+        if d and rk and rk[0][1] >= 3 and (len(rk) < 2 or rk[0][1] >= rk[1][1] * 2):
+            break
+    allt = "\n".join(texts)
+    rk = sorted(votes.items(), key=lambda e: -e[1])
+    r.alt_tids, r.votes = [k for k, _ in rk], votes
+    tid = rk[0][0] if rk else _tid_of_text(allt)
+    from_unit = False
+    if tid is None:
+        row = find_unit_extra_in([allt])
+        same = [k for k, v in TERMINALS.items() if v.row == row] if row else []
+        if len(same) == 1:
+            tid, from_unit = same[0], True
+    day, month = _day_of_text(allt)
+    top = rk[0][1] if rk else 0.0
+    weak = tid is not None and ((not from_unit and top < 2) or not plausible_day(day, month))
+    if weak:
+        # مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): للمراجعة، من غير تسمية ولا عد
+        r.tid = None
+        r.day, r.month = day, month
+        r.id_ok = False
+        r.id_notes.append("الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه")
+        r.count = 0
+        r.detail = "للمراجعة (مش معدود)"
+        return r
+    r.tid, r.day, r.month = tid, day, month
+    if from_unit:
+        r.id_ok = False
+        r.id_notes.append("Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع")
+    return r
+
+
+def resolve_payment_duplicates(results, dest_dir):
+    """لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة."""
+    groups = {}
+    for r in results:
+        if r.tid and r.new_name and not r.excluded:
+            groups.setdefault(r.tid, []).append(r)
+    for tid, g in groups.items():
+        if len(g) < 2:
+            continue
+        g.sort(key=lambda x: -x.votes.get(tid, 0))
+        for r in g[1:]:
+            if not os.path.exists(r.src):
+                continue
+            claimed = set(x.tid for x in results if x.tid)
+            alt = None
+            for c in r.alt_tids:
+                if c == tid or c in claimed:
+                    continue
+                if r.votes.get(c, 0) >= 1:
+                    alt = c
+                    break
+            if alt is None:
+                continue
+            r.tid = alt
+            apply_payment_name(results, r, dest_dir)
+            if r.new_name:
+                r.id_ok = False
+                r.id_notes.append("الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة %d (المرشح التاني من قراءة الـ PDF)، راجع"
+                                  % TERMINALS[alt].order)
+
+
+def flag_payment_duplicates(results):
+    """بيعلّم الملفات اللي لسه واخدة نفس الماكينة (مفيش حل تلقائي)."""
+    tag = "نفس الماكينة"
+    for r in results:
+        had = any(n.startswith(tag) for n in r.id_notes)
+        r.id_notes = [n for n in r.id_notes if not n.startswith(tag)]
+        if had and not r.id_notes and r.new_name:
+            r.id_ok = True
+    groups = {}
+    for r in results:
+        if r.tid and r.new_name and not r.excluded:
+            groups.setdefault((r.tid, r.day, r.month), []).append(r)
+    for (tid, _d, _m), lst in groups.items():
+        if len(lst) < 2:
+            continue
+        info = TERMINALS.get(tid)
+        for r in lst:
+            others = " ، ".join(x.name for x in lst if x is not r)
+            r.id_ok = False
+            r.id_notes.append("%s (%s %s) اتعرفت كمان في: %s — راجع" % (
+                tag, info.order if info else "", info.unit if info else "", others))
+
+
+# ───────────── المرحلة 2: العد ─────────────
+def _scan_notes(r, sc, total, slips):
+    """ملاحظات المقارنة بين العدد وتسلسل الـ RRN واليوم (نفس رسايل التطبيق)."""
+    if sc.range_len is not None and sc.full >= total * 0.8 and total != sc.range_len:
+        r.cnt_ok = False
+        r.cnt_notes.append("العدد %d بس التسلسل %d%s" % (total, sc.range_len, sc.missing_text()))
+    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
+    r.other_day = list(sc.other_day)
+    if len(sc.other_day) >= 3 and len(sc.other_day) >= total * 0.1:
+        r.cnt_ok = False
+        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day[:5]))
+    if sc.non_payment:
+        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
+    if r.new_name is None and sc.tid:
+        # التعريف فشل: نسمّي من نتيجة العد (الاسم بيتعمل في apply_payment_name)
+        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
+        r.id_ok, r.id_notes = True, []
+    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
+        r.cnt_ok = False
+        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
+            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
+
+
+def _count_fast(r, workdir, progress, stop, max_pages):
+    """العد السريع: كل صفحة تتقرا مرة واحدة + عدّ بالهيكل. بيرجّع None لو اتوقف، False لو مش نافع."""
+    src = PageSource(r.src, workdir, True)
+    r.pages = src.n
+    col = PayCollector()
+    total = total_mx = failed = slips = done = 0
+    diff, empty = [], []
+    n = min(src.n, max_pages) if src.n else max_pages
+    for i in range(n):
+        if stop():
+            return None
+        if progress:
+            progress("عدّ صفحة %d من %s" % (i + 1, src.n or "؟"))
+        try:
+            im = src.get(i)
+            if im is None:
+                break
+            w, h, lines = read_page(im, "fast")
+        except OcrUnavailable:
+            raise
+        except Exception:
+            failed += 1
+            continue
+        done += 1
+        if is_id_slip(lines):
+            slips += 1
+            continue
+        sp = struct_count(lines)
+        total += sp["sm"]
+        total_mx += sp["mx"]
+        if sp["sm"] == 0:
+            empty.append(i + 1)
+        if abs(sp["sm"] - sp["mx"]) >= 2:
+            diff.append("%d (%d أو %d)" % (i + 1, sp["sm"], sp["mx"]))
+        col.new_page(sp["h"] or h)
+        col.collect(lines)
+    if total == 0 or done == 0:
+        return False
+    sc = col.finish()
     r.count = total
-    r.counted = True
-    detail = "  ".join(("آخر ص%d:%d" if kind == "last" else "ص%d:%d") % (n, cnt) for n, raw, cnt, kind in r.page_counts)
-    r.notes.append("عدد الصفحات %d | صفحات 15 = %d | صفحات 10 = %d | آخر صفحة = %s" % (
-        len(raws), r.n15, r.n10, r.last if r.last is not None else "—"))
-    r.notes.append("تفصيل الصفحات: " + detail)
-    if fixes:
-        r.notes.append("تصحيح تلقائي لصفحات كاملة: " + " ، ".join(fixes))
-    if odd:
-        r.ok = False
-        r.notes.append("صفحات مش 15 ولا 10 وهي مش الأخيرة (راجعها): " + " ، ".join(odd))
-    if total_pages and len(raws) < total_pages:
-        r.ok = False
-        r.notes.append("اتقرى %d صفحة بس من %d (حد أقصى %d)" % (len(raws), total_pages, max_pages))
-    # مقارنة مع تسلسل أرقام الـ RRN
-    r.other_day = []
-    if r.day:
-        for rrn, d in rrn_day.items():
-            if d and d != "%s.%s" % (r.day, r.month):
-                r.other_day.append("إيصال %s بتاريخ %s" % (rrn[6:], d))
-    nums = sorted(int(k[6:]) for k in rrn_day)
-    if len(nums) >= 2:
-        best_start, best_len, start = 0, 1, 0
-        for i in range(1, len(nums) + 1):
-            if i == len(nums) or nums[i] - nums[i - 1] > 15:
-                if i - start > best_len:
-                    best_len, best_start = i - start, start
-                start = i
-        cl = nums[best_start:best_start + best_len]
-        r.seq_min, r.seq_max = cl[0], cl[-1]
-        have = set(cl)
-        r.seq_missing = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
-        span = r.seq_max - r.seq_min + 1
-        if span != total and span <= total + 15:
-            miss = "، ".join("%06d" % n for n in r.seq_missing[:12])
-            r.notes.append("العدد %d بينما التسلسل من %06d إلى %06d (%d رقم). أرقام مش لاقيها: %s%s" % (
-                total, r.seq_min, r.seq_max, span, miss, " ..." if len(r.seq_missing) > 12 else ""))
-    if r.other_day:
-        r.ok = False
-        r.notes.append("إيصالات بتاريخ مختلف: " + " ، ".join(r.other_day[:6]))
+    r.detail = "عدّ سريع • %d صفحة • RRN مقروء %d%s%s" % (
+        done + failed, sc.full, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % slips) if slips else "")
+    if failed:
+        r.cnt_ok = False
+        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
+    if empty:
+        r.cnt_notes.append("صفحات ما لقيتش فيها إيصالات: " + "، ".join(str(x) for x in empty))
+    if diff:
+        r.cnt_notes.append("صفحات الطريقتين اختلفوا فيها: %s (راجعها لو العدد مهم)" % "، ".join(diff))
+    _scan_notes(r, sc, total, slips)
     return True
+
+
+def _count_accurate(r, workdir, progress, stop, max_pages):
+    """العد الدقيق (أبطأ): الصفحة كلها + بلاطات مكبّرة، والعدد = عدد نقاط الارتكاز (RRN)."""
+    src = PageSource(r.src, workdir, True)
+    r.pages = src.n
+    col = PayCollector()
+    done = failed = 0
+    n = min(src.n, max_pages) if src.n else max_pages
+    for i in range(n):
+        if stop():
+            return None
+        if progress:
+            progress("عدّ دقيق: صفحة %d من %s" % (i + 1, src.n or "؟"))
+        try:
+            im = src.get(i)
+            if im is None:
+                break
+            w, h, lines = read_page(im, "accurate")
+        except OcrUnavailable:
+            raise
+        except Exception:
+            failed += 1
+            continue
+        done += 1
+        if is_id_slip(lines):
+            col.slips += 1
+            continue
+        col.new_page(max([l.bottom for l in lines] or [h]))
+        col.collect(lines)
+    if done == 0:
+        r.count = 0
+        r.cnt_ok = False
+        r.cnt_notes.append("فشل العد")
+        return True
+    sc = col.finish()
+    r.count = sc.count
+    r.detail = "عدّ دقيق • RRN كامل %d • ناقص القراءة %d%s%s" % (
+        sc.full, sc.partial, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % col.slips) if col.slips else "")
+    if failed:
+        r.cnt_ok = False
+        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
+    if not sc.agree:
+        r.cnt_ok = False
+        r.cnt_notes.append("العدد %d بس التسلسل %d%s (ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف)" % (
+            sc.count, sc.range_len, sc.missing_text()))
+    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
+    r.other_day = list(sc.other_day)
+    if sc.other_day:
+        r.cnt_ok = False
+        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day))
+    if sc.non_payment:
+        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
+    if r.new_name is None and sc.tid:
+        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
+        r.id_ok, r.id_notes = True, []
+    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
+        r.cnt_ok = False
+        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
+            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
+    return True
+
+
+def count_payment_pdf(r, workdir, progress=None, stop=lambda: False, fast=True, max_pages=400):
+    """بيعدّ إيصالات الملف. يرجّع False لو اتوقف قبل ما يخلص."""
+    r.cnt_notes, r.cnt_ok = [], True
+    if not os.path.exists(r.src):
+        r.count = 0
+        r.cnt_ok = False
+        r.cnt_notes.append("الملف الأصلي مش موجود")
+        return True
+    if fast:
+        res = _count_fast(r, workdir, progress, stop, max_pages)
+        if res is None:
+            return False
+        if res:
+            return True
+        r.cnt_notes, r.cnt_ok = [], True      # السريع ما نفعش: نكمّل بالدقيق
+    res = _count_accurate(r, workdir, progress, stop, max_pages)
+    return res is not None
+
+
+# ───────────── مقارنة الباتش + حالة الملف + الملاحظات ─────────────
+def batch_manual(r):
+    try:
+        return int(str(r.expected).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def batch_auto(r):
+    return CLOSING_TXN.get(r.order) if r.order != 99 else None
+
+
+def batch_of(r):
+    m = batch_manual(r)
+    return m if m is not None else batch_auto(r)
+
+
+def batch_diff(r):
+    b = batch_of(r)
+    if b is None or r.pending or r.excluded:
+        return None
+    return b - r.count
+
+
+def batch_match(r):
+    """True/False، أو None لو مفيش حاجة نقارنها. لو راجعته يدوي وعلّمته صح يتحسب مطابق."""
+    if r.excluded or r.pending:
+        return None
+    if r.verdict > 0:
+        return True
+    d = batch_diff(r)
+    return None if d is None else d == 0
+
+
+def diff_text(d):
+    return "مطابق ✓" if d == 0 else ("ناقص %d" % d if d > 0 else "زيادة %d" % (-d))
+
+
+def pay_status(r):
+    """(نص، tag للجدول)."""
+    if r.excluded:
+        return "مستبعد", "skip"
+    if r.pending:
+        return "لسه ما اتعدّش", "skip"
+    if r.verdict > 0:
+        return "اتراجع: صح", "ok"
+    if r.ok:
+        return "سليم", "ok"
+    return "محتاج مراجعة", "warn"
+
+
+def pay_summary(r):
+    if r.excluded:
+        return "مستبعد (علامة غلط)"
+    if r.pending:
+        return "لسه ما اتعدّش (دوس ② عدّ الإيصالات)"
+    s = "عدد المعاملات: %d" % r.count
+    b, d = batch_of(r), batch_diff(r)
+    if b is not None and d is not None:
+        tag = " (يدوي)" if batch_manual(r) is not None else " (من التقفيل)"
+        res = "راجعته يدوي: صح ✓" if (r.verdict > 0 and d != 0) else diff_text(d)
+        s += "\nالباتش: %d%s • الفعلي: %d • %s" % (b, tag, r.count, res)
+    return s
+
+
+def missing_machines(results):
+    got = set(r.order for r in results if not r.excluded and r.order != 99)
+    return ["%d %s" % (n, TERMINALS[NUM_TO_TID[n]].unit) for n in range(1, 20) if n not in got]
+
+
+# (key, severity 2=لازم تراجع 1=انتبه 0=معلومة, عنوان، السبب، الحل)
+NOTE_KINDS = [
+    ("seq", 2, "العدد مش مطابق لتسلسل الإيصالات",
+     "أرقام الإيصالات (RRN) متتالية، فالعدد المتوقع هو من أول رقم لآخر رقم. العدد اللي اتعدّ مختلف عنه، يعني غالباً فيه إيصال ناقص في الملف أو البرنامج ما قراش إيصال.",
+     "افتح الملف وراجع الأرقام اللي مش لاقيها، وسجّل العدد الصح في خانة \"الصح\" لو اتأكدت."),
+    ("otherday", 2, "فيه إيصالات من يوم تاني",
+     "تاريخ بعض الإيصالات مختلف عن يوم باقي الملف، فممكن تكون اتضافت بالغلط أو الملف فيه أكتر من يوم.",
+     "راجع التواريخ المذكورة، ولو الملف مش بتاع اليوم علّمه غلط ✗."),
+    ("machconf", 2, "تعارض في رقم الماكينة",
+     "اسم الملف اتحدد لماكينة، لكن الإيصالات جواه بتقول إنها ماكينة تانية.",
+     "استخدم \"تحديد/تعديل\" واختار الماكينة الصح."),
+    ("readfail", 2, "فشل في قراءة صفحات",
+     "البرنامج ما قدرش يقرا صفحة أو أكتر، فالعدد ممكن يكون ناقص.",
+     "اختار الملف ودوس \"إعادة عد\". لو اتكرر راجع الملف بنفسك."),
+    ("emptypages", 1, "صفحات من غير إيصالات",
+     "فيه صفحات في الملف البرنامج ما لقاش فيها أي إيصال (ممكن تكون صفحة فاضية أو صورة مش واضحة).",
+     "افتح الصفحات المذكورة وتأكد إنها فعلاً فاضية."),
+    ("methoddiff", 1, "تضارب بين طريقتين للعد",
+     "البرنامج بيعد بطريقتين للتأكد، وفي صفحات معينة النتيجة اختلفت.",
+     "راجع الصفحات المذكورة لو العدد مهم ليك."),
+    ("nonpay", 0, "مستند إقفال أو ملخص",
+     "الملف فيه إيصال إقفال أو ملخص أو إعادة طباعة. البرنامج تجاهله ومش محسوب في العدد.",
+     "مفيش حاجة مطلوبة، ده طبيعي."),
+    ("nofile", 2, "الملف الأصلي مش موجود",
+     "الملف اتمسح أو اتنقل من مكانه، فالبرنامج مش قادر يعدّه.",
+     "رجّع الملف مكانه أو اعمل فحص من جديد."),
+    ("datefail", 1, "التاريخ مش واضح",
+     "البرنامج ما قدرش يقرا تاريخ اليوم من الملف.",
+     "افتح الملف وتأكد من التاريخ بنفسك."),
+    ("namefail", 2, "فشلت التسمية",
+     "البرنامج ما قدرش يتعرف على الماكينة فمسمّاش الملف.",
+     "استخدم \"تحديد/تعديل\" واختار الماكينة."),
+    ("idweak", 2, "الماكينة مش مؤكدة",
+     "رقم الماكينة (Terminal ID) ما اتقراش بوضوح، فالبرنامج خمّن الماكينة من بيانات تانية أو لقاها في أكتر من ملف.",
+     "اتأكد من الماكينة، ولو غلط استخدم \"تحديد/تعديل\"."),
+    ("other", 1, "ملاحظة تانية", "ملاحظة من البرنامج مش متصنفة.", "اقراها وقرر لو محتاجة مراجعة."),
+]
+_NOTE_RULES = [
+    (re.compile(r"^العدد \d+ بس التسلسل"), "seq"),
+    (re.compile(r"مش تبع نفس اليوم"), "otherday"),
+    (re.compile(r"العد لقى ماكينة"), "machconf"),
+    (re.compile(r"صفحة فشلت قراءتها|فشل العد|العد وقف"), "readfail"),
+    (re.compile(r"صفحات ما لقيتش فيها إيصالات"), "emptypages"),
+    (re.compile(r"الطريقتين اختلفوا"), "methoddiff"),
+    (re.compile(r"إقفال/ملخص"), "nonpay"),
+    (re.compile(r"الملف الأصلي مش موجود"), "nofile"),
+    (re.compile(r"مش قادر أعرف التاريخ"), "datefail"),
+    (re.compile(r"فشل التسمية|فشل التعريف|فشل النسخ"), "namefail"),
+    (re.compile(r"Terminal ID|مش واضح|مش قادر أعرف الماكينة|نفس الماكينة|اتعرفت كمان|الوحدة اتحددت|نفس ماكينة"), "idweak"),
+]
+
+
+def note_kind(n):
+    """يرجّع (key, severity, عنوان, سبب, حل) للملاحظة."""
+    for rx, key in _NOTE_RULES:
+        if rx.search(n):
+            return next(k for k in NOTE_KINDS if k[0] == key)
+    return NOTE_KINDS[-1]
 
 
 # ───────────────────────── التقفيل: عناصر + ترقيم + مخرجات ─────────────────────────
@@ -1395,6 +2067,7 @@ class Item:
         self.alt = None
         self.key = ""
         self.path = None
+        self.txn = None             # عدد معاملات الباتش من إيصال الإقفال
 
     @property
     def needs_review(self):
@@ -1418,24 +2091,6 @@ def renumber(raw_items):
         r.reset()
     warns = []
     return assign_numbers(raw_items, warns), warns
-
-
-def flag_payment_duplicates(results):
-    """لو ملفين اتعرفوا على نفس الماكينة (بنفس اليوم) نعلّم الاتنين للمراجعة."""
-    tag = "اتعرفت على نفس الماكينة"
-    for r in results:
-        r.notes = [n for n in r.notes if not n.startswith(tag)]
-    groups = {}
-    for r in results:
-        if r.tid and r.new_name:
-            groups.setdefault((r.tid, r.day, r.month), []).append(r)
-    for (tid, _d, _m), lst in groups.items():
-        if len(lst) < 2:
-            continue
-        for r in lst:
-            others = " ، ".join(x.name for x in lst if x is not r)
-            r.ok = False
-            r.notes.append("%s (%s) كمان في: %s - راجع" % (tag, terminal_label(tid), others))
 
 
 def same_day(a, b):
@@ -1502,6 +2157,10 @@ def assign_numbers(raw, warnings):
                 warnings.append("%s: الوحدة اتحددت بالاسم/الميرشانت فقط" % nm)
         else:
             warnings.append("%s: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل" % nm)
+    try:
+        publish_closing_txn(kept)      # عدد معاملات الباتش لكل ماكينة (تقارنه إيصالات الدفع)
+    except Exception:
+        pass
     return kept
 
 
@@ -1825,6 +2484,7 @@ def process_closing(img_paths, pdf_paths, workdir, progress=None, stop=lambda: F
         it.tid, it.row, it.unit, it.how = a.tid, a.row, a.unit, a.how
         it.order = TERMINALS[a.tid].order if a.tid else None
         it.amount, it.date, it.ok, it.batches, it.alt = a.val, a.date, a.ok, a.batches, res["alt"]
+        it.txn = getattr(a, "txn", None)
         fx = fixes.get(key)
         if isinstance(fx, dict):
             v, ft = fx.get("val"), fx.get("tid")
@@ -1858,7 +2518,8 @@ if __name__ == "__main__":  # pragma: no cover
     elif cmd == "payments":
         wd = tempfile.mkdtemp()
         for p in sys.argv[2:]:
-            r = scan_payment_pdf(p, wd, progress=lambda m: print("..", m))
+            r = identify_payment_pdf(p, wd, progress=lambda m: print("..", m))
+            count_payment_pdf(r, wd, progress=lambda m: print("..", m))
             print(r.name, "pages", r.pages, "count", r.count, "tid", r.tid, "votes", r.votes, "day", r.day, r.month,
                   "seq", r.seq_min, r.seq_max, "missing", len(r.seq_missing), "ok", r.ok)
             if r.tid:
@@ -2846,14 +3507,18 @@ class ClosingWindow(_FeatureWindow):
 
 # ───────────────────────── إيصالات الدفع ─────────────────────────
 class _EditPayDialog(_Modal):
+    """تحديد/تعديل ملف إيصالات: الماكينة واليوم والشهر والعدد + \"الصح\" (عدد الباتش) لو عايز تكتبه بإيدك."""
+
     def __init__(self, parent, r, on_ok):
-        super().__init__(parent, "تعديل ملف إيصالات", 480, 330)
+        super().__init__(parent, "تحديد / تعديل ملف إيصالات", 500, 390)
         t, F = self.t, _font()
         self.on_ok = on_ok
-        ctk.CTkLabel(self, text=r.name, font=(F, 11, "bold"), text_color=t["accent"], wraplength=440).pack(pady=(12, 6))
+        ctk.CTkLabel(self, text=r.name, font=(F, 11, "bold"), text_color=t["accent"], wraplength=460).pack(pady=(12, 6))
         fr = ctk.CTkFrame(self, fg_color="transparent")
         fr.pack(fill="x", padx=20)
-        rows = [("الماكينة:", None), ("اليوم:", r.day), ("الشهر:", r.month), ("عدد الإيصالات:", r.count)]
+        rows = [("الماكينة:", None), ("اليوم:", r.day), ("الشهر:", r.month),
+                ("عدد الإيصالات:", r.count if r.count >= 0 else ""),
+                ("الصح (عدد الباتش) - اختياري:", r.expected)]
         ctk.CTkLabel(fr, text=rows[0][0], font=(F, 11, "bold"), text_color=t["text"]).grid(row=0, column=1, sticky="e", pady=4)
         self.cb = ttk.Combobox(fr, values=_terminal_choices(), state="readonly", width=38, justify="right")
         self.cb.grid(row=0, column=0, padx=8, pady=4)
@@ -2866,73 +3531,201 @@ class _EditPayDialog(_Modal):
             e.grid(row=i, column=0, padx=8, pady=4, sticky="w")
             e.insert(0, "" if val is None else str(val))
             self.ents.append(e)
+        ctk.CTkLabel(self, text="لو سيبت العدد فاضي هيتعدّ تاني بالقراءة الآلية.", font=(F, 10),
+                     text_color=t["muted"]).pack()
         self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
         self.lbl.pack()
         ctk.CTkButton(self, text="حفظ وإعادة التسمية", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
-                      text_color="#FFFFFF",
-                      command=self.save).pack(fill="x", padx=20, pady=8)
+                      text_color="#FFFFFF", command=self.save).pack(fill="x", padx=20, pady=8)
 
     def save(self):
         tid = _tid_from_choice(self.cb.get())
         try:
-            d, m, c = int(self.ents[0].get()), int(self.ents[1].get()), int(self.ents[2].get())
-            if not (1 <= d <= 31 and 1 <= m <= 12 and c >= 0):
+            d, m = int(self.ents[0].get()), int(self.ents[1].get())
+            c_raw = self.ents[2].get().strip()
+            c = int(c_raw) if c_raw else None
+            e_raw = self.ents[3].get().strip()
+            ex = int(e_raw) if e_raw else None
+            if not (1 <= d <= 31 and 1 <= m <= 12) or (c is not None and c < 0) or (ex is not None and ex < 0):
                 raise ValueError
         except ValueError:
-            self.lbl.configure(text="اليوم 1-31 والشهر 1-12 والعدد رقم صحيح")
+            self.lbl.configure(text="اليوم 1-31 والشهر 1-12 والأعداد أرقام صحيحة")
             return
         if tid not in E.TERMINALS:
             self.lbl.configure(text="اختار الماكينة")
             return
         cb = self.on_ok
         self.destroy()
-        cb(tid, str(d), str(m), c)
+        cb(tid, str(d), str(m), c, ex)
+
+
+# ───────────── حفظ حالة إيصالات الدفع (علشان لو البرنامج اتقفل يكمّل من مكانه) ─────────────
+_PAY_KEYS = ("src", "size", "name", "pages", "count", "tid", "day", "month", "new_name", "out_path",
+             "id_notes", "cnt_notes", "id_ok", "cnt_ok", "detail", "verdict", "expected", "votes",
+             "alt_tids", "seq_min", "seq_max", "seq_missing", "other_day")
+
+
+def _pay_state_path():
+    return os.path.join(_appdata_dir(), "pos_payments_state.json")
+
+
+def _pay_save(results):
+    try:
+        data = [{k: getattr(r, k) for k in _PAY_KEYS} for r in list(results)]
+        tmp = _pay_state_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, _pay_state_path())
+    except Exception:
+        logging.exception("pay state save")
+
+
+def _pay_load():
+    out = []
+    try:
+        with open(_pay_state_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return out
+    for d in data if isinstance(data, list) else []:
+        try:
+            if not isinstance(d, dict) or not d.get("src"):
+                continue
+            r = E.PayResult(d["src"])
+            for k in _PAY_KEYS:
+                if k in d:
+                    setattr(r, k, d[k])
+            out.append(r)
+        except Exception:
+            continue
+    return out
+
+
+class _PayOverview(_Modal):
+    """ملخص الماكينات: كل ماكينة (1-19) جاب ليها ملف ولا لأ، وعددها مقارنة بالباتش."""
+
+    def __init__(self, parent, results):
+        super().__init__(parent, "ملخص ماكينات إيصالات الدفع", 820, 560)
+        t, F = self.t, _font()
+        self.resizable(True, True)
+        by = {}
+        for r in results:
+            if not r.excluded and r.order != 99:
+                by.setdefault(r.order, []).append(r)
+        miss = [n for n in range(1, 20) if n not in by]
+        total = sum(r.count for rs in by.values() for r in rs if r.count > 0)
+        pend = sum(1 for rs in by.values() for r in rs if r.pending)
+        bad = sum(1 for rs in by.values() for r in rs if r.count >= 0 and not r.ok)
+        ctk.CTkLabel(self, text="📊 ملخص الماكينات", font=(F, 15, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
+        ctk.CTkLabel(self, text="إجمالي الإيصالات: %d  |  ماكينات ناقصة: %d  |  لسه ما اتعدّتش: %d  |  محتاج مراجعة: %d"
+                     % (total, len(miss), pend, bad), font=(F, 11, "bold"),
+                     text_color=t["warning"] if (miss or pend or bad) else t["success"]).pack(pady=2)
+        name = _style_tree(t)
+        fr = ctk.CTkFrame(self, fg_color="transparent")
+        fr.pack(fill="both", expand=True, padx=12, pady=6)
+        cols = ("n", "unit", "file", "count", "batch", "diff", "status")
+        heads = ("م", "الوحدة", "الملف", "العدد", "الباتش", "الفرق", "الحالة")
+        wid = (40, 150, 200, 70, 70, 90, 150)
+        tv = ttk.Treeview(fr, columns=cols, show="headings", style=name, height=19, selectmode="browse")
+        for c, h, w in zip(cols, heads, wid):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="center", stretch=(c in ("file", "status")))
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        tv.tag_configure("ok", foreground=t["success"])
+        tv.tag_configure("warn", foreground=t["warning"])
+        tv.tag_configure("bad", foreground=t["danger"])
+        dash = "—"
+        for n in range(1, 20):
+            info = E.TERMINALS[E.NUM_TO_TID[n]]
+            rs = sorted(by.get(n, []), key=lambda x: x.new_name or x.name)
+            if not rs:
+                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), dash, dash, dash, dash, "ناقصة - مفيش ملف"),
+                          tags=("bad",))
+                continue
+            for r in rs:
+                b, d = E.batch_of(r), E.batch_diff(r)
+                st, tag = E.pay_status(r)
+                if tag == "ok" and E.batch_match(r) is False:
+                    tag = "warn"
+                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), r.new_name or r.name,
+                                             r.count if r.count >= 0 else dash, b if b is not None else dash,
+                                             E.diff_text(d) if d is not None else dash, st), tags=(tag,))
 
 
 class PaymentsWindow(_FeatureWindow):
     TITLE = "إيصالات الدفع"
 
     def __init__(self, parent):
-        super().__init__(parent, 1020, 660)
+        super().__init__(parent, 1120, 720)
         t, F = self.t, self.F
-        self.results = []
-        self.dest = os.path.join(_documents_dir(), "وحدات")
-        ctk.CTkLabel(self, text="🧾 إيصالات الدفع", font=(F, 16, "bold"),
-                     text_color=t["accent"]).pack(pady=(10, 0))
+        st = _load_settings()
+        self.dest = st.get("pay_dest") or os.path.join(_documents_dir(), "وحدات")
+        self.fast = tk.BooleanVar(value=bool(st.get("pay_fast", True)))
+        self.skip_done = tk.BooleanVar(value=bool(st.get("pay_skip_done", True)))
+        self.results = _pay_load()
+        self._iid = {}
+        ctk.CTkLabel(self, text="🧾 إيصالات الدفع", font=(F, 16, "bold"), text_color=t["accent"]).pack(pady=(10, 0))
         self._build_source_bar(self)
         fr = ctk.CTkFrame(self, fg_color="transparent")
         fr.pack(fill="x", padx=12, pady=2)
         self._btn(fr, "📂 فتح فولدر الملفات المسمّاة", self.open_dest, color=t["card"], w=230).pack(side="right", padx=4)
         self._btn(fr, "✏️ تغيير المكان", self.pick_dest, color=t["card"], w=130).pack(side="right", padx=4)
-        self.lbl_dest = ctk.CTkLabel(fr, text="", font=(F, 10), text_color=t["muted"], anchor="w")
+        self.lbl_dest = ctk.CTkLabel(fr, text="الناتج: " + self.dest, font=(F, 10), text_color=t["muted"], anchor="w")
         self.lbl_dest.pack(side="left", fill="x", expand=True)
-        self.lbl_dest.configure(text="الناتج: " + self.dest)
         self._build_progress(self)
         # خطّين: ① إعادة التسمية  ② العد
-        self.btn_start.configure(text="① إعادة التسمية", width=150)
+        self.btn_start.configure(text="① فحص وإعادة تسمية", width=160)
         self.btn_count = self._btn(self.btn_start.master, "② عدّ الإيصالات", self.start_count, color=t["warning"], w=150,
                                    state="disabled")
         self.btn_count.pack(side="right", padx=4)
-        cols = [("n", "م"), ("file", "الملف الأصلي"), ("unit", "الماكينة"), ("pages", "صفحات"), ("n15", "ص×15"),
-                ("n10", "ص×10"), ("last", "آخر صفحة"), ("count", "الإجمالي"), ("day", "اليوم"),
-                ("name", "الاسم الجديد"), ("status", "الحالة")]
-        self.tv = self._tree(self, cols, [34, 150, 140, 55, 52, 52, 65, 65, 55, 190, 80], height=11)
+        opt = ctk.CTkFrame(self, fg_color="transparent")
+        opt.pack(fill="x", padx=12, pady=(0, 2))
+        ctk.CTkCheckBox(opt, text="عدّ سريع (قراءة كل صفحة مرة واحدة من الصورة الأصلية)", variable=self.fast, font=(F, 10),
+                        text_color=t["text"], command=lambda: _save_setting("pay_fast", bool(self.fast.get()))
+                        ).pack(side="right", padx=8)
+        ctk.CTkCheckBox(opt, text="تخطّي الملفات اللي اتفحصت قبل كده", variable=self.skip_done, font=(F, 10),
+                        text_color=t["text"], command=lambda: _save_setting("pay_skip_done", bool(self.skip_done.get()))
+                        ).pack(side="right", padx=8)
+        cols = [("n", "م"), ("file", "الملف الأصلي"), ("unit", "الماكينة"), ("pages", "صفحات"), ("count", "العدد"),
+                ("batch", "الباتش"), ("diff", "الفرق"), ("day", "اليوم"), ("name", "الاسم الجديد"), ("status", "الحالة")]
+        self.tv = self._tree(self, cols, [34, 160, 150, 55, 60, 60, 80, 55, 190, 110], height=10)
+        self.tv.tag_configure("bad", foreground=t["danger"])
         self.tv.bind("<<TreeviewSelect>>", lambda e: self._show_notes())
         self.tv.bind("<Double-1>", lambda e: self.open_selected())   # دبل كليك = فتح الـ PDF
-        self.txt = ctk.CTkTextbox(self, height=110, font=(F, 10), fg_color=t["input"], text_color=t["text"])
+        self.txt = ctk.CTkTextbox(self, height=130, font=(F, 10), fg_color=t["input"], text_color=t["text"], wrap="word")
         self.txt.pack(fill="x", padx=12, pady=4)
         self.txt.configure(state="disabled")
         self.lbl_total = ctk.CTkLabel(self, text="", font=(F, 11, "bold"), text_color=t["text"])
         self.lbl_total.pack(fill="x", padx=14)
         bt = ctk.CTkFrame(self, fg_color="transparent")
         bt.pack(fill="x", padx=12, pady=(2, 10))
-        for txt, cmd, col, w in (("💾 حفظ تقرير TXT", self.save_report, t["card"], 140),
-                                 ("✏️ تعديل ملف الإيصالات", self.edit_selected, t["warning"], 190)):
+        for txt, cmd, col, w in (("🗑 مسح الكل", self.clear_all, t["danger"], 100),
+                                 ("💾 تقرير TXT", self.save_report, t["card"], 110),
+                                 ("📊 ملخص الماكينات", self.open_overview, t["card"], 140),
+                                 ("↻ إعادة عدّ", self.recount_selected, t["card"], 105),
+                                 ("✏️ تحديد/تعديل", self.edit_selected, t["warning"], 120),
+                                 ("الباقي صح", self.mark_rest_ok, t["card"], 95),
+                                 ("✗ غلط", lambda: self.set_verdict(-1), t["danger"], 80),
+                                 ("✓ صح", lambda: self.set_verdict(1), t["success"], 80)):
             self._btn(bt, txt, cmd, color=col, w=w).pack(side="right", padx=3)
+        if self.results:
+            self._fill()
+            pend = sum(1 for r in self.results if r.pending)
+            self.lbl_status.configure(
+                text=("فيه %d ملف لسه ما اتعدّش. دوس \"② عدّ الإيصالات\" لما تحب." % pend) if pend
+                else "آخر نتيجة: %d ملف." % len(self.results), text_color=self.t["muted"])
+            self.btn_count.configure(state="normal")
 
+    # ---------- عام ----------
     def _set_busy(self, busy):
         super()._set_busy(busy)
         self.btn_count.configure(state="disabled" if (busy or not self.results) else "normal")
+
+    def job_running(self):
+        return str(self.btn_stop.cget("state")) == "normal"
 
     def open_dest(self):
         """بيفتح الفولدر اللي فيه الملفات المسمّاة (مش نافذة اختيار)."""
@@ -2946,7 +3739,15 @@ class PaymentsWindow(_FeatureWindow):
         d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الملفات المسمّاة", initialdir=self.dest)
         if d:
             self.dest = d
+            _save_setting("pay_dest", d)
             self.lbl_dest.configure(text="الناتج: " + self.dest)
+
+    def _selected(self):
+        sel = self.tv.selection()
+        return self._iid.get(sel[0]) if sel else None
+
+    def _sort(self):
+        self.results.sort(key=lambda x: (x.order, x.new_name or x.name))
 
     # ---------- ① التعريف وإعادة التسمية ----------
     def start(self):
@@ -2954,170 +3755,336 @@ class PaymentsWindow(_FeatureWindow):
         if not self._pdfs:
             messagebox.showwarning("A2R", "اختار مجلد أو ملفات PDF الأول (الصور مش بتتحسب في الفكرة دي).", parent=self)
             return
-        ok, msg = E.ocr_ready()
+        ok, msg = E.pay_ocr_ready()
         if not ok:
             messagebox.showerror("A2R", msg, parent=self)
             return
-        pdfs, dest, wd = self._pdfs, self.dest, self.workdir
-        ignored = len(self._imgs)
+        existing = list(self.results)
+        have = set(r.key for r in existing)
+        todo, skipped = [], 0
+        for p in self._pdfs:
+            try:
+                k = "%s:%d" % (os.path.basename(p), os.path.getsize(p))
+            except OSError:
+                continue
+            if self.skip_done.get() and k in have:
+                skipped += 1
+                continue
+            todo.append(p)
+        if not todo:
+            messagebox.showinfo("A2R", "كل الملفات في المصدر ده اتفحصت قبل كده (%d ملف)." % skipped, parent=self)
+            return
+        fast = bool(self.fast.get())
+        dest, wd, ignored = self.dest, self.workdir, len(self._imgs)
 
         def job(j):
+            newkeys = set("%s:%d" % (os.path.basename(p), os.path.getsize(p)) for p in todo)
+            kept = []
+            for r in existing:
+                if r.key in newkeys:       # بنعيد فحصه: نمسح نسخته المسمّاة القديمة (الأصلي مش بيتمس)
+                    try:
+                        if (r.out_path and os.path.exists(r.out_path) and os.path.abspath(r.out_path) != os.path.abspath(r.src)
+                                and os.path.abspath(r.out_path).startswith(os.path.abspath(dest))):
+                            os.remove(r.out_path)
+                    except OSError:
+                        pass
+                else:
+                    kept.append(r)
             res = []
-            for i, p in enumerate(pdfs):
+            for i, p in enumerate(todo):
                 if j.stop_ev.is_set():
                     break
-                base = i / float(len(pdfs))
+                base = i / float(len(todo))
                 name = os.path.basename(p)
                 try:
                     r = E.identify_payment_pdf(
                         p, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
-                            base, "① ملف %d من %d: %s — %s" % (i + 1, len(pdfs), name, m)), stop=j.stop_ev.is_set)
+                            base, "① ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
+                        stop=j.stop_ev.is_set, fast=fast)
                 except E.OcrUnavailable:
                     raise
                 except Exception as e:
+                    logging.exception("identify")
                     r = E.PayResult(p)
-                    r.ok = False
-                    r.notes.append("فشل الفحص: %s" % e)
+                    r.id_ok = False
+                    r.id_notes.append("فشل التعريف: %s" % str(e).split("\n")[0])
                 res.append(r)
+            allres = kept + res
             for r in res:
-                try:
-                    E.apply_payment_name(res, r, dest)
-                except Exception as e:
-                    r.ok = False
-                    r.notes.append("فشل النسخ/التسمية: %s" % e)
-            E.flag_payment_duplicates(res)
-            for r in res:
-                r.snapshot_identity()
-            return res, ignored
+                if r.pending:               # الملفات الضعيفة (مش إيصال ماكينة) مش بتتسمّى
+                    try:
+                        E.apply_payment_name(allres, r, dest)
+                    except Exception as e:
+                        r.id_ok = False
+                        r.id_notes.append("فشل التسمية: %s" % e)
+            E.resolve_payment_duplicates(allres, dest)
+            E.flag_payment_duplicates(allres)
+            _pay_save(allres)
+            return allres, ignored, skipped
 
         self._run_job(job, self._done_rename)
 
     def _done_rename(self, payload):
-        res, ignored = payload
-        self.results = sorted(res, key=lambda r: (r.order, r.new_name or r.name))
+        allres, ignored, skipped = payload
+        self.results = allres
+        self._sort()
         self._fill()
-        named = sum(1 for r in self.results if r.new_name)
-        bad = len(self.results) - named
-        msg = "① اكتملت إعادة التسمية: %d ملف اتسمّى من %d" % (named, len(self.results))
+        named = sum(1 for r in self.results if r.new_name and not r.excluded)
+        bad = sum(1 for r in self.results if not r.ok)
+        msg = "① اكتمل الفحص: %d ملف، %d اتسمّى" % (len(self.results), named)
         if bad:
-            msg += " | ⚠️ %d ملف ماتسمّاش (راجعه/عدّله يدوي)" % bad
+            msg += " | ⚠️ %d محتاج مراجعة" % bad
+        if skipped:
+            msg += " | (اتخطّيت %d اتفحصوا قبل كده)" % skipped
         if ignored:
             msg += " | (اتجاهلت %d صورة)" % ignored
-        msg += "  —  دوس \"② عدّ الإيصالات\" للمرحلة التانية."
+        pend = sum(1 for r in self.results if r.pending)
+        if pend:
+            msg += "  —  دوس \"② عدّ الإيصالات\" لعدّ %d ملف." % pend
         self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
         self.btn_count.configure(state="normal" if self.results else "disabled")
 
     # ---------- ② العد ----------
     def start_count(self):
-        if not self.results:
-            messagebox.showinfo("A2R", "نفّذ ① إعادة التسمية الأول.", parent=self)
+        todo = [r for r in self.results if r.pending]
+        if not todo:
+            messagebox.showinfo("A2R", "كل الملفات اتعدّت. اختار ملف ودوس \"↻ إعادة عدّ\" لو عايز تعيد.", parent=self)
             return
-        ok, msg = E.ocr_ready()
+        ok, msg = E.pay_ocr_ready()
         if not ok:
             messagebox.showerror("A2R", msg, parent=self)
             return
-        items, wd = list(self.results), self.workdir
+        fast, dest, wd = bool(self.fast.get()), self.dest, self.workdir
 
         def job(j):
-            for i, r in enumerate(items):
+            for i, r in enumerate(todo):
                 if j.stop_ev.is_set():
                     break
-                base = i / float(len(items))
+                if r.excluded:
+                    continue
+                base = i / float(len(todo))
                 name = r.new_name or r.name
                 try:
-                    E.count_payment_pdf(
+                    done = E.count_payment_pdf(
                         r, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
-                            base, "② ملف %d من %d: %s — %s" % (i + 1, len(items), name, m)), stop=j.stop_ev.is_set)
+                            base, "② ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
+                        stop=j.stop_ev.is_set, fast=fast)
+                    if done and r.new_name is None and r.tid and r.day and r.month:
+                        E.apply_payment_name(self.results, r, dest)    # التعريف فشل: نسمّي من نتيجة العد
                 except E.OcrUnavailable:
                     raise
-                except Exception as e:
-                    r.ok = False
-                    r.notes.append("فشل العد: %s" % e)
-            return items
+                except Exception:
+                    logging.exception("count")
+                    r.count = 0
+                    r.cnt_ok = False
+                    r.cnt_notes.append("فشل العد")
+                _pay_save(self.results)
+            E.flag_payment_duplicates(self.results)
+            _pay_save(self.results)
+            return todo
 
         self._run_job(job, self._done_count)
 
-    def _done_count(self, items):
+    def _done_count(self, _items):
+        self._sort()
         self._fill()
-        done = [r for r in self.results if r.counted]
+        done = [r for r in self.results if r.counted and not r.excluded]
         n = sum(r.count for r in done)
-        bad = sum(1 for r in self.results if not r.ok)
+        bad = sum(1 for r in self.results if r.counted and not r.ok)
+        pend = sum(1 for r in self.results if r.pending)
         msg = "② اكتمل العد: %d ملف | إجمالي الإيصالات %d" % (len(done), n)
+        if pend:
+            msg += " | فاضل %d لسه (اتوقف) - دوس ② تاني يكمّل من مكانه" % pend
         if bad:
             msg += " | ⚠️ %d محتاج مراجعة" % bad
-        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
+        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if (bad or pend) else self.t["success"])
 
-    def _fill(self):
-        self.tv.delete(*self.tv.get_children())
-        self._iid = {}
-        dash = "—"
-        for r in self.results:
-            tag = "ok" if r.ok else "warn"
-            iid = self.tv.insert("", "end", values=(
-                r.order if r.order != 99 else "-", r.name, E.terminal_label(r.tid) if r.tid else "غير محدد",
-                r.pages or dash,
-                r.n15 if r.n15 is not None else dash, r.n10 if r.n10 is not None else dash,
-                r.last if r.last is not None else dash,
-                r.count if (r.counted or r.count) else dash,
-                ("%s/%s" % (r.day, r.month)) if r.day else dash, r.new_name or dash,
-                "✓" if r.ok else "⚠️ راجع"), tags=(tag,))
-            self._iid[iid] = r
-        counted = [r for r in self.results if r.counted or r.count]
-        self.lbl_total.configure(text="إجمالي الإيصالات: %d  |  عدد الملفات: %d  |  ملفات اتعدّت: %d  |  إجمالي صفحات 15: %d  ، صفحات 10: %d" % (
-            sum(r.count for r in counted), len(self.results), len(counted),
-            sum(r.n15 or 0 for r in self.results), sum(r.n10 or 0 for r in self.results)))
-        self.btn_count.configure(state="normal" if (self.results and not self.job_running()) else "disabled")
-        self._show_notes()
-
-    def job_running(self):
-        return str(self.btn_stop.cget("state")) == "normal"
-
-    def _show_notes(self):
-        sel = self.tv.selection()
-        r = self._iid.get(sel[0]) if sel else None
-        self.txt.configure(state="normal")
-        self.txt.delete("1.0", "end")
-        if r:
-            self.txt.insert("1.0", "\n".join("• " + n for n in r.notes) if r.notes else "مفيش ملاحظات ✓")
-        else:
-            allnotes = ["%s: %s" % (x.name, n) for x in self.results for n in x.notes]
-            self.txt.insert("1.0", "\n".join("• " + n for n in allnotes) if allnotes else "اختار ملف لعرض ملاحظاته.")
-        self.txt.configure(state="disabled")
-
-    def open_selected(self):
-        sel = self.tv.selection()
-        r = self._iid.get(sel[0]) if sel else None
-        if r:
-            _open_path(r.out_path or r.src)
-
-    def edit_selected(self):
-        sel = self.tv.selection()
-        r = self._iid.get(sel[0]) if sel else None
+    def recount_selected(self):
+        r = self._selected()
         if not r:
             messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
             return
+        if self.job_running():
+            return
+        r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
+        _pay_save(self.results)
+        self._fill()
+        self.start_count()
 
-        def ok(tid, d, m, c):
-            old = r.out_path
-            r.tid, r.day, r.month, r.count = tid, d, m, c
-            r.ok, r.notes = True, ["تعديل يدوي"]
-            r.counted, r.n15, r.n10, r.last, r.page_counts = True, None, None, None, []
-            r.snapshot_identity()
-            try:
-                if old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(r.src):
-                    os.remove(old)
-            except OSError:
-                pass
+    # ---------- العرض ----------
+    def _fill(self):
+        keep = None
+        r0 = self._selected()
+        if r0 is not None:
+            keep = r0
+        self.tv.delete(*self.tv.get_children())
+        self._iid = {}
+        dash = "—"
+        sel_iid = None
+        for r in self.results:
+            b, d = E.batch_of(r), E.batch_diff(r)
+            stt, tag = E.pay_status(r)
+            if tag == "ok" and E.batch_match(r) is False:
+                tag = "warn"
+            if r.counted and not r.excluded and E.batch_match(r) is False and r.verdict == 0 and tag != "skip":
+                tag = "warn"
+            iid = self.tv.insert("", "end", values=(
+                r.order if r.order != 99 else "-", r.name, E.terminal_label(r.tid) if r.tid else "غير محدد",
+                r.pages or dash, r.count if r.count >= 0 else dash, b if b is not None else dash,
+                E.diff_text(d) if d is not None else dash, ("%s/%s" % (r.day, r.month)) if r.day else dash,
+                r.new_name or dash, stt), tags=(tag,))
+            self._iid[iid] = r
+            if r is keep:
+                sel_iid = iid
+        if sel_iid:
+            self.tv.selection_set(sel_iid)
+        counted = [r for r in self.results if r.counted and not r.excluded]
+        miss = E.missing_machines(self.results) if self.results else []
+        self.lbl_total.configure(text="إجمالي الإيصالات: %d  |  الملفات: %d  |  اتعدّت: %d  |  لسه: %d  |  محتاج مراجعة: %d  |  ماكينات ناقصة: %d" % (
+            sum(r.count for r in counted), len(self.results), len(counted),
+            sum(1 for r in self.results if r.pending), sum(1 for r in counted if not r.ok), len(miss)))
+        self.btn_count.configure(state="normal" if (self.results and not self.job_running()) else "disabled")
+        self._show_notes()
+
+    def _show_notes(self):
+        r = self._selected()
+        out = []
+        if r:
+            st, _tag = E.pay_status(r)
+            out.append("[%s]  %s" % (st, E.pay_summary(r).replace("\n", "  |  ")))
+            if r.detail:
+                out.append("التفاصيل: " + r.detail)
+            seen = set()
+            for n in r.notes:
+                k = E.note_kind(n)
+                out.append("")
+                out.append("%s %s" % ("🔴" if k[1] == 2 else ("🟠" if k[1] == 1 else "ℹ️"), k[2]))
+                out.append("   • " + n)
+                if k[0] not in seen:
+                    seen.add(k[0])
+                    out.append("   لماذا: " + k[3])
+                    out.append("   الحل: " + k[4])
+            if not r.notes:
+                out.append("\nمفيش ملاحظات ✓")
+        else:
+            lines = []
+            for x in self.results:
+                for n in x.notes:
+                    lines.append("• %s: %s" % (x.name, n))
+            miss = E.missing_machines(self.results) if self.results else []
+            if miss:
+                lines.append("• ماكينات ملهاش ملف: " + " ، ".join(miss))
+            out.append("\n".join(lines) if lines else "اختار ملف لعرض ملاحظاته.")
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", "\n".join(out))
+        self.txt.configure(state="disabled")
+
+    def open_selected(self):
+        r = self._selected()
+        if r:
+            p = r.out_path if (r.out_path and os.path.exists(r.out_path)) else r.src
+            _open_path(p)
+
+    def open_overview(self):
+        if not self.results:
+            messagebox.showinfo("A2R", "مفيش نتايج لسه.", parent=self)
+            return
+        _PayOverview(self, self.results)
+
+    # ---------- المراجعة: صح / غلط / تعديل ----------
+    def set_verdict(self, v):
+        """صح = يفضل مع ملفات اليوم، غلط = يتشال من العد والفولدر. الضغط تاني بيلغي الاختيار."""
+        r = self._selected()
+        if not r:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        if self.job_running():
+            return
+        nv = 0 if r.verdict == v else v
+        was_ex = r.excluded
+        r.verdict = nv
+        try:
+            op = r.out_path
+            inside = bool(op) and os.path.abspath(op).startswith(os.path.abspath(self.dest)) \
+                and os.path.abspath(op) != os.path.abspath(r.src)
+            if nv < 0 and not was_ex:
+                if inside and os.path.exists(op):
+                    os.remove(op)        # النسخة المسمّاة بس (مش الأصلي أبداً)
+            elif nv >= 0 and was_ex and inside and os.path.exists(r.src) and not os.path.exists(op):
+                os.makedirs(os.path.dirname(op), exist_ok=True)
+                shutil.copy2(r.src, op)
+        except OSError:
+            logging.exception("verdict file")
+        E.flag_payment_duplicates(self.results)
+        _pay_save(self.results)
+        self._fill()
+        # علّمته صح بس البرنامج مش عارف ماكينته: اسأل عليها
+        if nv > 0 and not r.tid:
+            self.edit_selected()
+
+    def mark_rest_ok(self):
+        lst = [r for r in self.results if not r.ok]
+        if not lst:
+            messagebox.showinfo("A2R", "مفيش حاجة محتاجة مراجعة.", parent=self)
+            return
+        if not messagebox.askyesno("A2R", "هتعلّم %d ملف على إنهم صح؟" % len(lst), parent=self):
+            return
+        for r in lst:
+            r.verdict = 1
+        _pay_save(self.results)
+        self._fill()
+
+    def edit_selected(self):
+        r = self._selected()
+        if not r:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        if self.job_running():
+            return
+
+        def ok(tid, d, m, c, ex):
+            r.tid, r.day, r.month = tid, d, m
+            r.expected = ex
+            r.id_ok, r.id_notes = True, []
+            r.verdict = 1
+            if c is None:
+                r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
+            else:
+                r.count, r.cnt_notes, r.cnt_ok, r.detail = c, [], True, "تعديل يدوي"
             try:
                 E.apply_payment_name(self.results, r, self.dest)
             except Exception as e:
-                r.ok = False
-                r.notes.append("فشل النسخ/التسمية: %s" % e)
+                r.id_ok = False
+                r.id_notes.append("فشل التسمية: %s" % e)
             E.flag_payment_duplicates(self.results)
-            self.results.sort(key=lambda x: (x.order, x.new_name or x.name))
+            self._sort()
+            _pay_save(self.results)
             self._fill()
+            if c is None:
+                self.lbl_status.configure(text="اتسمّى. دوس \"② عدّ الإيصالات\" لعدّ إيصالاته.", text_color=self.t["warning"])
 
         _EditPayDialog(self, r, ok)
+
+    def clear_all(self):
+        if not self.results:
+            return
+        mine = [r for r in self.results if r.out_path]
+        if not messagebox.askyesno(
+                "A2R", "هيتمسح %d ملف مسمّى من:\n%s\n\nوهتتمسح نتيجة الفحص.\n(ملفاتك الأصلية مش هتتمس)" % (len(mine), self.dest),
+                parent=self):
+            return
+        for r in mine:
+            try:
+                p = os.path.abspath(r.out_path)
+                if p.startswith(os.path.abspath(self.dest)) and p != os.path.abspath(r.src) and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        self.results = []
+        _pay_save(self.results)
+        self._fill()
+        self.lbl_status.configure(text="تم المسح. اختار مصدر وابدأ يوم جديد.", text_color=self.t["muted"])
 
     def save_report(self):
         if not self.results:
@@ -3126,16 +4093,23 @@ class PaymentsWindow(_FeatureWindow):
                                          initialfile="تقرير إيصالات الدفع %s.txt" % datetime.date.today().strftime("%d-%m-%Y"))
         if not p:
             return
-        lines = ["تقرير إيصالات الدفع", "=" * 40]
+        lines = ["تقرير إيصالات الدفع", "=" * 44]
         for r in self.results:
-            lines.append("%s | %s | العدد %d | %s" % (
-                E.terminal_label(r.tid) if r.tid else "غير محدد", r.name, r.count, r.new_name or "بدون اسم"))
-            if r.n15 is not None:
-                lines.append("    صفحات: %d | ص×15: %d | ص×10: %d | آخر صفحة: %s" % (
-                    r.pages, r.n15, r.n10, r.last if r.last is not None else "—"))
+            st, _t = E.pay_status(r)
+            lines.append("%s | %s | العدد %s | %s | %s" % (
+                E.terminal_label(r.tid) if r.tid else "غير محدد", r.name, r.count if r.count >= 0 else "—",
+                r.new_name or "بدون اسم", st))
+            b, d = E.batch_of(r), E.batch_diff(r)
+            if b is not None and d is not None:
+                lines.append("    الباتش: %d • الفعلي: %d • %s" % (b, r.count, E.diff_text(d)))
+            if r.detail:
+                lines.append("    " + r.detail)
             lines += ["    - " + n for n in r.notes]
-        lines.append("-" * 40)
-        lines.append("الإجمالي المقدّر: %d" % sum(r.count for r in self.results))
+        miss = E.missing_machines(self.results)
+        if miss:
+            lines += ["-" * 44, "ماكينات ملهاش ملف: " + " ، ".join(miss)]
+        lines.append("-" * 44)
+        lines.append("إجمالي الإيصالات: %d" % sum(r.count for r in self.results if r.count > 0 and not r.excluded))
         with open(p, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         _open_path(p)
