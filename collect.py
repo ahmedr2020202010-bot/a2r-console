@@ -5049,15 +5049,23 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
-SLIP_SIZE_MM = 70   # بون التصوير مربع 70×70 مم (داخل عرض الطباعة الفعلي لطابعة 80 مم)
+SLIP_SIZE_MM = 46        # مقاس البون المربع (مم) — صغّره/كبّره من هنا
+SLIP_PAPER_W_MM = 57     # عرض الورقة
+SLIP_PAPER_H_MM = 90     # طول الورقة
+SLIP_DESIGN_MM = 70      # مقاس التصميم الأصلي (الخطوط والإطار بتتصغر بنفس النسبة)
+SLIP_OFFSET_X_MM = 0     # لو الطابعة بتزحزح البون: + يمين / - شمال
+SLIP_OFFSET_Y_MM = 0     # + لفوق / - لتحت
 SLIP_FONT_CANDIDATES = [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
 
 def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
     if not REPORTLAB_AVAILABLE:
         return False
-    S = SLIP_SIZE_MM / 25.4 * 72
+    _pt = 72 / 25.4
+    SHEET_W, SHEET_H = SLIP_PAPER_W_MM * _pt, SLIP_PAPER_H_MM * _pt   # الصفحة = مقاس الورقة (مفيش shrink يزحزح)
+    box = SLIP_SIZE_MM * _pt
+    S = SLIP_DESIGN_MM * _pt
     PAGE_W = PAGE_H = S
-    c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
+    c = canvas.Canvas(filepath, pagesize=(SHEET_W, SHEET_H))
     font_name = "Helvetica-Bold"
     for f_cand in SLIP_FONT_CANDIDATES:
         if os.path.exists(f_cand):
@@ -5070,6 +5078,11 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
     def _ar(t):
         try: return get_display(arabic_reshaper.reshape(str(t)))
         except Exception: return str(t)
+
+    # البون كله في نص الورقة (أفقي ورأسي)
+    c.saveState()
+    c.translate((SHEET_W - box) / 2 + SLIP_OFFSET_X_MM * _pt, (SHEET_H - box) / 2 + SLIP_OFFSET_Y_MM * _pt)
+    c.scale(box / S, box / S)
 
     # الإطار
     margin = 7
@@ -5122,6 +5135,7 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
         c.setFont(fn, sz)
         c.drawCentredString(PAGE_W / 2, y_top - sz * 0.8, txt)
         y_top -= sz + gap
+    c.restoreState()
     c.save()
     return True
 
@@ -5312,6 +5326,19 @@ def archive_load_rows():
     finally:
         conn.close()
 
+def archive_day_folder_from_index(day_iso):
+    """فولدر اليوم من الفهرس (لو اسم الشهر في الفولدر اتغير بسبب لغة الويندوز)."""
+    try:
+        conn = _ensure_archive_index()
+        try:
+            row = conn.execute("SELECT path FROM archive_index WHERE day = ? LIMIT 1", (day_iso,)).fetchone()
+        finally:
+            conn.close()
+        if row: return os.path.dirname(row[0])
+    except Exception as e:
+        log_exception("archive_day_folder_from_index", e)
+    return None
+
 def archive_day_stats(rows):
     days = {}
     for path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void in rows:
@@ -5492,6 +5519,27 @@ def archive_day_records(day_folder):
         except Exception as e:
             log_exception(f"day_records_txt:{os.path.basename(f)}", e); rec = None
         if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": True, "is_void": rec["is_void"]})
+    return recs
+
+def load_archive_day_records(day_folder, day):
+    """كل معاملات يوم من الأرشيف بكل التفاصيل (نفس شكل سجلات Records Viewer) ومعلّمة (مكرر/ملغي/ناقص...)."""
+    manual_map = load_manual_map()
+    load_void_map()
+    recs = []
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.pdf"))):
+        b = os.path.basename(f)
+        if b.startswith("Samary_") or b.endswith("_cropped.pdf") or b.endswith("_Summary.pdf"): continue
+        try: rec = read_pdf_record(f, manual_map)
+        except Exception as e:
+            log_exception(f"load_day_pdf:{b}", e); rec = None
+        if rec: recs.append(refresh_void_flag(rec))
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.txt"))):
+        try: rec = read_txt_record(f, day)
+        except Exception as e:
+            log_exception(f"load_day_txt:{os.path.basename(f)}", e); rec = None
+        if rec: recs.append(refresh_void_flag(rec))
+    recs.sort(key=lambda x: x["dt_key"])
+    annotate_records(recs)
     return recs
 
 # ================= أدوات POS (التقفيل + إيصالات الدفع) — بدون واتساب =================
@@ -9127,9 +9175,20 @@ class CustomTkinterApp(ctk.CTk):
                              {"date": 140, "ops": 120, "total": 160, "manual": 80, "void": 80, "dup": 90, "missing": 90})
         sum_lbl = ctk.CTkLabel(tab_days, text="", font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"])
         sum_lbl.pack(anchor="w", padx=8, pady=(2, 0))
-        ctk.CTkLabel(tab_days, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص    •  دبل كليك لفتح ملخص اليوم",
-                                       "🟥 has duplicates   🟨 has incomplete  •  double-click to open day summary"),
+        ctk.CTkLabel(tab_days, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص    •  دبل كليك لعرض معاملات اليوم بالمبالغ والتفاصيل",
+                                       "🟥 has duplicates   🟨 has incomplete  •  double-click to view the day's transactions"),
                      font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8)
+        day_btns = ctk.CTkFrame(tab_days, fg_color="transparent")
+        day_btns.pack(fill="x", padx=6, pady=(4, 0))
+        ctk.CTkButton(day_btns, text=T2("📋 عرض معاملات اليوم المختار", "📋 View selected day"), font=FONT_BTN_SUB, width=200, height=30,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=view_day_records).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(day_btns, text=T2("📄 ملخص اليوم", "📄 Day summary"), font=FONT_BTN_SUB, width=130, height=30,
+                      fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF",
+                      command=lambda: open_selected_day()).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(day_btns, text=T2("📂 فولدر اليوم", "📂 Day folder"), font=FONT_BTN_SUB, width=130, height=30,
+                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF",
+                      command=lambda: open_selected_day(folder_only=True)).pack(side="left")
 
         sort_state = {"col": "date", "rev": True}
         def sort_days(col):
@@ -9178,6 +9237,10 @@ class CustomTkinterApp(ctk.CTk):
             if cb_month.get() not in [ALL] + months: cb_month.set(ALL)
             apply_days()
 
+        def view_day_records(event=None):
+            sel = day_tree.selection()
+            if sel: self.open_day_records(sel[0])
+
         def open_selected_day(event=None, folder_only=False):
             sel = day_tree.selection()
             if not sel: return
@@ -9191,8 +9254,9 @@ class CustomTkinterApp(ctk.CTk):
             if pdfs and not folder_only: os.startfile(pdfs[0])
             else: os.startfile(dfolder)
 
-        day_tree.bind("<Double-1>", open_selected_day)
+        day_tree.bind("<Double-1>", view_day_records)
         dmenu = tk.Menu(day_tree, tearoff=0)
+        dmenu.add_command(label=T2("📋 عرض معاملات اليوم (بكل البيانات)", "📋 View day transactions"), command=view_day_records)
         dmenu.add_command(label=T2("📄 فتح ملخص اليوم", "📄 Open day summary"), command=open_selected_day)
         dmenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_selected_day(folder_only=True))
         def _dpop(ev):
@@ -9223,11 +9287,13 @@ class CustomTkinterApp(ctk.CTk):
         s_tree = make_tree(tab_search, s_cols, s_hdr,
                            {"date": 105, "unit": 140, "plate": 100, "insured": 180, "amount": 90, "time": 120, "status": 80, "file": 170})
         s_paths = {}
+        s_days = {}
 
         def do_search(*_):
             q = s_entry.get().strip()
             s_tree.delete(*s_tree.get_children())
             s_paths.clear()
+            s_days.clear()
             if not q:
                 s_count.configure(text="")
                 return
@@ -9244,6 +9310,7 @@ class CustomTkinterApp(ctk.CTk):
                 if not is_void: tot += amount
                 iid = str(i)
                 s_paths[iid] = path
+                s_days[iid] = day
                 s_tree.insert("", "end", iid=iid, tags=(tag,) if tag else (),
                               values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", rtime, status, fname))
             s_count.configure(text=T2(f"النتائج: {len(rows):,}  |  الإجمالي (بدون الملغي): {tot:,.2f}",
@@ -9271,6 +9338,10 @@ class CustomTkinterApp(ctk.CTk):
         smenu = tk.Menu(s_tree, tearoff=0)
         smenu.add_command(label=T2("📄 فتح الإيصال", "📄 Open receipt"), command=open_result)
         smenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_result(folder_only=True))
+        def view_result_day():
+            sel = s_tree.selection()
+            if sel and s_days.get(sel[0]): self.open_day_records(s_days[sel[0]])
+        smenu.add_command(label=T2("📋 عرض كل معاملات اليوم ده", "📋 View all transactions of this day"), command=view_result_day)
         def _spop(ev):
             it = s_tree.identify_row(ev.y)
             if it:
@@ -9694,19 +9765,91 @@ class CustomTkinterApp(ctk.CTk):
         if not self.last_detailed_records:
             messagebox.showinfo("Notice", tr("no_records_yet"))
             return
+        self._records_window(self.last_detailed_records, live=True)
+
+    def open_day_records(self, day_iso):
+        """تفاصيل أي يوم من الأرشيف (كل البيانات والمبالغ) بنفس شكل Records Viewer."""
+        try: dd = datetime.date.fromisoformat(day_iso)
+        except Exception: return
+        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+        dfolder = archive_day_dir(folder, dd)
+        if not os.path.isdir(dfolder):
+            dfolder = archive_day_folder_from_index(day_iso) or dfolder
+        if not os.path.isdir(dfolder):
+            messagebox.showerror(T2("غير موجود", "Not found"), dfolder)
+            return
 
         t = THEMES[self.current_theme_name]
+        wait = ctk.CTkToplevel(self)
+        wait.title("...")
+        wait.resizable(False, False)
+        center_window_relative(wait, self, 320, 90)
+        wait.configure(fg_color=t["bg"])
+        ctk.CTkLabel(wait, text=T2("⏳ جاري تحميل معاملات اليوم...", "⏳ Loading day transactions..."),
+                     font=FONT_REGULAR_BOLD, text_color=t["accent"]).pack(expand=True)
+
+        def work():
+            try: recs = load_archive_day_records(dfolder, dd)
+            except Exception as e:
+                log_exception("open_day_records", e)
+                recs = []
+            def fin():
+                try: wait.destroy()
+                except Exception as _e: _log_silent("open_day_records#1", _e)
+                if not recs:
+                    messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد معاملات لهذا اليوم.", "No transactions for this day."))
+                    return
+                self._records_window(recs, live=False, day_iso=day_iso, day_folder=dfolder)
+            self.after(0, fin)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _records_window(self, records, live=True, day_iso=None, day_folder=None):
+        """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
+        t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.title(tr("records_viewer_title"))
+        day_txt = ""
+        if day_iso:
+            yy, mm, dd_ = day_iso.split("-")
+            day_txt = f"{dd_}-{mm}-{yy}"
+        win.title(tr("records_viewer_title") + (f" — {day_txt}" if day_txt else ""))
         win.resizable(True, True)
         set_window_icon_safe(win)
-        center_window_relative(win, self, 1260, 580)
+        center_window_relative(win, self, 1340, 680)
+        win.minsize(1000, 480)
         win.configure(fg_color=t["bg"])
+        try: win.lift(); win.focus_force()
+        except Exception as _e: _log_silent("_records_window#1", _e)
 
+        if not live:
+            hdr = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+            hdr.pack(fill="x", padx=14, pady=(12, 0))
+            ctk.CTkLabel(hdr, text=T2(f"📅 أرشيف يوم {day_txt}", f"📅 Archive day {day_txt}"),
+                         font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
+
+        # ---------- كروت الإحصائيات ----------
+        cards = ctk.CTkFrame(win, fg_color="transparent")
+        cards.pack(fill="x", padx=10, pady=(8, 2))
+        card_lbls = {}
+
+        def mk_card(key, title, color):
+            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f.pack(side="left", fill="x", expand=True, padx=4)
+            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
+            lb = ctk.CTkLabel(f, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            card_lbls[key] = lb
+
+        mk_card("total", T2("إجمالي المبلغ (الصافي)", "Net total"), t["success"])
+        mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
+        mk_card("shown", T2("صافي المعروض", "Shown total"), t["text"])
+        mk_card("void", T2("ملغي", "Void"), t["danger"])
+        mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
+
+        # ---------- البحث والفلاتر ----------
         search_row = ctk.CTkFrame(win, corner_radius=10, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
-        search_row.pack(fill="x", padx=14, pady=(12, 6))
+        search_row.pack(fill="x", padx=14, pady=(6, 4))
 
-        search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
+        search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=300,
                                     text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         search_entry.pack(side="left", padx=8, pady=8)
         search_entry.focus_set()
@@ -9717,69 +9860,94 @@ class CustomTkinterApp(ctk.CTk):
         amt_entry.pack(side="left", padx=(0, 6), pady=8)
         attach_context_menu(amt_entry)
 
-        def open_selected():
+        ALL_ST = T2("كل الحالات", "All statuses")
+        status_map = {
+            T2("سليم", "OK"): {"ok"}, T2("يدوي", "Manual"): {"manual"},
+            T2("مكرر", "Duplicate"): {"dup"}, T2("ملغي", "Void"): {"void"},
+            T2("ناقص / وحدة أخرى", "Incomplete / other unit"): {"missing", "wrong"},
+        }
+        cb_status = ctk.CTkComboBox(search_row, values=[ALL_ST] + list(status_map.keys()), width=170, font=FONT_ENTRY,
+                                    fg_color=t["input"], border_color=t["border"], state="readonly",
+                                    command=lambda v: refresh())
+        cb_status.set(ALL_ST)
+        cb_status.pack(side="left", padx=(0, 6), pady=8)
+
+        count_lbl = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        count_lbl.pack(side="right", padx=14)
+
+        # ---------- الأزرار ----------
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(0, 2))
+
+        def _sel_rec():
             sel = tree.selection()
-            if not sel: return
-            try:
-                rec = self.last_detailed_records[int(sel[0])]
-            except Exception: return
+            if not sel: return None
+            try: return records[int(sel[0])]
+            except Exception: return None
+
+        def open_selected():
+            rec = _sel_rec()
+            if not rec: return
             fpath = rec.get("path", "")
             if fpath and os.path.exists(fpath): os.startfile(fpath)
             else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}")
 
         def reprint_selected():
-            sel = tree.selection()
-            if not sel: return
-            try:
-                rec = self.last_detailed_records[int(sel[0])]
-                self.reprint_receipt_record(rec)
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
+            rec = _sel_rec()
+            if not rec: return
+            try: self.reprint_receipt_record(rec)
+            except Exception as e: messagebox.showerror("Error", str(e))
 
-        btn_open = ctk.CTkButton(search_row, text=tr("open_pdf_btn"), font=FONT_BTN_SUB, fg_color=t["primary"],
-                                 hover_color=t["primary_hover"], text_color="#FFFFFF", width=115, height=30, command=open_selected)
-        btn_open.pack(side="left", padx=2)
+        def open_folder():
+            rec = _sel_rec()
+            p = rec.get("path", "") if rec else ""
+            target = os.path.dirname(p) if p and os.path.exists(p) else day_folder
+            if target and os.path.isdir(target): os.startfile(target)
 
-        btn_reprint_toolbar = ctk.CTkButton(search_row, text=tr("btn_reprint"), font=FONT_BTN_SUB, fg_color="#D97706",
-                                            hover_color="#B45309", text_color="#FFFFFF", width=105, height=30, command=reprint_selected)
-        btn_reprint_toolbar.pack(side="left", padx=2)
+        def open_day_summary():
+            if not day_folder: return
+            pdfs = sorted(glob.glob(os.path.join(day_folder, "Samary_*.pdf")))
+            if pdfs: os.startfile(pdfs[0])
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد ملخص لهذا اليوم.", "No summary for this day."))
 
         def cancel_selected():
-            sel = tree.selection()
-            if not sel: return
-            idx = int(sel[0])
-            rec = self.last_detailed_records[idx]
+            rec = _sel_rec()
+            if not rec: return
             if rec.get("is_void"):
                 messagebox.showinfo(tr("done"), tr("void_already"))
                 return
-            msg = tr("void_confirm_msg", idx=idx+1, amt=rec['amount'])
+            idx = records.index(rec)
+            msg = tr("void_confirm_msg", idx=idx + 1, amt=rec['amount'])
             if messagebox.askyesno(tr("void_confirm_title"), msg):
                 self.void_selected_record(rec, refresh)
 
-        btn_cancel_row = ctk.CTkButton(search_row, text=tr("btn_void_sel"), font=FONT_BTN_SUB, fg_color="#991B1B",
-                                       hover_color="#7F1D1D", text_color="#FFFFFF", width=110, height=30, command=cancel_selected)
-        btn_cancel_row.pack(side="left", padx=2)
-
         def restore_selected_void():
-            sel = tree.selection()
-            if not sel: return
-            idx = int(sel[0])
-            rec = self.last_detailed_records[idx]
+            rec = _sel_rec()
+            if not rec: return
             if not rec.get("is_void"):
                 messagebox.showinfo(tr("done"), tr("restore_already"))
                 return
-            msg = tr("restore_confirm_msg", idx=idx+1, amt=rec['amount'])
+            idx = records.index(rec)
+            msg = tr("restore_confirm_msg", idx=idx + 1, amt=rec['amount'])
             if messagebox.askyesno(tr("restore_confirm_title"), msg):
                 self.unvoid_selected_record(rec, refresh)
 
-        btn_restore_void = ctk.CTkButton(search_row, text=tr("btn_restore_sel"), font=FONT_BTN_SUB, fg_color="#0F766E",
-                                         hover_color="#115E59", text_color="#FFFFFF", width=115, height=30, command=restore_selected_void)
-        btn_restore_void.pack(side="left", padx=2)
+        def _b(text, color, hover, cmd, w=115):
+            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover,
+                          text_color="#FFFFFF", width=w, height=30, command=cmd).pack(side="left", padx=(0, 6), pady=2)
 
-        count_lbl = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
-        count_lbl.pack(side="right", padx=14)
+        _b(tr("open_pdf_btn"), t["primary"], t["primary_hover"], open_selected)
+        _b(tr("btn_reprint"), "#D97706", "#B45309", reprint_selected, 105)
+        _b(T2("📂 فتح الفولدر", "📂 Open folder"), "#4338CA", "#3730A3", open_folder, 125)
+        if live:
+            _b(tr("btn_void_sel"), "#991B1B", "#7F1D1D", cancel_selected, 110)
+            _b(tr("btn_restore_sel"), "#0F766E", "#115E59", restore_selected_void)
+        else:
+            _b(T2("📄 ملخص اليوم", "📄 Day summary"), "#0F766E", "#115E59", open_day_summary, 125)
 
-        ctk.CTkLabel(win, text=tr("legend_text"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
+        ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                  "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+                     font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
 
         tree_frame = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, padx=14, pady=(2, 14))
@@ -9794,9 +9962,9 @@ class CustomTkinterApp(ctk.CTk):
 
         style = ttk.Style()
         try: style.theme_use("clam")
-        except Exception as _e: _log_silent("open_records_viewer#1", _e)
+        except Exception as _e: _log_silent("_records_window#2", _e)
         style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
-                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
+                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=30)
         style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
                         font=(FONT_FAMILY, 11, "bold"), relief="flat")
 
@@ -9808,20 +9976,23 @@ class CustomTkinterApp(ctk.CTk):
                   foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
 
         tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="A2R.Treeview")
-        
+
         sort_directions = {}
         def sort_by(col):
             reverse = sort_directions.get(col, False)
             sort_directions[col] = not reverse
-            if col in ("idx", "amount"):
-                self.last_detailed_records.sort(key=lambda r: float(r["amount"]) if col=="amount" else 0, reverse=reverse)
+            if col == "amount":
+                records.sort(key=lambda r: float(r["amount"]), reverse=reverse)
+            elif col in ("idx", "time"):
+                records.sort(key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=reverse)
             else:
-                self.last_detailed_records.sort(key=lambda r: str(r.get(col, "")), reverse=reverse)
+                k = "status_text" if col == "status" else col
+                records.sort(key=lambda r: str(r.get(k, "")), reverse=reverse)
             refresh()
 
         for col in columns:
             tree.heading(col, text=headers.get(col, col), command=lambda c=col: sort_by(c))
-            w = 38 if col == "idx" else (140 if col in ("insured", "file", "status", "period") else 85)
+            w = 40 if col == "idx" else (150 if col in ("insured", "file", "status", "period") else (95 if col in ("amount", "time") else 85))
             tree.column(col, width=w, anchor="center")
 
         for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
@@ -9838,47 +10009,54 @@ class CustomTkinterApp(ctk.CTk):
         row_menu = tk.Menu(tree, tearoff=0)
         row_menu.add_command(label=tr("menu_open_file"), command=open_selected)
         row_menu.add_command(label=tr("menu_reprint"), command=reprint_selected)
-        row_menu.add_separator()
-        row_menu.add_command(label=tr("menu_void_tx"), command=cancel_selected)
-        row_menu.add_command(label=tr("menu_restore_tx"), command=restore_selected_void)
+        row_menu.add_command(label=T2("📂 فتح الفولدر", "📂 Open folder"), command=open_folder)
+        if live:
+            row_menu.add_separator()
+            row_menu.add_command(label=tr("menu_void_tx"), command=cancel_selected)
+            row_menu.add_command(label=tr("menu_restore_tx"), command=restore_selected_void)
 
         def show_row_menu(event):
             item = tree.identify_row(event.y)
             if item:
                 tree.selection_set(item)
-                row_menu.entryconfigure(0, label=tr("menu_open_file"))
-                row_menu.entryconfigure(1, label=tr("menu_reprint"))
-                row_menu.entryconfigure(3, label=tr("menu_void_tx"))
-                row_menu.entryconfigure(4, label=tr("menu_restore_tx"))
                 row_menu.tk_popup(event.x_root, event.y_root)
 
         tree.bind("<Button-3>", show_row_menu)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Control-f>", lambda e: search_entry.focus_set())
 
         def refresh(*_):
             q = search_entry.get().strip().lower()
             aq = amt_entry.get().strip().replace(",", "")
+            kinds = status_map.get(cb_status.get())
             tree.delete(*tree.get_children())
             shown = 0
             shown_valid_sum = 0.0
-            counted = counted_ids(self.last_detailed_records)
+            counted = counted_ids(records)
 
-            for i, r in enumerate(self.last_detailed_records):
+            for i, r in enumerate(records):
+                if kinds and r.get("kind") not in kinds: continue
                 amt_str = f"{r['amount']:.2f}"
-                vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
-                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-
                 if aq and aq not in amt_str: continue
                 if q:
                     full_s = f"{r['unit']} {r['plate']} {r['insured']} {r['time']} {r['chassis']} {r['motor']} {r['make']} {r['model']} {r['file']} {r['status_text']}".lower()
                     if q not in full_s: continue
 
-                tag = r["kind"] if r["kind"] in ("dup", "void") else ""
+                vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
+                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
                 tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
                 if id(r) in counted:
                     shown_valid_sum += r["amount"]
 
-            count_lbl.configure(text=tr("records_stats", shown=shown, net=shown_valid_sum, total=self.last_summary_info.get('total_sum', 0)))
+            tot, cnt = counted_totals(records)
+            card_lbls["total"].configure(text=f"{tot:,.2f}")
+            card_lbls["count"].configure(text=f"{cnt:,}")
+            card_lbls["shown"].configure(text=f"{shown_valid_sum:,.2f}")
+            card_lbls["void"].configure(text=str(sum(1 for r in records if r.get("is_void"))))
+            card_lbls["dup"].configure(text=str(sum(1 for r in records if r.get("kind") == "dup")))
+            count_lbl.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
 
         search_entry.bind("<KeyRelease>", refresh)
         amt_entry.bind("<KeyRelease>", refresh)
