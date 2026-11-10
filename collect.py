@@ -40,6 +40,7 @@ import subprocess
 import datetime
 import unicodedata
 import threading
+import queue
 import logging
 import winsound
 import webbrowser
@@ -4326,6 +4327,7 @@ LOG_FILE = os.path.join(DOCUMENTS_DIR, "app_log.txt")
 ARCHIVE_DIRNAME = "_Receipts_Archive_"
 UNSPEC = "وحدة غير محددة"
 PRINT_TEMP_DIR = os.path.join(tempfile.gettempdir(), "A2R_Print")
+_PRINT_LOCK = threading.Lock()   # طباعة واحدة في الوقت (الملفات المؤقتة بنفس الاسم)
 MANUAL_NAME_RE = re.compile(r"^[_]?\d+(?:\.\d{2})?_\d{6}\.pdf$", re.IGNORECASE)
 
 SOUND_MUTED = True
@@ -5282,6 +5284,7 @@ def archive_backup(folder_path):
         rel = os.path.relpath(dp, src)
         dst_dir = ARCHIVE_BACKUP_DIR if rel == "." else os.path.join(ARCHIVE_BACKUP_DIR, rel)
         for f in fns:
+            if f.startswith("~"): continue          # ملفات مؤقتة (إكسيل بيتكتب دلوقتي)
             s, d = os.path.join(dp, f), os.path.join(dst_dir, f)
             try:
                 ss = os.stat(s)
@@ -6592,7 +6595,7 @@ def run_pdftotext(path):
     try:
         res = subprocess.run([PDFTOTEXT_EXE, "-layout", "-enc", "UTF-8", path, "-"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             encoding='utf-8', errors='ignore', creationflags=flags)
+                             encoding='utf-8', errors='ignore', creationflags=flags, timeout=45)
         return clean_arabic(res.stdout)
     except Exception as e:
         log_exception(f"pdftotext:{os.path.basename(path)}", e)
@@ -6630,7 +6633,7 @@ def run_pdftotext_bbox(path):
     try:
         res = subprocess.run([PDFTOTEXT_EXE, "-bbox", path, "-"], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore",
-                             creationflags=flags)
+                             creationflags=flags, timeout=45)
     except Exception as e:
         log_exception(f"bbox:{os.path.basename(path)}", e)
         return None, None, []
@@ -7340,7 +7343,7 @@ def get_print_time_bottom(pdf_path):
     try:
         res = subprocess.run([PDFTOTEXT_EXE, "-bbox", pdf_path, "-"], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore",
-                             creationflags=flags)
+                             creationflags=flags, timeout=45)
     except Exception as e:
         log_exception("bbox", e)
         return None
@@ -7669,14 +7672,20 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception("trigger_daily_full_archive_once", e)
 
-    def _run_archive_sweep(self, folder_path, progress=None):
-        """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان."""
-        if not _SWEEP_LOCK.acquire(blocking=False): return 0
+    def _run_archive_sweep(self, folder_path, progress=None, stage=None):
+        """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان.
+        بترجّع None لو كنسة تانية شغالة بالفعل (يعني ماحصلش شغل)، وإلا عدد الملفات المنقولة.
+        stage(i, n, name): بتبلّغ تقدّم مرحلة بناء الملخصات/الإكسيل (بعد ما النقل يخلص)."""
+        if not _SWEEP_LOCK.acquire(blocking=False): return None
         moved = 0
         try:
             moved, touched = archive_sweep(folder_path, progress)
-            for d_folder in touched:
+            _touched = sorted(touched)
+            for _i, d_folder in enumerate(_touched, 1):
                 d_name = os.path.basename(d_folder)
+                if stage:
+                    try: stage(_i, len(_touched), d_name)
+                    except Exception as _e: _log_silent("run_archive_sweep#stage", _e)
                 parent_m = os.path.basename(os.path.dirname(d_folder))
                 parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
                 tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
@@ -7813,9 +7822,12 @@ class CustomTkinterApp(ctk.CTk):
                     break
 
         if fpath and os.path.exists(fpath):
-            self.send_to_thermal_printer_57x90(fpath)
-            play_sound_matched()
-            messagebox.showinfo(tr("done"), tr("reprint_success"))
+            if self.send_to_thermal_printer_57x90(fpath):
+                play_sound_matched()
+                messagebox.showinfo(tr("done"), tr("reprint_success"))
+            else:
+                messagebox.showerror("Error", T2("تعذرت الطباعة. اتأكد من الطابعة وحاول تاني.",
+                                                 "Printing failed. Check the printer and try again."))
         else:
             messagebox.showerror("Error", f"File not found: {rec.get('file', '')}")
 
@@ -7894,43 +7906,48 @@ class CustomTkinterApp(ctk.CTk):
             log_exception("mark_archive_done_today", e)
 
     def auto_archive_on_login(self):
+        """أرشفة تلقائية مرة واحدة في اليوم، في الخلفية بدون أي نافذة. لما تخلص بيظهر إشعار بجوار الساعة."""
         folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
         if not folder or not os.path.isdir(folder):
             return
-        # الأرشفة التلقائية مرة واحدة فقط في اليوم
         if self._archive_done_today():
             return
+        if getattr(self, "_auto_archive_running", False):
+            return
+        self._auto_archive_running = True
+
+        def work():
+            moved, ok = None, False
+            try:
+                moved = self._run_archive_sweep(folder)
+                if moved is not None:             # None = كنسة تانية شغالة، هنحاول تاني في الدورة الجاية
+                    self._mark_archive_done_today()
+                    self._start_archive_maintenance(folder)
+                    ok = True
+            except Exception as e:
+                log_exception("auto_archive_on_login", e)
+            finally:
+                self._auto_archive_running = False
+            if ok:
+                self.run_on_main(lambda: self._notify_archive_done(moved or 0))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tray_notify(self, msg, title="A2R Console", _attempt=0):
+        """إشعار ويندوز من أيقونة البرنامج بجوار الساعة."""
         try:
-            t = THEMES[self.current_theme_name]
-            win = ctk.CTkToplevel(self)
-            win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
-            win.resizable(False, False)
-            set_window_icon_safe(win)
-            center_window_relative(win, self, 430, 170)
-            win.configure(fg_color=t["bg"])
-            try: win.attributes("-topmost", True)
-            except Exception as _e: _log_silent("auto_archive_on_login#1", _e)
-            win.protocol("WM_DELETE_WINDOW", lambda: None)  # منع الإغلاق أثناء الأرشفة
-
-            ctk.CTkLabel(win, text=tr("arch_title"), font=(FONT_FAMILY, 13, "bold"),
-                         text_color=t["accent"]).pack(pady=(14, 2))
-            s_lbl = ctk.CTkLabel(win, text="Scanning files...", font=(FONT_FAMILY, 9, "bold"),
-                                 text_color=t["text"], wraplength=390)
-            s_lbl.pack(pady=(4, 6))
-
-            f_prog = ctk.CTkFrame(win, fg_color="transparent")
-            f_prog.pack(fill="x", padx=20, pady=(4, 4))
-            f_prog.grid_columnconfigure(0, weight=1)
-            p_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color=t["success"])
-            p_bar.set(0)
-            p_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-            p_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
-            p_lbl.grid(row=0, column=1)
-
-            threading.Thread(target=self._process_archive_worker,
-                             args=(False, win, p_bar, p_lbl, s_lbl, folder, True), daemon=True).start()
+            icon = getattr(self, "tray_icon", None)
+            if icon is None:
+                return
+            if not getattr(icon, "visible", True) and _attempt < 5:   # الأيقونة لسه بتظهر: نحاول بعد ثانيتين
+                self.after(2000, lambda: self._tray_notify(msg, title, _attempt + 1))
+                return
+            icon.notify(msg, title)
         except Exception as e:
-            log_exception("auto_archive_on_login", e)
+            log_exception("tray_notify", e)
+
+    def _notify_archive_done(self, moved=0):
+        self._tray_notify(T2("تمت الأرشفة ✓", "Archive completed ✓"))
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
@@ -8524,8 +8541,9 @@ class CustomTkinterApp(ctk.CTk):
                 except Exception as e:
                     log_exception("init_watchdogs_seed", e)
 
+            _last_sync = [0.0]
             while True:
-                time.sleep(2)
+                time.sleep(0.5 if self.auto_print_enabled else 2)
                 try:
                     p = self._watch_path
                     if not p or not os.path.exists(p): continue
@@ -8560,13 +8578,12 @@ class CustomTkinterApp(ctk.CTk):
                                         if os.path.getsize(pdf_file) > 1000:
                                             self.printed_receipts_set.add(fname)
                                             self.printed_receipts_set.add(clean_fn)
-                                            self.send_to_thermal_printer_57x90(pdf_file)
-                                            self.printed_count_today += 1
-                                            self.run_on_main(lambda: self.lbl_mini_counter.configure(
-                                                text=tr("mini_printed_count", count=self.printed_count_today)))
+                                            self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
                                     except Exception as _e: _log_silent("_routine#1", _e)
 
-                    if self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode:
+                    if (self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode
+                            and time.time() - _last_sync[0] >= 2):
+                        _last_sync[0] = time.time()
                         try:
                             valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
                             current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
@@ -8579,47 +8596,78 @@ class CustomTkinterApp(ctk.CTk):
                 except Exception as e:
                     log_exception("watchdog_loop", e)
 
+        def _print_worker():
+            while True:
+                pdf = self._print_queue.get()
+                fname = os.path.basename(pdf)
+                try: ok = self.send_to_thermal_printer_57x90(pdf)
+                except Exception as e:
+                    log_exception(f"print_worker:{fname}", e)
+                    ok = False
+                if ok:
+                    self.printed_count_today += 1
+                    self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                        text=tr("mini_printed_count", count=self.printed_count_today)))
+                else:
+                    # مفيش إعادة طباعة تلقائية (ممكن تطلّع إيصال مكرر للعميل): بنبلّغ المستخدم وهو يعيد الطباعة
+                    self.run_on_main(lambda fn=fname: self._tray_notify(
+                        T2(f"تعذرت طباعة الإيصال: {fn}", f"Printing failed: {fn}"), "A2R Console"))
+
+        self._print_queue = queue.Queue()
+        threading.Thread(target=_print_worker, daemon=True).start()
         threading.Thread(target=_routine, daemon=True).start()
 
     def send_to_thermal_printer_57x90(self, pdf_file_path):
+        """يطبع إيصال على 57x90. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
         temp_copy = None
         scaled_copy = None
-        try:
-            sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
-            if not os.path.exists(sumatra_path):
-                sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+        ok = False
+        with _PRINT_LOCK:
+            try:
+                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                if not os.path.exists(sumatra_path):
+                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
 
-            target = pdf_file_path
-            clean_name = os.path.basename(pdf_file_path).lstrip("_")
-            if clean_name.lower().startswith("quote_receipt_"):
-                temp_copy = make_print_copy(pdf_file_path)
-                if temp_copy:
-                    target = temp_copy
+                target = pdf_file_path
+                clean_name = os.path.basename(pdf_file_path).lstrip("_")
+                if clean_name.lower().startswith("quote_receipt_"):
+                    temp_copy = make_print_copy(pdf_file_path)
+                    if temp_copy:
+                        target = temp_copy
 
-            scaled_copy = scale_pdf_to_print_width(target)
-            if scaled_copy:
-                target = scaled_copy
+                scaled_copy = scale_pdf_to_print_width(target)
+                if scaled_copy:
+                    target = scaled_copy
 
-            if os.path.exists(sumatra_path):
-                cmd = [
-                    sumatra_path,
-                    "-print-to-default",
-                    "-print-settings", "paper=57 x 90 mm,shrink",
-                    "-silent",
-                    target
-                ]
-                subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-            else:
-                if sys.platform == "win32": os.startfile(target, "print")
-        except Exception as e:
-            log_exception(f"auto_print:{os.path.basename(pdf_file_path)}", e)
-        finally:
-            if temp_copy or scaled_copy:
-                time.sleep(1.0)
-                for _tmp in (temp_copy, scaled_copy):
-                    if _tmp:
-                        try: os.remove(_tmp)
-                        except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
+                if os.path.exists(sumatra_path):
+                    cmd = [
+                        sumatra_path,
+                        "-print-to-default",
+                        "-print-settings", "paper=57 x 90 mm,shrink",
+                        "-silent",
+                        target
+                    ]
+                    r = subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
+                    ok = (r.returncode == 0)
+                    if not ok:
+                        log_exception(f"auto_print_rc:{os.path.basename(pdf_file_path)}", f"SumatraPDF exit code {r.returncode}")
+                else:
+                    if sys.platform == "win32":
+                        os.startfile(target, "print")
+                        ok = True
+            except Exception as e:
+                log_exception(f"auto_print:{os.path.basename(pdf_file_path)}", e)
+        # مسح الملفات المؤقتة في الخلفية: قبل كده كانت بتستنى ثانية كاملة وتعطّل الإيصال اللي بعده
+        tmp_files = [x for x in (temp_copy, scaled_copy) if x]
+        if tmp_files:
+            def _cleanup(files=tmp_files):
+                for _tmp in files:
+                    try: os.remove(_tmp)
+                    except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
+            _t = threading.Timer(5.0, _cleanup)
+            _t.daemon = True
+            _t.start()
+        return ok
 
     def open_downloads_archiver_dialog(self):
         try:
@@ -8887,7 +8935,11 @@ class CustomTkinterApp(ctk.CTk):
 
         moved_count = 0
         try:
-            moved_count = self._run_archive_sweep(folder_path, prog) or 0
+            def stage(i, n, name):
+                self.run_on_main(lambda i=i, n=n, nm=name: [
+                    p_bar.set(i / max(1, n)), p_lbl.configure(text=f"{int(i / max(1, n) * 100)}%"),
+                    s_lbl.configure(text=T2(f"جاري تحديث ملخص وإكسيل يوم {nm}  ({i}/{n})", f"Updating summary & Excel for day {nm}  ({i}/{n})"))])
+            moved_count = self._run_archive_sweep(folder_path, prog, stage) or 0
             if auto: self._mark_archive_done_today()
             self._start_archive_maintenance(folder_path)
         except Exception as e:
@@ -10526,7 +10578,7 @@ class CustomTkinterApp(ctk.CTk):
                         "-silent",
                         pdf_path
                     ]
-                    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
                 else:
                     if sys.platform == "win32": os.startfile(pdf_path, "print")
             else:
