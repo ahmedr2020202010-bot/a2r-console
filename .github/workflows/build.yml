@@ -128,5 +128,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $repo = '${{ github.repository }}'
-          $rels = gh release list --repo $repo --limit 100 --json tagName,createdAt | ConvertFrom-Json | Sort-Object createdAt -Descending
+          $rels = gh release list --repo $repo --limit 100 --json tagName,createdAt | ConvertFrom-Json | Where-Object { $_.tagName -like 'build-*' } | Sort-Object createdAt -Descending
           $rels | Select-Object -Skip 10 | ForEach-Object { gh release delete $_.tagName --repo $repo --cleanup-tag --yes }
