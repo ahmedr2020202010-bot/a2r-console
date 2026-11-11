@@ -5141,6 +5141,73 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
     c.save()
     return True
 
+# ================= الوحدة المختارة في إيصال السمري (اجباري) + حفظها لليوم عشان تظهر في سمري الأرشيف =================
+def _day_iso_from_label(label):
+    """'11.11.2026' أو '11-11-2026' -> '2026-11-11' (أو None)."""
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})", str(label or ""))
+    if not m: return None
+    try: return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat()
+    except Exception: return None
+
+def summary_unit_save(day_iso, unit, tid):
+    try:
+        conn = db_connect()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            conn.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES (?, ?)",
+                         (f"summary_unit:{day_iso}", json.dumps({"unit": unit, "tid": tid}, ensure_ascii=False)))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("summary_unit_save", e)
+
+def summary_unit_load(day_iso):
+    """بترجّع (اسم الوحدة، رقم الترمنل) المختارين لليوم ده، أو None لو مفيش."""
+    if not day_iso: return None
+    try:
+        conn = db_connect()
+        try:
+            row = conn.execute("SELECT meta_value FROM system_meta WHERE meta_key = ?", (f"summary_unit:{day_iso}",)).fetchone()
+        finally:
+            conn.close()
+        if not row: return None
+        d = json.loads(row[0])
+        if d.get("unit"): return d["unit"], d.get("tid", "")
+    except Exception as e:
+        _log_silent("summary_unit_load", e)
+    return None
+
+def _draw_summary_unit_block(c, font_name, ar, page_w, unit, tid, y0=58, h=114):
+    """مربع منفصل (بعيد عن باقي بيانات الإيصال) فيه اسم الوحدة المختارة ورقم الترمنل."""
+    if not unit: return
+    x0, w = 12, page_w - 24
+    c.saveState()
+    c.setStrokeColorRGB(0.15, 0.35, 0.55)
+    c.setLineWidth(1.2)
+    c.setDash(3, 2)
+    c.roundRect(x0, y0, w, h, 6, stroke=1, fill=0)
+    c.setDash()
+    c.setFont(font_name, 9)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(page_w / 2, y0 + h - 16, ar("الوحدة المختارة"))
+    txt, sz = ar(unit), 18
+    while sz > 9 and pdfmetrics.stringWidth(txt, font_name, sz) > w - 20: sz -= 1
+    c.setFont(font_name, sz)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 42, txt)
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.setLineWidth(0.6)
+    c.line(x0 + 10, y0 + h - 52, x0 + w - 10, y0 + h - 52)
+    c.setFont(font_name, 9)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(page_w / 2, y0 + h - 68, ar("رقم الترمنل"))
+    c.setFont("Helvetica-Bold", 17)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 92, str(tid) if tid else "-")
+    c.restoreState()
+
+
 # ================= فهرس الأرشيف + النسخة الاحتياطية المخفية + البحث العام =================
 ARCHIVE_BACKUP_DIR = os.path.join(DOCUMENTS_DIR, ".archive_backup")
 _ARCHIVE_LOCK = threading.Lock()
@@ -8917,6 +8984,9 @@ class CustomTkinterApp(ctk.CTk):
             c.setFont("Helvetica-Bold", 14)
             c.drawCentredString(PAGE_W / 2, y - 8, f"{total_sum:,.2f} EGP")
 
+            _su = summary_unit_load(_day_iso_from_label(date_str))
+            if _su: _draw_summary_unit_block(c, font_name, _ar, PAGE_W, _su[0], _su[1])
+
             c.setStrokeColorRGB(0.7, 0.7, 0.7)
             c.line(14, 42, PAGE_W - 14, 42)
             c.setFont("Helvetica", 8)
@@ -10476,7 +10546,7 @@ class CustomTkinterApp(ctk.CTk):
                       hover_color=t["card"], text_color=t["text"], command=modal.destroy).pack(side="right", padx=(4, 0))
 
         ctk.CTkButton(b_bar, text=tr("export_pdf"), width=90, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=self.export_pdf_summary).pack(side="right", padx=4)
+                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=4)
 
         if self.is_supervisor:
             ctk.CTkButton(b_bar, text=tr("open_excel"), width=95, height=32, font=FONT_BTN_SUB, fg_color=t["success"],
@@ -10656,13 +10726,89 @@ class CustomTkinterApp(ctk.CTk):
                       hover_color=t["primary_hover"], text_color="#FFFFFF", command=do_p).pack(fill="x", padx=16, pady=16)
         win.after(100, lambda: cb_employee.focus_set())
 
-    def export_pdf_summary(self):
+    def ask_summary_unit(self, parent=None):
+        """نافذة صغيرة: اختيار الوحدة (إجباري) قبل عمل إيصال السمري. بترجّع (اسم الوحدة، رقم الترمنل) أو None لو اتقفلت."""
+        t = THEMES[self.current_theme_name]
+        parent = parent or self
+        win = ctk.CTkToplevel(parent)
+        win.title(T2("🏢 اختيار الوحدة", "🏢 Choose unit"))
+        win.resizable(False, False)
+        set_window_icon_safe(win)
+        center_window_relative(win, parent, 340, 250)
+        try: win.transient(parent)
+        except Exception as _e: _log_silent("ask_summary_unit#0", _e)
+        win.configure(fg_color=t["bg"])
+        res = {"v": None}
+
+        ctk.CTkLabel(win, text=T2("اختار الوحدة (إجباري):", "Choose the unit (required):"),
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(14, 2))
+        cb = SafeArabicComboBox(win, values=UNITS_LIST, font=FONT_REGULAR_BOLD, height=32,
+                                fg_color=t["input"], border_color=t["border"], state="readonly")
+        cb.set("")
+        cb.pack(fill="x", padx=16)
+        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
+        lbl_tid.pack(anchor="w", padx=16, pady=(8, 0))
+        msg = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#EF4444")
+        msg.pack(anchor="w", padx=16, pady=(2, 0))
+
+        def _update(*_):
+            tid = UNIT_TERMINALS.get(cb.get().strip(), "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else "")
+            if tid: msg.configure(text="")
+        cb._user_command = lambda raw: _update()
+
+        def ok(event=None):
+            u = cb.get().strip()
+            if u not in UNIT_TERMINALS:
+                msg.configure(text=T2("لازم تختار الوحدة الأول.", "You must choose a unit first."))
+                return
+            res["v"] = (u, UNIT_TERMINALS.get(u, ""))
+            win.destroy()
+
+        ctk.CTkButton(win, text=T2("✅ تأكيد وعمل الإيصال", "✅ Confirm & create receipt"), font=FONT_BTN_MAIN, height=34,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=ok).pack(fill="x", padx=16, pady=(12, 4))
+        ctk.CTkButton(win, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, height=28, fg_color=t["border"],
+                      hover_color=t["card"], text_color=t["text"], command=win.destroy).pack(fill="x", padx=16, pady=(0, 10))
+        win.bind("<Return>", ok)
+        try: win.lift(); win.grab_set()
+        except Exception as _e: _log_silent("ask_summary_unit#1", _e)
+        self.wait_window(win)
+        return res["v"]
+
+    def _refresh_archive_day_summary(self, day_iso):
+        """لو اليوم ده متأرشف بالفعل، بيعيد عمل إيصال السمري بتاعه في الأرشيف عشان تظهر فيه الوحدة المختارة."""
+        try:
+            dd = datetime.date.fromisoformat(day_iso)
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            day_dir = archive_day_dir(folder, dd)
+        except Exception as e:
+            log_exception("refresh_archive_day_summary#1", e)
+            return
+        if not os.path.isdir(day_dir): return
+        def work():
+            try:
+                recs = archive_day_records(day_dir)
+                if recs: self._generate_day_summary_pdf(day_dir, dd.strftime("%d-%m-%Y"), recs)
+            except Exception as e:
+                log_exception("refresh_archive_day_summary", e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def export_pdf_summary(self, parent=None):
         if not REPORTLAB_AVAILABLE:
             messagebox.showerror("Error", "ReportLab library required for PDF generation.")
             return
         if not self.last_summary_info or not self.last_generated_file:
             messagebox.showinfo("Notice", "No records available yet. Run extraction first!")
             return
+
+        sel = self.ask_summary_unit(parent)          # اختيار الوحدة إجباري قبل عمل الإيصال
+        if not sel: return
+        chosen_unit, chosen_tid = sel
+        day_iso = _day_iso_from_label((self.last_summary_info or {}).get("date_label", ""))
+        if day_iso:
+            summary_unit_save(day_iso, chosen_unit, chosen_tid)
+            self._refresh_archive_day_summary(day_iso)
 
         pdf_path = os.path.splitext(self.last_generated_file)[0] + "_Summary.pdf"
         try:
@@ -10725,6 +10871,8 @@ class CustomTkinterApp(ctk.CTk):
             c.drawRightString(PAGE_W - 20, y + 8, _ar("إجمالي مبالغ السيستم:"))
             c.setFont("Helvetica-Bold", 15)
             c.drawCentredString(PAGE_W / 2, y - 9, f"{info.get('total_sum', 0):,.2f} EGP")
+
+            _draw_summary_unit_block(c, font_name, _ar, PAGE_W, chosen_unit, chosen_tid)
 
             c.setStrokeColorRGB(0.7, 0.7, 0.7)
             c.line(14, 46, PAGE_W - 14, 46)
