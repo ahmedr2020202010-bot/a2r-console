@@ -5149,19 +5149,22 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
-SLIP_MARGIN_MM = 3       # المسافة بين إطار البون وحافة الورقة (مم). صغّرها لو عايز الإطار أقرب للحافة
+SLIP_MARGIN_MM = 2       # المسافة بين إطار البون وحافة الورقة (مم). صغّرها لو عايز الإطار أقرب للحافة
 SLIP_TEXT_SCALE = 1.0    # تكبير/تصغير النصوص كلها (1.0 = المقاس الافتراضي الكبير)
+SLIP_LINE_FACTOR = 1.0   # ارتفاع السطر = حجم الخط × الرقم ده
+SLIP_GAP_FACTOR = 0.10   # المسافة بين الأسطر (نسبة من ارتفاع السطر). صغّرها/كبّرها لتقصير/تطويل الورقة
+SLIP_PAD_PT = 8          # مسافة بين الكلام وإطار البون من فوق وتحت (نقطة)
+SLIP_MAX_H_MM = 0        # حد أقصى لطول الورقة بالمم (0 = من غير حد)
 SLIP_OFFSET_X_MM = 0     # لو الطابعة بتزحزح البون: + يمين / - شمال
 SLIP_OFFSET_Y_MM = 0     # + لفوق / - لتحت
 SLIP_FONT_CANDIDATES = [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
 
 def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
-    """بون التصوير: الصفحة = مقاس الورق المختار في زرار المقاس، والإطار واخد الورقة كلها تقريبًا، والنصوص كبيرة."""
+    """بون التصوير: عرض الورقة = عرض اللفة، وطولها بيتحسب من الكلام نفسه (ورقة صغيرة) والنصوص كبيرة تملا العرض."""
     if not REPORTLAB_AVAILABLE:
         return False
     _pt = 72 / 25.4
-    SHEET_W, SHEET_H = _PRINT_PAPER_MM[0] * _pt, _PRINT_PAPER_MM[1] * _pt   # الصفحة = الورق نفسه (مفيش shrink يصغّر البون)
-    c = canvas.Canvas(filepath, pagesize=(SHEET_W, SHEET_H))
+    SHEET_W = _PRINT_PAPER_MM[0] * _pt
     font_name = "Helvetica-Bold"
     for f_cand in SLIP_FONT_CANDIDATES:
         if os.path.exists(f_cand):
@@ -5175,16 +5178,8 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
         try: return get_display(arabic_reshaper.reshape(str(t)))
         except Exception: return str(t)
 
-    ox, oy = SLIP_OFFSET_X_MM * _pt, SLIP_OFFSET_Y_MM * _pt
     m = SLIP_MARGIN_MM * _pt
-    fx, fy = m + ox, m + oy                          # زاوية الإطار السفلية الشمال
-    fw, fh = SHEET_W - 2 * m, SHEET_H - 2 * m        # أبعاد الإطار
-
-    c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(2.2)
-    c.roundRect(fx, fy, fw, fh, 12, stroke=1, fill=0)
-
-    # الأسطر: الخط بيكبر لحد ما يملا عرض الإطار، والاسم الطويل بينزل لسطرين بدل ما يصغر أوي
+    fw = SHEET_W - 2 * m                             # عرض الإطار
     inner_w = fw - 2 * 10
     K = SLIP_TEXT_SCALE
 
@@ -5223,13 +5218,24 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
         fitted += _fit_text(f"TID: {terminal_id}", "Helvetica-Bold", 26, 14)
     fitted += _fit_text(str(date_str), "Helvetica-Bold", 26, 14)
 
-    # توزيع الأسطر على طول الإطار: المسافات بين الأسطر بتتحسب من المساحة الفاضية
-    heights = [sz * 1.2 for _, _, sz in fitted]
-    total_h = sum(heights)
+    # طول الورقة = الكلام + مسافات صغيرة بين الأسطر + هامش (ورقة صغيرة مش بتكبر)
+    heights = [sz * SLIP_LINE_FACTOR for _, _, sz in fitted]
     n = len(fitted)
-    gap = max(0.0, (fh - 2 * 14 - total_h) / (n + 1))
-    gap = min(gap, (total_h / n) * 2.0) if n else 0
-    block_h = total_h + gap * (n - 1)
+    gap = (sum(heights) / n) * SLIP_GAP_FACTOR if n else 0
+    block_h = sum(heights) + gap * max(0, n - 1)
+    fh = block_h + 2 * SLIP_PAD_PT                   # ارتفاع الإطار
+    SHEET_H = fh + 2 * m
+    if SLIP_MAX_H_MM:
+        SHEET_H = min(SHEET_H, SLIP_MAX_H_MM * _pt)
+        fh = SHEET_H - 2 * m
+
+    c = canvas.Canvas(filepath, pagesize=(SHEET_W, SHEET_H))
+    ox, oy = SLIP_OFFSET_X_MM * _pt, SLIP_OFFSET_Y_MM * _pt
+    fx, fy = m + ox, m + oy
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(2.2)
+    c.roundRect(fx, fy, fw, fh, 12, stroke=1, fill=0)
+
     cursor = fy + fh / 2 + block_h / 2
     c.setFillColorRGB(0, 0, 0)
     for (txt, fn, sz), h in zip(fitted, heights):
@@ -11361,7 +11367,7 @@ class CustomTkinterApp(ctk.CTk):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", print_settings_arg(),
+                        "-print-settings", "shrink",     # البون: من غير paper= عشان طول الورقة يتبع الـ PDF الصغير مش 57x90
                         "-silent",
                         pdf_path
                     ]
