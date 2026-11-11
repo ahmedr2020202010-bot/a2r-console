@@ -5149,22 +5149,18 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
 
     c.save()
 
-SLIP_SIZE_MM = 46        # مقاس البون المربع (مم) — صغّره/كبّره من هنا
-SLIP_PAPER_W_MM = PRINT_ROLL_W_MM     # عرض الورقة (= عرض لفة الطابعة)
-SLIP_PAPER_H_MM = 90     # طول الورقة
-SLIP_DESIGN_MM = 70      # مقاس التصميم الأصلي (الخطوط والإطار بتتصغر بنفس النسبة)
+SLIP_MARGIN_MM = 3       # المسافة بين إطار البون وحافة الورقة (مم). صغّرها لو عايز الإطار أقرب للحافة
+SLIP_TEXT_SCALE = 1.0    # تكبير/تصغير النصوص كلها (1.0 = المقاس الافتراضي الكبير)
 SLIP_OFFSET_X_MM = 0     # لو الطابعة بتزحزح البون: + يمين / - شمال
 SLIP_OFFSET_Y_MM = 0     # + لفوق / - لتحت
 SLIP_FONT_CANDIDATES = [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
 
 def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
+    """بون التصوير: الصفحة = مقاس الورق المختار في زرار المقاس، والإطار واخد الورقة كلها تقريبًا، والنصوص كبيرة."""
     if not REPORTLAB_AVAILABLE:
         return False
     _pt = 72 / 25.4
-    SHEET_W, SHEET_H = SLIP_PAPER_W_MM * _pt, SLIP_PAPER_H_MM * _pt   # الصفحة = مقاس الورقة (مفيش shrink يزحزح)
-    box = SLIP_SIZE_MM * _pt
-    S = SLIP_DESIGN_MM * _pt
-    PAGE_W = PAGE_H = S
+    SHEET_W, SHEET_H = _PRINT_PAPER_MM[0] * _pt, _PRINT_PAPER_MM[1] * _pt   # الصفحة = الورق نفسه (مفيش shrink يصغّر البون)
     c = canvas.Canvas(filepath, pagesize=(SHEET_W, SHEET_H))
     font_name = "Helvetica-Bold"
     for f_cand in SLIP_FONT_CANDIDATES:
@@ -5179,21 +5175,21 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
         try: return get_display(arabic_reshaper.reshape(str(t)))
         except Exception: return str(t)
 
-    # البون كله في نص الورقة (أفقي ورأسي)
-    c.saveState()
-    c.translate((SHEET_W - box) / 2 + SLIP_OFFSET_X_MM * _pt, (SHEET_H - box) / 2 + SLIP_OFFSET_Y_MM * _pt)
-    c.scale(box / S, box / S)
+    ox, oy = SLIP_OFFSET_X_MM * _pt, SLIP_OFFSET_Y_MM * _pt
+    m = SLIP_MARGIN_MM * _pt
+    fx, fy = m + ox, m + oy                          # زاوية الإطار السفلية الشمال
+    fw, fh = SHEET_W - 2 * m, SHEET_H - 2 * m        # أبعاد الإطار
 
-    # الإطار
-    margin = 7
     c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(2)
-    c.roundRect(margin, margin, S - 2 * margin, S - 2 * margin, 9, stroke=1, fill=0)
+    c.setLineWidth(2.2)
+    c.roundRect(fx, fy, fw, fh, 12, stroke=1, fill=0)
 
-    # الأسطر: الاسم الطويل بينزل لسطرين/تلاتة بدل ما يطلع بره الإطار، والخط بيصغر لو لزم
-    inner_w = S - 2 * margin - 18
+    # الأسطر: الخط بيكبر لحد ما يملا عرض الإطار، والاسم الطويل بينزل لسطرين بدل ما يصغر أوي
+    inner_w = fw - 2 * 10
+    K = SLIP_TEXT_SCALE
 
-    def _fit_text(text, fn, base, min_single=16):
+    def _fit_text(text, fn, base, min_single):
+        base, min_single = base * K, min_single * K
         sz = base
         while sz >= min_single:
             if pdfmetrics.stringWidth(_ar(text), fn, sz) <= inner_w:
@@ -5220,22 +5216,26 @@ def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_
 
     fitted = []
     if emp_name:
-        fitted += _fit_text(emp_name, font_name, 25)
+        fitted += _fit_text(emp_name, font_name, 34, 22)
     if unit_name:
-        fitted += _fit_text(unit_name, font_name, 21)
+        fitted += _fit_text(unit_name, font_name, 28, 20)
     if terminal_id:
-        fitted += _fit_text(f"TID: {terminal_id}", "Helvetica-Bold", 18, min_single=10)
-    fitted += _fit_text(str(date_str), "Helvetica-Bold", 19, min_single=10)
+        fitted += _fit_text(f"TID: {terminal_id}", "Helvetica-Bold", 26, 14)
+    fitted += _fit_text(str(date_str), "Helvetica-Bold", 26, 14)
 
-    gap = 10
-    total_h = sum(sz for _, _, sz in fitted) + gap * (len(fitted) - 1)
-    y_top = (PAGE_H + total_h) / 2
+    # توزيع الأسطر على طول الإطار: المسافات بين الأسطر بتتحسب من المساحة الفاضية
+    heights = [sz * 1.2 for _, _, sz in fitted]
+    total_h = sum(heights)
+    n = len(fitted)
+    gap = max(0.0, (fh - 2 * 14 - total_h) / (n + 1))
+    gap = min(gap, (total_h / n) * 2.0) if n else 0
+    block_h = total_h + gap * (n - 1)
+    cursor = fy + fh / 2 + block_h / 2
     c.setFillColorRGB(0, 0, 0)
-    for txt, fn, sz in fitted:
+    for (txt, fn, sz), h in zip(fitted, heights):
         c.setFont(fn, sz)
-        c.drawCentredString(PAGE_W / 2, y_top - sz * 0.8, txt)
-        y_top -= sz + gap
-    c.restoreState()
+        c.drawCentredString(fx + fw / 2, cursor - sz * 0.9, txt)
+        cursor -= h + gap
     c.save()
     return True
 
@@ -5759,6 +5759,72 @@ def archive_backfill_excels(folder_path, progress=None, force=False):
         if progress: progress(i, len(todo))
         if archive_write_day_excel(dp, d): made += 1
     return made
+
+def archive_unread_by_day():
+    """{يوم: عدد الملفات اللي الفهرس معرفش يقراها كإيصال} (ممكن تكون إيصالات فشلت قراءتها أو ملفات تانية)."""
+    try:
+        conn = _ensure_archive_index()
+        try:
+            return {d: c for d, c in conn.execute(
+                "SELECT day, COUNT(*) FROM archive_index WHERE is_receipt = 0 GROUP BY day").fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("archive_unread_by_day", e)
+        return {}
+
+def archive_all_days():
+    try:
+        conn = _ensure_archive_index()
+        try:
+            return [r[0] for r in conn.execute("SELECT DISTINCT day FROM archive_index ORDER BY day").fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("archive_all_days", e)
+        return []
+
+def archive_reindex(folder_path, days=None, progress=None):
+    """إعادة قراءة الإيصالات من الأول: بيمسح فهرس الأيام المحددة (days=None يعني كل الأيام) ويقرا الملفات تاني
+    بالقارئ الحالي. الفهرس العادي بيتخطى أي ملف تاريخه وحجمه ما اتغيرش، فالأيام اللي اتسجلت غلط (مبلغ صفر)
+    كانت بتفضل كده. بترجّع قاموس بالأعداد، أو None لو في فهرسة تانية شغالة ومخلصتش في 30 ثانية."""
+    if not _ARCHIVE_LOCK.acquire(timeout=30): return None
+    try:
+        with _CACHE_LOCK:
+            _PARSE_CACHE.clear()
+        conn = _ensure_archive_index()
+        try:
+            if days is None:
+                conn.execute("DELETE FROM archive_index")
+            else:
+                conn.executemany("DELETE FROM archive_index WHERE day = ?", [(d,) for d in days])
+            conn.commit()
+        finally:
+            conn.close()
+        n_read = archive_index_update(folder_path, progress)
+        try: _archive_search_rows()
+        except Exception as e: log_exception("archive_reindex_search_warm", e)
+
+        conn = _ensure_archive_index()
+        try:
+            where, args = "", []
+            if days is not None:
+                if not days: return {"read": n_read, "unread": 0, "unread_files": [], "zero_amount": 0}
+                where = " AND day IN (%s)" % ",".join("?" * len(days))
+                args = list(days)
+            unread_files = [r[0] for r in conn.execute(
+                "SELECT path FROM archive_index WHERE is_receipt = 0" + where + " LIMIT 50", args).fetchall()]
+            unread = conn.execute("SELECT COUNT(*) FROM archive_index WHERE is_receipt = 0" + where, args).fetchone()[0]
+            zero_amt = conn.execute(
+                "SELECT COUNT(*) FROM archive_index WHERE is_receipt = 1 AND is_void = 0 AND is_manual = 0 AND amount <= 0" + where,
+                args).fetchone()[0]
+        finally:
+            conn.close()
+        if unread_files:
+            log_exception("archive_reindex_unread", "files not read as receipts: " + " | ".join(unread_files[:20]))
+        return {"read": n_read, "unread": unread, "unread_files": unread_files, "zero_amount": zero_amt}
+    finally:
+        _ARCHIVE_LOCK.release()
 
 # ================= أدوات POS (التقفيل + إيصالات الدفع) — بدون واتساب =================
 import hashlib as _hl, hmac as _hm
@@ -9627,6 +9693,43 @@ class CustomTkinterApp(ctk.CTk):
             log_exception("unvoid_record", e)
             messagebox.showerror("Error", f"Restore failed: {str(e)}")
 
+    def _rearchive_days(self, folder, days, progress=None, stage=None):
+        """إعادة الأرشفة: كنس أي ملف لسه برا الأرشيف + إعادة قراءة إيصالات الأيام + إعادة بناء إيصال السمري وإكسيل اليوم.
+        days=None يعني كل الأيام. بترجّع قاموس النتيجة أو None لو الفهرسة مشغولة."""
+        try: self._run_archive_sweep(folder)
+        except Exception as e: log_exception("rearchive_sweep", e)
+        res = archive_reindex(folder, days, progress)
+        if res is None: return None
+        targets = sorted(days) if days is not None else archive_all_days()
+        rebuilt = 0
+        for i, iso in enumerate(targets, 1):
+            try:
+                dd = datetime.date.fromisoformat(iso)
+                f = archive_day_dir(folder, dd)
+                if not os.path.isdir(f): f = archive_day_folder_from_index(iso) or f
+                if not os.path.isdir(f): continue
+                if stage:
+                    try: stage(i, len(targets), iso)
+                    except Exception as _e: _log_silent("rearchive_days#stage", _e)
+                recs = archive_day_records(f)
+                if not recs: continue
+                tag = dd.strftime("%d-%m-%Y")
+                self._generate_day_summary_pdf(f, tag, recs)
+                new_pdf = os.path.join(f, f"Samary_{tag}.pdf")
+                if os.path.exists(new_pdf):
+                    for old in glob.glob(os.path.join(f, "Samary_*.pdf")):   # أي سمري قديم بإسم تاني كان ممكن يتفتح بالغلط
+                        if os.path.normcase(old) != os.path.normcase(new_pdf):
+                            try: os.remove(old)
+                            except Exception as _e: _log_silent("rearchive_days#rm_old", _e)
+                archive_write_day_excel(f, dd)
+                rebuilt += 1
+            except Exception as e:
+                log_exception(f"rearchive_day:{iso}", e)
+        res["rebuilt"] = rebuilt
+        res["days"] = len(targets)
+        self._start_archive_maintenance(folder)   # نسخة احتياطية للأرشيف بعد التحديث
+        return res
+
     def _start_archive_maintenance(self, folder):
         """فهرسة + نسخ احتياطي مخفي في الخلفية (بدون تعطيل الواجهة)."""
         try:
@@ -9653,6 +9756,8 @@ class CustomTkinterApp(ctk.CTk):
         set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
         center_window_relative(win, self, min(1320, _sw - 40), min(720, _sh - 110))
+        try: win.transient("")   # center_window_relative بتخليها transient = ويندوز بيشيل أزرار التصغير/التكبير وبتختفي من شريط المهام
+        except Exception as _e: _log_silent("open_archive_history#transient", _e)
         win.minsize(min(1000, _sw - 40), 520)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
@@ -9719,6 +9824,110 @@ class CustomTkinterApp(ctk.CTk):
             _set_status(T2("جاري الفحص...", "Scanning..."))
             threading.Thread(target=work, daemon=True).start()
 
+        # ---------- إعادة الأرشفة ----------
+        rb = {"running": False}
+
+        def run_rearchive(days, ask=True):
+            """days=None: كل الأيام. بتقرا الإيصالات من الأول وتعيد بناء إجمالي اليوم والسمري والإكسيل."""
+            if rb["running"]: return
+            if days is not None and not days:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش أيام مطابقة.", "No matching days."), parent=win)
+                return
+            what = T2("كل الأيام", "all days") if days is None else T2(f"{len(days)} يوم", f"{len(days)} day(s)")
+            if ask and not messagebox.askyesno(
+                    T2("إعادة الأرشفة", "Re-archive"),
+                    T2(f"هتتعمل إعادة قراءة لإيصالات {what} وإعادة بناء إجمالي اليوم وإيصال السمري وإكسيل اليوم.\n"
+                       "الإيصالات نفسها مش بتتغير ولا بتتمسح. تكمّل؟",
+                       f"Receipts of {what} will be re-read and the day total, summary receipt and day Excel rebuilt.\n"
+                       "The receipts themselves are not changed or deleted. Continue?"), parent=win):
+                return
+            rb["running"] = True
+            def prog(i, n):
+                self.after(0, lambda: _set_status(T2(f"جاري إعادة قراءة الإيصالات... {i}/{n}", f"Re-reading receipts... {i}/{n}")))
+            def stage(i, n, iso):
+                self.after(0, lambda: _set_status(T2(f"جاري إعادة بناء الملخصات... {i}/{n} ({iso})", f"Rebuilding summaries... {i}/{n} ({iso})")))
+            def work():
+                try: res = self._rearchive_days(folder, days, prog, stage)
+                except Exception as e:
+                    log_exception("rearchive", e)
+                    res = {"error": True}
+                def fin():
+                    rb["running"] = False
+                    if not win.winfo_exists(): return
+                    st["cache"].clear()
+                    load_days()
+                    if st["iso"] and day_tree.exists(st["iso"]): show_day(st["iso"])
+                    if res is None:
+                        _set_status(T2("فهرسة تانية شغالة، جرّب بعد شوية.", "Another indexing job is running, try again shortly."))
+                    elif res.get("error"):
+                        _set_status(T2("حصل خطأ أثناء إعادة الأرشفة (راجع ملف اللوج).", "Error while re-archiving (see log)."))
+                    else:
+                        _set_status(T2(f"تمت إعادة الأرشفة ✓ — أيام اتبنى لها ملخص: {res['rebuilt']} | إيصالات اتقرت: {res['read']}",
+                                       f"Re-archive done ✓ — days rebuilt: {res['rebuilt']} | receipts read: {res['read']}"))
+                        warn = []
+                        if res.get("zero_amount"):
+                            warn.append(T2(f"• {res['zero_amount']} إيصال لسه مبلغه صفر بعد إعادة القراءة (القارئ مش قادر يلقط المبلغ منه).",
+                                           f"• {res['zero_amount']} receipt(s) still have a zero amount after re-reading."))
+                        if res.get("unread"):
+                            warn.append(T2(f"• {res['unread']} ملف مقدرش يتقري كإيصال (أسماء أول الملفات في ملف اللوج).",
+                                           f"• {res['unread']} file(s) could not be read as receipts (first names are in the log)."))
+                        if warn:
+                            messagebox.showwarning(T2("نتيجة إعادة الأرشفة", "Re-archive result"), "\n".join(warn), parent=win)
+                self.after(0, fin)
+            _set_status(T2("جاري إعادة الأرشفة...", "Re-archiving..."))
+            threading.Thread(target=work, daemon=True).start()
+
+        def open_rearchive():
+            if rb["running"]: return
+            dlg = ctk.CTkToplevel(win)
+            dlg.title(T2("♻️ إعادة الأرشفة", "♻️ Re-archive"))
+            dlg.resizable(False, False)
+            set_window_icon_safe(dlg)
+            center_window_relative(dlg, win, 470, 300)
+            dlg.configure(fg_color=t["bg"])
+            try: dlg.grab_set()
+            except Exception as _e: _log_silent("open_rearchive#grab", _e)
+            ctk.CTkLabel(dlg, text=T2("إعادة قراءة الإيصالات من الأول وإعادة بناء إجمالي اليوم وإيصال السمري وإكسيل اليوم. استخدمها لو في أيام إجماليها صفر أو فيها أخطاء.",
+                                      "Re-read receipts and rebuild day total, summary receipt and day Excel. Use it for days with a zero total or errors."),
+                         font=(FONT_FAMILY, 10, "bold"), text_color=t["text"], wraplength=430, justify="left").pack(anchor="w", padx=16, pady=(14, 8))
+            scope = tk.StringVar(value="sel" if st["iso"] else "zero")
+            opts = [("sel", T2("اليوم المختار فقط", "Selected day only")),
+                    ("zero", T2("الأيام اللي إجماليها صفر أو فيها ناقص", "Days with a zero total or incomplete rows")),
+                    ("shown", T2("كل الأيام الظاهرة في القايمة (حسب الشهر/البحث)", "All days currently listed (month/search filter)")),
+                    ("all", T2("كل الأيام (ممكن ياخد وقت)", "All days (may take a while)"))]
+            for val, lab in opts:
+                ctk.CTkRadioButton(dlg, text=lab, variable=scope, value=val, font=FONT_SECTION_LBL,
+                                   text_color=t["text"]).pack(anchor="w", padx=22, pady=3)
+            def go():
+                mode = scope.get()
+                if mode == "sel": days = [st["iso"]] if st["iso"] else []
+                elif mode == "zero": days = sorted({x["day"] for x in st["stats"] if x["total"] <= 0 or x["missing"]})
+                elif mode == "shown": days = list(day_tree.get_children())
+                else: days = None
+                try: dlg.destroy()
+                except Exception as _e: _log_silent("open_rearchive#destroy", _e)
+                run_rearchive(days)
+            ctk.CTkButton(dlg, text=T2("▶ ابدأ", "▶ Start"), font=FONT_BTN_MAIN, height=34, fg_color="#B45309",
+                          hover_color="#92400E", text_color="#FFFFFF", command=go).pack(fill="x", padx=16, pady=(14, 0))
+
+        # ---------- تكبير / ملء الشاشة / تصغير ----------
+        fs = {"on": False}
+        def toggle_fullscreen(event=None):
+            fs["on"] = not fs["on"]
+            try: win.attributes("-fullscreen", fs["on"])
+            except Exception as _e: _log_silent("toggle_fullscreen#1", _e)
+            try: btn_fs.configure(text=T2("🗗 خروج", "🗗 Exit") if fs["on"] else T2("⛶ ملء الشاشة", "⛶ Fullscreen"))
+            except Exception as _e: _log_silent("toggle_fullscreen#2", _e)
+        def exit_fullscreen(event=None):
+            if fs["on"]: toggle_fullscreen()
+        def minimize_win():
+            try:
+                if fs["on"]: toggle_fullscreen()
+                win.iconify()
+            except Exception as _e: _log_silent("minimize_win#1", _e)
+        win.bind("<F11>", toggle_fullscreen)
+        win.bind("<Escape>", exit_fullscreen)
+
         ctk.CTkButton(bar, text=T2("🛠️ إكسيل الأيام الناقصة", "🛠️ Build missing Excels"), font=FONT_BTN_SUB, width=170, height=30,
                       fg_color="#B45309", hover_color="#92400E", text_color="#FFFFFF",
                       command=backfill_all).pack(side="right", padx=4, pady=6)
@@ -9728,6 +9937,15 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkButton(bar, text=T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open Backup"), font=FONT_BTN_SUB, width=160, height=30,
                       fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF",
                       command=open_backup_folder).pack(side="right", padx=4, pady=6)
+        ctk.CTkButton(bar, text=T2("♻️ إعادة الأرشفة", "♻️ Re-archive"), font=FONT_BTN_SUB, width=150, height=30,
+                      fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF",
+                      command=open_rearchive).pack(side="right", padx=4, pady=6)
+        btn_fs = ctk.CTkButton(bar, text=T2("⛶ ملء الشاشة", "⛶ Fullscreen"), font=FONT_BTN_SUB, width=120, height=30,
+                               fg_color="#475569", hover_color="#334155", text_color="#FFFFFF", command=toggle_fullscreen)
+        btn_fs.pack(side="right", padx=4, pady=6)
+        ctk.CTkButton(bar, text=T2("🗕 تصغير", "🗕 Minimize"), font=FONT_BTN_SUB, width=90, height=30,
+                      fg_color="#475569", hover_color="#334155", text_color="#FFFFFF",
+                      command=minimize_win).pack(side="right", padx=4, pady=6)
 
         # ---------- ستايل الجداول ----------
         style = ttk.Style()
@@ -9841,7 +10059,15 @@ class CustomTkinterApp(ctk.CTk):
                                       f"Days: {len(items)}  |  Tx: {tot_ops:,}\nTotal: {tot_amt:,.2f} EGP"))
 
         def load_days():
-            try: st["stats"] = archive_day_stats(archive_load_rows())
+            try:
+                st["stats"] = archive_day_stats(archive_load_rows())
+                # أيام كل ملفاتها مقدرناش نقراها كانت مختفية من القايمة؛ بنظهرها بصفر وبعلامة "ناقص" عشان تتعاد أرشفتها
+                have = {x["day"] for x in st["stats"]}
+                for _d, _c in archive_unread_by_day().items():
+                    if _d not in have:
+                        st["stats"].append({"day": _d, "ops": 0, "total": 0.0, "manual": 0, "void": 0,
+                                            "dup": 0, "missing": _c})
+                st["stats"].sort(key=lambda x: x["day"], reverse=True)
             except Exception as e:
                 log_exception("archive_history_load", e)
                 st["stats"] = []
@@ -9930,6 +10156,8 @@ class CustomTkinterApp(ctk.CTk):
         _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "#059669", "#047857", d_excel, 150)
         _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "#0F766E", "#115E59", d_summary, 160)
         _b(T2("📂 فولدر اليوم", "📂 Day folder"), "#4338CA", "#3730A3", d_folder, 140)
+        _b(T2("♻️ إعادة أرشفة اليوم", "♻️ Re-archive day"), "#DC2626", "#B91C1C",
+           lambda: run_rearchive([st["iso"]] if st["iso"] else []), 170)
 
         # ---------- بحث وفلتر معاملات اليوم ----------
         search_row = ctk.CTkFrame(right, corner_radius=10, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
@@ -10121,6 +10349,8 @@ class CustomTkinterApp(ctk.CTk):
         day_menu.add_command(label=T2("📊 إكسيل اليوم", "📊 Day Excel"), command=d_excel)
         day_menu.add_command(label=T2("📄 إيصال السمري", "📄 Summary receipt"), command=d_summary)
         day_menu.add_command(label=T2("📂 فولدر اليوم", "📂 Day folder"), command=d_folder)
+        day_menu.add_command(label=T2("♻️ إعادة أرشفة اليوم ده", "♻️ Re-archive this day"),
+                             command=lambda: run_rearchive([st["iso"]] if st["iso"] else []))
         def _dpop(ev):
             it = day_tree.identify_row(ev.y)
             if it:
