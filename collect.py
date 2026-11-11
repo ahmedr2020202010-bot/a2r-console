@@ -9151,6 +9151,8 @@ class CustomTkinterApp(ctk.CTk):
             log_exception("start_archive_maintenance", e)
 
     def open_archive_history(self):
+        """سجل الأرشيف (للمشرف): كل الأيام على الشمال، واختيار يوم بيعرض كل معاملاته على اليمين في نفس النافذة
+        (إجمالي اليوم + عدد المعاملات + إكسيل اليوم + إيصال السمري). نافذة Records Viewer بقت لليوم الحالي بس."""
         if not getattr(self, "is_supervisor", False):
             messagebox.showwarning(T2("غير مسموح", "Not allowed"), T2("هذه الأداة للمشرف فقط.", "Supervisor only."))
             return
@@ -9164,13 +9166,16 @@ class CustomTkinterApp(ctk.CTk):
         win.title(T2("📚 سجل الأرشيف", "📚 Archive History"))
         win.resizable(True, True)
         set_window_icon_safe(win)
-        center_window_relative(win, self, 1100, 650)
+        _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        center_window_relative(win, self, min(1320, _sw - 40), min(720, _sh - 110))
+        win.minsize(min(1000, _sw - 40), 520)
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("open_archive_history#1", _e)
 
         ALL = T2("الكل", "All")
-        st = {"stats": [], "debounce": None}
+        st = {"stats": [], "debounce": None, "iso": None, "recs": [], "recs_iso": None,
+              "load_id": 0, "cache": {}, "sel_job": None}
 
         # ---------- شريط الحالة والأدوات ----------
         bar = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
@@ -9195,6 +9200,7 @@ class CustomTkinterApp(ctk.CTk):
                     else:
                         _set_status(T2(f"تم ✓ — جديد: {res[0]} | منسوخ للنسخة الاحتياطية: {res[1]}",
                                        f"Done ✓ — new: {res[0]} | backed up: {res[1]}"))
+                    st["cache"].clear()
                     load_days()
                 self.after(0, fin)
             _set_status(T2("جاري الفحص...", "Scanning..."))
@@ -9204,6 +9210,33 @@ class CustomTkinterApp(ctk.CTk):
             if os.path.isdir(ARCHIVE_BACKUP_DIR): os.startfile(ARCHIVE_BACKUP_DIR)
             else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."))
 
+        bf = {"running": False}
+        def backfill_all():
+            if bf["running"]: return
+            if not messagebox.askyesno(T2("إنشاء الإكسيل للأيام الناقصة", "Build missing day Excels"),
+                                       T2("هيتعمل ملف إكسيل لكل يوم مؤرشف ملوش إكسيل (الأيام القديمة).\nممكن ياخد وقت حسب عدد الأيام. تكمّل؟",
+                                          "An Excel file will be built for every archived day that has none (old days).\nThis may take a while. Continue?")):
+                return
+            bf["running"] = True
+            def prog(i, n):
+                self.after(0, lambda: _set_status(T2(f"جاري إنشاء الإكسيل... {i}/{n}", f"Building Excel files... {i}/{n}")))
+            def work():
+                try: n = archive_backfill_excels(folder, prog)
+                except Exception as e:
+                    log_exception("archive_backfill_all", e)
+                    n = -1
+                def fin():
+                    bf["running"] = False
+                    if not win.winfo_exists(): return
+                    if n < 0: _set_status(T2("حصل خطأ أثناء إنشاء الإكسيل.", "Error while building Excel files."))
+                    else: _set_status(T2(f"تم ✓ — اتعمل إكسيل لـ {n} يوم", f"Done ✓ — built Excel for {n} day(s)"))
+                self.after(0, fin)
+            _set_status(T2("جاري الفحص...", "Scanning..."))
+            threading.Thread(target=work, daemon=True).start()
+
+        ctk.CTkButton(bar, text=T2("🛠️ إكسيل الأيام الناقصة", "🛠️ Build missing Excels"), font=FONT_BTN_SUB, width=170, height=30,
+                      fg_color="#B45309", hover_color="#92400E", text_color="#FFFFFF",
+                      command=backfill_all).pack(side="right", padx=4, pady=6)
         ctk.CTkButton(bar, text=T2("🔄 تحديث + نسخ احتياطي", "🔄 Refresh + Backup"), font=FONT_BTN_SUB, width=160, height=30,
                       fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
                       command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
@@ -9242,61 +9275,48 @@ class CustomTkinterApp(ctk.CTk):
 
         tv = ctk.CTkTabview(win, fg_color=t["bg"])
         tv.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-        tab_pick = tv.add(T2("🗓️ عرض يوم محدد", "🗓️ Pick a Day"))
-        tab_days = tv.add(T2("📅 الأيام", "📅 Days"))
-        tab_search = tv.add(T2("🔎 بحث عام في الأرشيف", "🔎 Global Search"))
+        TAB_DAYS = T2("📅 الأيام والمعاملات", "📅 Days & Transactions")
+        TAB_SEARCH = T2("🔎 بحث عام في الأرشيف", "🔎 Global Search")
+        tab_days = tv.add(TAB_DAYS)
+        tab_search = tv.add(TAB_SEARCH)
 
-        # ================= تبويب الأيام =================
-        f1 = ctk.CTkFrame(tab_days, fg_color="transparent")
+        # ================= تبويب الأيام والمعاملات (شمال: الأيام | يمين: معاملات اليوم المختار) =================
+        body = ctk.CTkFrame(tab_days, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        left = ctk.CTkFrame(body, fg_color="transparent", width=400)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.pack_propagate(False)
+        right = ctk.CTkFrame(body, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew")
+
+        # ---------- الشمال: قائمة كل الأيام ----------
+        f1 = ctk.CTkFrame(left, fg_color="transparent")
         f1.pack(fill="x", pady=(2, 2))
-        day_q = ctk.CTkEntry(f1, placeholder_text=T2("ابحث عن يوم (مثال: 15-10-2026 أو 2026-10)", "Find a day (e.g. 2026-10-15)"),
-                             width=270, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        day_q = ctk.CTkEntry(f1, placeholder_text=T2("ابحث عن يوم (15-10-2026)", "Find a day (2026-10-15)"),
+                             width=200, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         day_q.pack(side="left", padx=(0, 6))
         attach_context_menu(day_q)
-        ctk.CTkLabel(f1, text=T2("الشهر:", "Month:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(6, 2))
         cb_month = ctk.CTkComboBox(f1, values=[ALL], width=110, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"],
                                    command=lambda v: apply_days())
         cb_month.set(ALL)
         cb_month.pack(side="left", padx=2)
-        ctk.CTkLabel(f1, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(8, 2))
-        from_e = ctk.CTkEntry(f1, placeholder_text="YYYY-MM-DD", width=105, font=FONT_ENTRY, text_color=t["text"],
-                              fg_color=t["input"], border_color=t["border"])
-        from_e.pack(side="left", padx=2)
-        ctk.CTkLabel(f1, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(6, 2))
-        to_e = ctk.CTkEntry(f1, placeholder_text="YYYY-MM-DD", width=105, font=FONT_ENTRY, text_color=t["text"],
-                            fg_color=t["input"], border_color=t["border"])
-        to_e.pack(side="left", padx=2)
 
         def clear_filters():
-            for e in (day_q, from_e, to_e): e.delete(0, "end")
+            day_q.delete(0, "end")
             cb_month.set(ALL)
             apply_days()
-        ctk.CTkButton(f1, text=T2("مسح الفلاتر", "Clear"), width=80, height=28, font=FONT_BTN_SUB,
-                      fg_color="#64748B", hover_color="#475569", text_color="#FFFFFF",
-                      command=clear_filters).pack(side="left", padx=8)
+        ctk.CTkButton(f1, text="✖", width=34, height=28, font=FONT_BTN_SUB, fg_color="#64748B", hover_color="#475569",
+                      text_color="#FFFFFF", command=clear_filters).pack(side="left", padx=4)
 
-        day_cols = ("date", "ops", "total", "manual", "void", "dup", "missing")
-        day_hdr = {"date": T2("التاريخ", "Date"), "ops": T2("عدد المعاملات", "Transactions"),
-                   "total": T2("إجمالي المبلغ", "Total Amount"), "manual": T2("يدوي", "Manual"),
-                   "void": T2("ملغي", "Void"), "dup": T2("مكرر", "Duplicates"), "missing": T2("ناقص", "Incomplete")}
-        day_tree = make_tree(tab_days, day_cols, day_hdr,
-                             {"date": 140, "ops": 120, "total": 160, "manual": 80, "void": 80, "dup": 90, "missing": 90})
-        sum_lbl = ctk.CTkLabel(tab_days, text="", font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"])
+        day_cols = ("date", "ops", "total")
+        day_hdr = {"date": T2("التاريخ", "Date"), "ops": T2("المعاملات", "Tx"), "total": T2("إجمالي المبلغ", "Total")}
+        day_tree = make_tree(left, day_cols, day_hdr, {"date": 120, "ops": 80, "total": 150})
+        sum_lbl = ctk.CTkLabel(left, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], justify="left")
         sum_lbl.pack(anchor="w", padx=8, pady=(2, 0))
-        ctk.CTkLabel(tab_days, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص    •  دبل كليك لعرض معاملات اليوم بالمبالغ والتفاصيل",
-                                       "🟥 has duplicates   🟨 has incomplete  •  double-click to view the day's transactions"),
-                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8)
-        day_btns = ctk.CTkFrame(tab_days, fg_color="transparent")
-        day_btns.pack(fill="x", padx=6, pady=(4, 0))
-        ctk.CTkButton(day_btns, text=T2("📋 عرض معاملات اليوم المختار", "📋 View selected day"), font=FONT_BTN_SUB, width=200, height=30,
-                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
-                      command=lambda: view_day_records()).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(day_btns, text=T2("📄 ملخص اليوم", "📄 Day summary"), font=FONT_BTN_SUB, width=130, height=30,
-                      fg_color="#0F766E", hover_color="#115E59", text_color="#FFFFFF",
-                      command=lambda: open_selected_day()).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(day_btns, text=T2("📂 فولدر اليوم", "📂 Day folder"), font=FONT_BTN_SUB, width=130, height=30,
-                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF",
-                      command=lambda: open_selected_day(folder_only=True)).pack(side="left")
+        ctk.CTkLabel(left, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص", "🟥 has duplicates   🟨 has incomplete"),
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8, pady=(0, 2))
 
         sort_state = {"col": "date", "rev": True}
         def sort_days(col):
@@ -9309,13 +9329,10 @@ class CustomTkinterApp(ctk.CTk):
         def apply_days(*_):
             q = day_q.get().strip()
             mval = cb_month.get()
-            d_from, d_to = parse_flex_date(from_e.get()), parse_flex_date(to_e.get())
             items = []
             for s in st["stats"]:
                 day = s["day"]
                 if mval != ALL and not day.startswith(mval): continue
-                if d_from and day < d_from.isoformat(): continue
-                if d_to and day > d_to.isoformat(): continue
                 if q:
                     y, m, d = day.split("-")
                     hay = f"{day} {d}-{m}-{y} {d}/{m}/{y}"
@@ -9323,17 +9340,20 @@ class CustomTkinterApp(ctk.CTk):
                 items.append(s)
             key = sort_state["col"]
             items.sort(key=lambda s: s["day"] if key == "date" else s[key], reverse=sort_state["rev"])
+            keep = st["iso"]
             day_tree.delete(*day_tree.get_children())
             for s in items:
                 y, m, d = s["day"].split("-")
                 tag = "dup" if s["dup"] else ("missing" if s["missing"] else "")
                 day_tree.insert("", "end", iid=s["day"], tags=(tag,) if tag else (),
-                                values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}",
-                                        s["manual"], s["void"], s["dup"], s["missing"]))
+                                values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}"))
+            if keep and day_tree.exists(keep):
+                day_tree.selection_set(keep)
+                day_tree.see(keep)
             tot_ops = sum(s["ops"] for s in items)
             tot_amt = sum(s["total"] for s in items)
-            sum_lbl.configure(text=T2(f"الأيام: {len(items)}   |   إجمالي المعاملات: {tot_ops:,}   |   إجمالي المبلغ: {tot_amt:,.2f} جنيه",
-                                      f"Days: {len(items)}  |  Transactions: {tot_ops:,}  |  Total: {tot_amt:,.2f} EGP"))
+            sum_lbl.configure(text=T2(f"الأيام: {len(items)}  |  المعاملات: {tot_ops:,}\nالإجمالي: {tot_amt:,.2f} جنيه",
+                                      f"Days: {len(items)}  |  Tx: {tot_ops:,}\nTotal: {tot_amt:,.2f} EGP"))
 
         def load_days():
             try: st["stats"] = archive_day_stats(archive_load_rows())
@@ -9343,39 +9363,286 @@ class CustomTkinterApp(ctk.CTk):
             months = sorted({s["day"][:7] for s in st["stats"]}, reverse=True)
             cb_month.configure(values=[ALL] + months)
             if cb_month.get() not in [ALL] + months: cb_month.set(ALL)
-            try: pk_rebuild()
-            except Exception as _e: log_exception("pk_rebuild", _e)
             apply_days()
 
-        def view_day_records(event=None):
-            sel = day_tree.selection()
-            if sel: self.open_day_records(sel[0])
+        for e in (day_q,): e.bind("<KeyRelease>", apply_days)
 
-        def open_selected_day(event=None, folder_only=False):
-            sel = day_tree.selection()
-            if not sel: return
-            try: dd = datetime.date.fromisoformat(sel[0])
-            except Exception: return
-            dfolder = archive_day_dir(folder, dd)
-            if not os.path.isdir(dfolder):
-                messagebox.showerror(T2("غير موجود", "Not found"), dfolder)
+        # ---------- اليمين: بطاقة اليوم المختار ----------
+        hdr = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+        hdr.pack(fill="x", pady=(2, 0))
+        day_title = ctk.CTkLabel(hdr, text=T2("👈 اختار يوم من القائمة لعرض معاملاته", "👈 Pick a day from the list"),
+                                 font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"])
+        day_title.pack(side="left", padx=14, pady=8)
+
+        cards = ctk.CTkFrame(right, fg_color="transparent")
+        cards.pack(fill="x", pady=(6, 2))
+        card_lbls = {}
+        def mk_card(key, title, color):
+            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f.pack(side="left", fill="x", expand=True, padx=4)
+            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
+            lb = ctk.CTkLabel(f, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            card_lbls[key] = lb
+        mk_card("total", T2("إجمالي اليوم (الصافي)", "Day total (net)"), t["success"])
+        mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
+        mk_card("void", T2("ملغي", "Void"), t["danger"])
+        mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
+
+        # ---------- أزرار اليوم ----------
+        def day_folder_of(iso):
+            dd = datetime.date.fromisoformat(iso)
+            f = archive_day_dir(folder, dd)
+            if not os.path.isdir(f): f = archive_day_folder_from_index(iso) or f
+            return dd, f
+
+        def d_excel():
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            if not os.path.isdir(f):
+                messagebox.showerror(T2("غير موجود", "Not found"), f)
                 return
-            pdfs = sorted(glob.glob(os.path.join(dfolder, "Samary_*.pdf")))
-            if pdfs and not folder_only: os.startfile(pdfs[0])
-            else: os.startfile(dfolder)
+            xp = archive_day_excel_path(f, dd)
+            if os.path.exists(xp):
+                os.startfile(xp)
+                return
+            recs = list(st["recs"]) if st["recs_iso"] == iso and st["recs"] else None
+            _set_status(T2("جاري إنشاء إكسيل اليوم...", "Building day Excel..."))
+            def work():
+                res = archive_write_day_excel(f, dd, recs)
+                def fin():
+                    if not win.winfo_exists(): return
+                    if res and os.path.exists(res):
+                        _set_status(T2("تم إنشاء إكسيل اليوم ✓", "Day Excel built ✓"))
+                        os.startfile(res)
+                    else:
+                        _set_status("")
+                        messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."))
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
 
-        day_tree.bind("<Double-1>", view_day_records)
-        dmenu = tk.Menu(day_tree, tearoff=0)
-        dmenu.add_command(label=T2("📋 عرض معاملات اليوم (بكل البيانات)", "📋 View day transactions"), command=view_day_records)
-        dmenu.add_command(label=T2("📄 فتح ملخص اليوم", "📄 Open day summary"), command=open_selected_day)
-        dmenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_selected_day(folder_only=True))
+        def d_summary():
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            pdfs = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
+            if pdfs: os.startfile(pdfs[0])
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."))
+
+        def d_folder():
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            if os.path.isdir(f): os.startfile(f)
+            else: messagebox.showerror(T2("غير موجود", "Not found"), f)
+
+        btn_row = ctk.CTkFrame(right, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(4, 2))
+        def _b(text, color, hover, cmd, w=140):
+            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover,
+                          text_color="#FFFFFF", width=w, height=32, command=cmd).pack(side="left", padx=(0, 6), pady=2)
+        _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "#059669", "#047857", d_excel, 150)
+        _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "#0F766E", "#115E59", d_summary, 160)
+        _b(T2("📂 فولدر اليوم", "📂 Day folder"), "#4338CA", "#3730A3", d_folder, 140)
+
+        # ---------- بحث وفلتر معاملات اليوم ----------
+        search_row = ctk.CTkFrame(right, corner_radius=10, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row.pack(fill="x", pady=(4, 4))
+        tx_q = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
+                            text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        tx_q.pack(side="left", padx=8, pady=6)
+        attach_context_menu(tx_q)
+        ALL_ST = T2("كل الحالات", "All statuses")
+        status_map = {
+            T2("سليم", "OK"): {"ok"}, T2("يدوي", "Manual"): {"manual"},
+            T2("مكرر", "Duplicate"): {"dup"}, T2("ملغي", "Void"): {"void"},
+            T2("ناقص / وحدة أخرى", "Incomplete / other unit"): {"missing", "wrong"},
+        }
+        cb_status = ctk.CTkComboBox(search_row, values=[ALL_ST] + list(status_map.keys()), width=170, font=FONT_ENTRY,
+                                    fg_color=t["input"], border_color=t["border"], state="readonly",
+                                    command=lambda v: refresh_tx())
+        cb_status.set(ALL_ST)
+        cb_status.pack(side="left", padx=(0, 6), pady=6)
+        tx_count = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        tx_count.pack(side="right", padx=14)
+
+        # ---------- جدول معاملات اليوم ----------
+        tree_frame = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame.pack(fill="both", expand=True, pady=(0, 2))
+        columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
+        headers = {
+            "idx": tr("col_idx"), "unit": tr("col_unit"), "plate": tr("col_plate"),
+            "insured": tr("col_insured"), "amount": tr("col_amount"), "time": tr("col_time"),
+            "make": tr("col_make"), "model": tr("col_model"), "chassis": tr("col_chassis"),
+            "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
+        }
+        tx_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="A2R.Treeview")
+        _COL_W = {"idx": 42, "unit": 125, "plate": 120, "insured": 190, "amount": 85, "time": 135, "make": 85,
+                  "model": 85, "chassis": 140, "motor": 105, "period": 185, "file": 190, "status": 125}
+        sort_dirs = {}
+        def sort_tx(col):
+            recs = st["recs"]
+            reverse = sort_dirs.get(col, False)
+            sort_dirs[col] = not reverse
+            if col == "amount":
+                recs.sort(key=lambda r: float(r["amount"]), reverse=reverse)
+            elif col in ("idx", "time"):
+                recs.sort(key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=reverse)
+            else:
+                k = "status_text" if col == "status" else col
+                recs.sort(key=lambda r: str(r.get(k, "")), reverse=reverse)
+            refresh_tx()
+        for col in columns:
+            tx_tree.heading(col, text=headers.get(col, col), command=lambda c=col: sort_tx(c))
+            tx_tree.column(col, width=_COL_W.get(col, 90), anchor="center", stretch=(col in ("insured", "file")))
+        for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
+            tx_tree.tag_configure(kind, background=bg, foreground=fg)
+        tx_vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tx_tree.yview)
+        tx_vsb.pack(side="right", fill="y", padx=2, pady=2)
+        tx_hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tx_tree.xview)
+        tx_hsb.pack(side="bottom", fill="x", padx=2, pady=2)
+        tx_tree.configure(yscrollcommand=tx_vsb.set, xscrollcommand=tx_hsb.set)
+        tx_tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
+
+        def _sel_rec():
+            sel = tx_tree.selection()
+            if not sel: return None
+            try: return st["recs"][int(sel[0])]
+            except Exception: return None
+
+        def open_receipt(event=None):
+            rec = _sel_rec()
+            if not rec: return
+            fpath = rec.get("path", "")
+            if fpath and os.path.exists(fpath): os.startfile(fpath)
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}")
+
+        def reprint_receipt():
+            rec = _sel_rec()
+            if not rec: return
+            try: self.reprint_receipt_record(rec)
+            except Exception as e: messagebox.showerror("Error", str(e))
+
+        def open_receipt_folder():
+            rec = _sel_rec()
+            p = rec.get("path", "") if rec else ""
+            if p and os.path.exists(p): os.startfile(os.path.dirname(p))
+            else: d_folder()
+
+        tx_tree.bind("<Double-1>", open_receipt)
+        row_menu = tk.Menu(tx_tree, tearoff=0)
+        row_menu.add_command(label=tr("menu_open_file"), command=open_receipt)
+        row_menu.add_command(label=tr("menu_reprint"), command=reprint_receipt)
+        row_menu.add_command(label=T2("📂 فتح الفولدر", "📂 Open folder"), command=open_receipt_folder)
+        def _tx_pop(ev):
+            it = tx_tree.identify_row(ev.y)
+            if it:
+                tx_tree.selection_set(it)
+                row_menu.tk_popup(ev.x_root, ev.y_root)
+        tx_tree.bind("<Button-3>", _tx_pop)
+
+        ctk.CTkLabel(right, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                    "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+                     font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=8, pady=(0, 2))
+
+        def refresh_tx(*_):
+            recs = st["recs"]
+            q = tx_q.get().strip().lower()
+            kinds = status_map.get(cb_status.get())
+            tx_tree.delete(*tx_tree.get_children())
+            shown = 0
+            for i, r in enumerate(recs):
+                if kinds and r.get("kind") not in kinds: continue
+                if q:
+                    full_s = f"{r['unit']} {r['plate']} {r['insured']} {r['time']} {r['chassis']} {r['motor']} {r['make']} {r['model']} {r['file']} {r['status_text']} {r['amount']:.2f}".lower()
+                    if q not in full_s: continue
+                vals = (i + 1, r["unit"], r["plate"], r["insured"], f"{r['amount']:.2f}", r["time"],
+                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
+                tx_tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
+                shown += 1
+            tx_count.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
+
+        def show_day_summary_cards():
+            recs = st["recs"]
+            tot, cnt = counted_totals(recs)
+            card_lbls["total"].configure(text=f"{tot:,.2f}")
+            card_lbls["count"].configure(text=f"{cnt:,}")
+            card_lbls["void"].configure(text=str(sum(1 for r in recs if r.get("is_void"))))
+            card_lbls["dup"].configure(text=str(sum(1 for r in recs if r.get("kind") == "dup")))
+
+        def clear_day_view(msg=None):
+            st["recs"], st["recs_iso"] = [], None
+            tx_tree.delete(*tx_tree.get_children())
+            for k in card_lbls: card_lbls[k].configure(text="-")
+            tx_count.configure(text="")
+            if msg is not None: day_title.configure(text=msg)
+
+        def show_day(iso):
+            """يعرض معاملات اليوم المختار في نفس النافذة (تحميل في الخلفية + كاش)."""
+            st["iso"] = iso
+            st["load_id"] += 1
+            my_id = st["load_id"]
+            y, m, d = iso.split("-")
+            title = T2(f"📅 يوم {d}-{m}-{y}", f"📅 Day {d}-{m}-{y}")
+            if iso in st["cache"]:
+                st["recs"], st["recs_iso"] = st["cache"][iso], iso
+                day_title.configure(text=title)
+                show_day_summary_cards()
+                refresh_tx()
+                return
+            clear_day_view(title + T2("   ⏳ جاري تحميل المعاملات...", "   ⏳ Loading transactions..."))
+            try: dd, f = day_folder_of(iso)
+            except Exception: return
+            if not os.path.isdir(f):
+                day_title.configure(text=title + T2("   ⚠️ الفولدر غير موجود", "   ⚠️ Folder not found"))
+                return
+            def work():
+                try: recs = load_archive_day_records(f, dd)
+                except Exception as e:
+                    log_exception("archive_show_day", e)
+                    recs = []
+                def fin():
+                    if not win.winfo_exists() or my_id != st["load_id"]: return
+                    st["cache"][iso] = recs
+                    st["recs"], st["recs_iso"] = recs, iso
+                    day_title.configure(text=title if recs else title + T2("   (لا توجد معاملات)", "   (no transactions)"))
+                    show_day_summary_cards()
+                    refresh_tx()
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        def on_day_select(event=None):
+            sel = day_tree.selection()
+            if not sel or sel[0] == st["iso"] and st["recs_iso"] == st["iso"]: return
+            if st["sel_job"]:
+                try: win.after_cancel(st["sel_job"])
+                except Exception as _e: _log_silent("on_day_select#1", _e)
+            iso = sel[0]
+            st["sel_job"] = win.after(150, lambda: show_day(iso))   # تأخير بسيط لو بتتنقل بالأسهم بسرعة
+        day_tree.bind("<<TreeviewSelect>>", on_day_select)
+
+        def goto_day(iso):
+            tv.set(TAB_DAYS)
+            clear_filters()
+            if day_tree.exists(iso):
+                day_tree.selection_set(iso)
+                day_tree.see(iso)
+                show_day(iso)
+
+        tx_q.bind("<KeyRelease>", refresh_tx)
+        day_menu = tk.Menu(day_tree, tearoff=0)
+        day_menu.add_command(label=T2("📊 إكسيل اليوم", "📊 Day Excel"), command=d_excel)
+        day_menu.add_command(label=T2("📄 إيصال السمري", "📄 Summary receipt"), command=d_summary)
+        day_menu.add_command(label=T2("📂 فولدر اليوم", "📂 Day folder"), command=d_folder)
         def _dpop(ev):
             it = day_tree.identify_row(ev.y)
             if it:
                 day_tree.selection_set(it)
-                dmenu.tk_popup(ev.x_root, ev.y_root)
+                show_day(it)
+                day_menu.tk_popup(ev.x_root, ev.y_root)
         day_tree.bind("<Button-3>", _dpop)
-        for e in (day_q, from_e, to_e): e.bind("<KeyRelease>", apply_days)
 
         # ================= تبويب البحث العام =================
         f2 = ctk.CTkFrame(tab_search, fg_color="transparent")
@@ -9450,7 +9717,7 @@ class CustomTkinterApp(ctk.CTk):
         smenu.add_command(label=T2("📂 فتح فولدر اليوم", "📂 Open day folder"), command=lambda: open_result(folder_only=True))
         def view_result_day():
             sel = s_tree.selection()
-            if sel and s_days.get(sel[0]): self.open_day_records(s_days[sel[0]])
+            if sel and s_days.get(sel[0]): goto_day(s_days[sel[0]])
         smenu.add_command(label=T2("📋 عرض كل معاملات اليوم ده", "📋 View all transactions of this day"), command=view_result_day)
         def _spop(ev):
             it = s_tree.identify_row(ev.y)
@@ -9458,174 +9725,6 @@ class CustomTkinterApp(ctk.CTk):
                 s_tree.selection_set(it)
                 smenu.tk_popup(ev.x_root, ev.y_root)
         s_tree.bind("<Button-3>", _spop)
-
-        # ================= تبويب عرض يوم محدد (سنة / شهر / يوم) =================
-        MONTH_AR = {1: "يناير", 2: "فبراير", 3: "مارس", 4: "أبريل", 5: "مايو", 6: "يونيو",
-                    7: "يوليو", 8: "أغسطس", 9: "سبتمبر", 10: "أكتوبر", 11: "نوفمبر", 12: "ديسمبر"}
-        MONTH_EN = {i: datetime.date(2000, i, 1).strftime("%b") for i in range(1, 13)}
-        pk = {"tree": {}}
-
-        pk_card = ctk.CTkFrame(tab_pick, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        pk_card.pack(fill="x", padx=2, pady=(8, 6))
-        ctk.CTkLabel(pk_card, text=T2("اختار اليوم اللي عايز تراجعه بالتفصيل:", "Choose the day to review in detail:"),
-                     font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"]).pack(anchor="w", padx=14, pady=(10, 4))
-        pk_row = ctk.CTkFrame(pk_card, fg_color="transparent")
-        pk_row.pack(fill="x", padx=10, pady=(0, 10))
-
-        def _pk_combo(label, w, cmd):
-            ctk.CTkLabel(pk_row, text=label, font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(10, 2))
-            cb = ctk.CTkComboBox(pk_row, values=[""], width=w, font=FONT_ENTRY, fg_color=t["input"],
-                                 border_color=t["border"], state="readonly", command=cmd)
-            cb.pack(side="left", padx=2)
-            return cb
-        cb_py = _pk_combo(T2("السنة:", "Year:"), 95, lambda v: pk_year_changed())
-        cb_pm = _pk_combo(T2("الشهر:", "Month:"), 140, lambda v: pk_month_changed())
-        cb_pd = _pk_combo(T2("اليوم:", "Day:"), 170, lambda v: pk_day_changed())
-
-        pk_info = ctk.CTkLabel(tab_pick, text="", font=(FONT_FAMILY, 13, "bold"), text_color=t["text"], justify="left")
-        pk_info.pack(anchor="w", padx=12, pady=(6, 4))
-
-        pk_btns = ctk.CTkFrame(tab_pick, fg_color="transparent")
-        pk_btns.pack(fill="x", padx=6, pady=(4, 4))
-        def _pkb(text, color, hover, cmd, w=190):
-            ctk.CTkButton(pk_btns, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover, text_color="#FFFFFF",
-                          width=w, height=34, command=cmd).pack(side="left", padx=(0, 6), pady=2)
-        _pkb(T2("📋 عرض كل معاملات اليوم", "📋 View day transactions"), t["primary"], t["primary_hover"], lambda: pk_view(), 210)
-        _pkb(T2("📊 إكسيل اليوم", "📊 Day Excel"), "#059669", "#047857", lambda: pk_excel(), 150)
-        _pkb(T2("📄 ملخص اليوم", "📄 Day summary"), "#0F766E", "#115E59", lambda: pk_summary(), 140)
-        _pkb(T2("📂 فولدر اليوم", "📂 Day folder"), "#4338CA", "#3730A3", lambda: pk_folder(), 140)
-
-        ctk.CTkFrame(tab_pick, height=1, fg_color=t["border"]).pack(fill="x", padx=10, pady=(14, 8))
-        ctk.CTkLabel(tab_pick, text=T2("الأيام القديمة المؤرشفة قبل التحديث ممكن معندهاش ملف إكسيل:",
-                                        "Days archived before this update may have no Excel file:"),
-                     font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12)
-        pk_back_row = ctk.CTkFrame(tab_pick, fg_color="transparent")
-        pk_back_row.pack(fill="x", padx=6, pady=(4, 0))
-        ctk.CTkButton(pk_back_row, text=T2("🛠️ إنشاء الإكسيل للأيام الناقصة", "🛠️ Build Excel for missing days"),
-                      font=FONT_BTN_SUB, fg_color="#B45309", hover_color="#92400E", text_color="#FFFFFF",
-                      width=260, height=32, command=lambda: pk_backfill()).pack(side="left", padx=(0, 6))
-
-        def _mlabel(m):
-            mi = int(m)
-            return f"{m} · {MONTH_AR[mi] if CURRENT_LANG == 'ar' else MONTH_EN[mi]}"
-
-        def _val(label):
-            return (label or "").split("·")[0].strip()
-
-        def pk_rebuild():
-            tree = {}
-            for s in st["stats"]:
-                y, m, d = s["day"].split("-")
-                tree.setdefault(y, {}).setdefault(m, {})[d] = s
-            pk["tree"] = tree
-            years = sorted(tree, reverse=True)
-            prev = cb_py.get()
-            cb_py.configure(values=years or [""])
-            cb_py.set(prev if prev in years else (years[0] if years else ""))
-            pk_year_changed()
-
-        def pk_year_changed(*_):
-            months = sorted(pk["tree"].get(cb_py.get(), {}), reverse=True)
-            labels = [_mlabel(m) for m in months]
-            prev = cb_pm.get()
-            cb_pm.configure(values=labels or [""])
-            cb_pm.set(prev if prev in labels else (labels[0] if labels else ""))
-            pk_month_changed()
-
-        def pk_month_changed(*_):
-            days = pk["tree"].get(cb_py.get(), {}).get(_val(cb_pm.get()), {})
-            labels = [f"{d} · {days[d]['ops']:,} " + T2("معاملة", "tx") for d in sorted(days, reverse=True)]
-            prev = _val(cb_pd.get())
-            cb_pd.configure(values=labels or [""])
-            pick = next((l for l in labels if _val(l) == prev), labels[0] if labels else "")
-            cb_pd.set(pick)
-            pk_day_changed()
-
-        def pk_selected_iso():
-            y, m, d = cb_py.get(), _val(cb_pm.get()), _val(cb_pd.get())
-            if y and m and d and d in pk["tree"].get(y, {}).get(m, {}): return f"{y}-{m}-{d}"
-            return None
-
-        def pk_day_folder(iso):
-            dd = datetime.date.fromisoformat(iso)
-            f = archive_day_dir(folder, dd)
-            if not os.path.isdir(f): f = archive_day_folder_from_index(iso) or f
-            return dd, f
-
-        def pk_day_changed(*_):
-            iso = pk_selected_iso()
-            if not iso:
-                pk_info.configure(text=T2("لا توجد أيام مؤرشفة بعد.", "No archived days yet."))
-                return
-            s = pk["tree"][iso[:4]][iso[5:7]][iso[8:]]
-            dd, f = pk_day_folder(iso)
-            has_x = os.path.exists(archive_day_excel_path(f, dd))
-            pk_info.configure(text=T2(
-                f"📅 {iso[8:]}-{iso[5:7]}-{iso[:4]}\n"
-                f"المعاملات: {s['ops']:,}   |   الإجمالي: {s['total']:,.2f} جنيه\n"
-                f"يدوي: {s['manual']}   |   ملغي: {s['void']}   |   مكرر: {s['dup']}   |   ناقص: {s['missing']}\n"
-                f"إكسيل اليوم: {'✅ موجود' if has_x else '⚠️ لسه متعملش (اضغط 📊 وهيتعمل)'}",
-                f"📅 {iso}\nTransactions: {s['ops']:,}  |  Total: {s['total']:,.2f} EGP\n"
-                f"Manual: {s['manual']}  |  Void: {s['void']}  |  Dup: {s['dup']}  |  Incomplete: {s['missing']}\n"
-                f"Day Excel: {'✅ exists' if has_x else '⚠️ not built yet (press 📊 to build)'}"))
-
-        def pk_view():
-            iso = pk_selected_iso()
-            if iso: self.open_day_records(iso)
-
-        def pk_excel():
-            iso = pk_selected_iso()
-            if not iso: return
-            dd, f = pk_day_folder(iso)
-            if not os.path.isdir(f):
-                messagebox.showerror(T2("غير موجود", "Not found"), f)
-                return
-            xp = archive_day_excel_path(f, dd)
-            if os.path.exists(xp):
-                os.startfile(xp)
-                return
-            _set_status(T2("جاري إنشاء إكسيل اليوم...", "Building day Excel..."))
-            def work():
-                res = archive_write_day_excel(f, dd)
-                def fin():
-                    if not win.winfo_exists(): return
-                    pk_day_changed()
-                    if res and os.path.exists(res):
-                        _set_status(T2("تم إنشاء إكسيل اليوم ✓", "Day Excel built ✓"))
-                        os.startfile(res)
-                    else:
-                        _set_status("")
-                        messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."))
-                self.after(0, fin)
-            threading.Thread(target=work, daemon=True).start()
-
-        def pk_summary():
-            iso = pk_selected_iso()
-            if not iso: return
-            dd, f = pk_day_folder(iso)
-            pdfs = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
-            if pdfs: os.startfile(pdfs[0])
-            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد ملخص لهذا اليوم.", "No summary for this day."))
-
-        def pk_folder():
-            iso = pk_selected_iso()
-            if not iso: return
-            dd, f = pk_day_folder(iso)
-            if os.path.isdir(f): os.startfile(f)
-            else: messagebox.showerror(T2("غير موجود", "Not found"), f)
-
-        def pk_backfill():
-            def prog(i, n):
-                self.after(0, lambda: _set_status(T2(f"جاري إنشاء الإكسيل... {i}/{n}", f"Building Excel files... {i}/{n}")))
-            def work():
-                n = archive_backfill_excels(folder, prog)
-                def fin():
-                    if not win.winfo_exists(): return
-                    _set_status(T2(f"تم ✓ — اتعمل إكسيل لـ {n} يوم", f"Done ✓ — built Excel for {n} day(s)"))
-                    pk_day_changed()
-                self.after(0, fin)
-            _set_status(T2("جاري الفحص...", "Scanning..."))
-            threading.Thread(target=work, daemon=True).start()
 
         # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين حدّث في الخلفية
         load_days()
@@ -10044,42 +10143,6 @@ class CustomTkinterApp(ctk.CTk):
             messagebox.showinfo("Notice", tr("no_records_yet"))
             return
         self._records_window(self.last_detailed_records, live=True)
-
-    def open_day_records(self, day_iso):
-        """تفاصيل أي يوم من الأرشيف (كل البيانات والمبالغ) بنفس شكل Records Viewer."""
-        try: dd = datetime.date.fromisoformat(day_iso)
-        except Exception: return
-        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-        dfolder = archive_day_dir(folder, dd)
-        if not os.path.isdir(dfolder):
-            dfolder = archive_day_folder_from_index(day_iso) or dfolder
-        if not os.path.isdir(dfolder):
-            messagebox.showerror(T2("غير موجود", "Not found"), dfolder)
-            return
-
-        t = THEMES[self.current_theme_name]
-        wait = ctk.CTkToplevel(self)
-        wait.title("...")
-        wait.resizable(False, False)
-        center_window_relative(wait, self, 320, 90)
-        wait.configure(fg_color=t["bg"])
-        ctk.CTkLabel(wait, text=T2("⏳ جاري تحميل معاملات اليوم...", "⏳ Loading day transactions..."),
-                     font=FONT_REGULAR_BOLD, text_color=t["accent"]).pack(expand=True)
-
-        def work():
-            try: recs = load_archive_day_records(dfolder, dd)
-            except Exception as e:
-                log_exception("open_day_records", e)
-                recs = []
-            def fin():
-                try: wait.destroy()
-                except Exception as _e: _log_silent("open_day_records#1", _e)
-                if not recs:
-                    messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد معاملات لهذا اليوم.", "No transactions for this day."))
-                    return
-                self._records_window(recs, live=False, day_iso=day_iso, day_folder=dfolder)
-            self.after(0, fin)
-        threading.Thread(target=work, daemon=True).start()
 
     def _records_window(self, records, live=True, day_iso=None, day_folder=None):
         """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
