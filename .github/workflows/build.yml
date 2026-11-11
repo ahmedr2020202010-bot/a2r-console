@@ -101,11 +101,12 @@ jobs:
 
       # نسخة احتياطية من الـ exe تتحمّل من صفحة الـ Run نفسها حتى لو نشر الـ Release فشل
       - name: Upload exe as workflow artifact
+        continue-on-error: true   # لو حصة التخزين خلصت ما يوقفش نشر الـ Release
         uses: actions/upload-artifact@v4
         with:
           name: A2R_Console
           path: dist/A2R_Console.exe
-          retention-days: 14
+          retention-days: 1
 
       # نشر تلقائي في Releases (مفيش حاجة تتعمل يدوي): كل بناء بيتحط له Release باسم build-رقم
       # - من main: Release عادي (Latest). - من أي فرع تانٍ (Run workflow): Pre-release للتجربة.
