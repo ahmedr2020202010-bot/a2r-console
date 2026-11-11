@@ -6695,7 +6695,10 @@ def _fold_ar(t):
     t = t.replace("ى", "ي").replace("ة", "ه")
     return re.sub(r"\s+", " ", t)
 
+_BBOX_LOGGED = False
+
 def run_pdftotext_bbox(path):
+    global _BBOX_LOGGED
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     try:
         res = subprocess.run([PDFTOTEXT_EXE, "-bbox", path, "-"], stdout=subprocess.PIPE,
@@ -6707,6 +6710,9 @@ def run_pdftotext_bbox(path):
     out = res.stdout or ""
     pm = re.search(r'<page\s+width="([\d.]+)"\s+height="([\d.]+)"', out)
     if not pm:
+        if not _BBOX_LOGGED:
+            _BBOX_LOGGED = True
+            log_exception("bbox_empty", f"rc={res.returncode} stdout[:300]={out[:300]!r} stderr[:300]={(res.stderr or '')[:300]!r}")
         return None, None, []
     page_end = out.find("</page>")
     if page_end > 0:
@@ -6983,6 +6989,171 @@ def _dump_parse_debug(path, method, txt, dbg):
     except Exception as e:
         log_exception("dump_parse_debug", e)
 
+# ===== قراءة إضافية لأشكال إيصالات بتفشل فيها القراءة الاحتياطية (بتشتغل بس لو القراءة العادية ما نجحتش) =====
+_INLINE_LABELS = [
+    ("plate", r"رقم\s*(?:المركب[ةه]|اللوح[ةه])"),
+    ("unit", r"وحد[ةه]\s*المرور"),
+    ("insured", r"اسم\s*(?:المواطن|المؤمن\s*له)"),
+    ("chassis", r"رقم\s*الشاسي[ةه]?"),
+    ("motor", r"رقم\s*الموتور"),
+    ("make", r"الماركه|الماركة"),
+    ("model", r"الطراز"),
+    ("amount", r"(?:ال)?مبلغ"),
+    ("printed", r"تمت\s*الطباعة(?:\s*في)?"),
+]
+_VAR_NOISE_RE = re.compile(r"الاستجابة|أعلاه|اعلاه|الشروط|للوثيقة|يرجى|مسح")
+
+def _var_finish(out, txt, tm):
+    out["unit"] = out.get("unit") or detect_unit_from_text(txt) or UNSPEC
+    if not tm:
+        m = TIME_RE.search(txt or "")
+        tm = m.group(0).strip().replace("/", "-") if m else "-"
+    dt = parse_print_time(tm)
+    out["dt"] = dt
+    out["time"] = dt.strftime("%d-%m-%Y %H:%M") if dt else tm
+    return out
+
+def _parse_inline_labeled(txt):
+    """الشكل القديم: كل سطر 'العنوان: القيمة' (رقم المركبة / اسم المواطن / المبلغ ...)."""
+    vals, last = {}, None
+    for raw in (txt or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line:
+            last = None
+            continue
+        hit = None
+        for key, pat in _INLINE_LABELS:
+            m = re.match(r"^" + pat + r"\s*[:：]\s*(.*)$", line)
+            if m:
+                hit = (key, m.group(1).strip())
+                break
+        if hit:
+            key, v = hit
+            vals.setdefault(key, v)
+            last = "insured" if key == "insured" else None
+        elif last == "insured" and ":" not in line and ("تمت" not in line) and not _VAR_NOISE_RE.search(line):
+            vals["insured"] = (vals["insured"] + " " + line).strip()
+        else:
+            last = None
+    if len(vals) < 4 or "chassis" not in vals:
+        return None
+    out = {}
+    pv = vals.get("plate", "")
+    out["plate"] = fix_plate(pv) if pv.strip(" -") else "-"
+    out["unit"] = detect_unit_from_text(vals.get("unit", ""))
+    out["insured"] = vals.get("insured", "").strip(" :-") or "-"
+    out["chassis"] = re.sub(r"\s+", "", vals.get("chassis", "")) or "-"
+    out["motor"] = re.sub(r"\s+", "", vals.get("motor", "")) or "-"
+    out["make"] = vals.get("make", "").strip(" .") or "-"
+    out["model"] = vals.get("model", "").strip(" .") or "-"
+    out["period"] = "-"
+    am = re.search(r"\d[\d,]*(?:\.\d+)?", vals.get("amount", ""))
+    out["amount"] = float(am.group(0).replace(",", "")) if am else 0.0
+    tm = None
+    m = TIME_RE.search(vals.get("printed", "") or "")
+    if m: tm = m.group(0).strip().replace("/", "-")
+    return _var_finish(out, txt, tm)
+
+def _parse_positional_text(txt):
+    """الشكل الجديد لما تنسيق النص بيتلخبط (قيم مش قصاد عناوينها): نفس فكرة parse_receipt_by_type
+    + مبلغ بـ 'جم' + مدة 'من .. إلى ..' + أول شاسيه بدل آخر واحد."""
+    unit, dates, amounts, tm, rest = None, [], [], None, []
+    for raw in _text_value_lines(txt):
+        l = re.sub(r"\s+", " ", raw or "").strip(" :：")
+        if not l or l == "-" or _VAR_NOISE_RE.search(l):
+            continue
+        m = TIME_RE.search(l)
+        if m and not _AR_LETTER_RE.search(l):
+            tm = m.group(0).strip().replace("/", "-")
+            continue
+        md = re.fullmatch(r"(?:من|إلى|الى)\s+(\d{2})-(\d{2})-(\d{4})", l)
+        if md:
+            dates.append(f"{md.group(3)}-{md.group(2)}-{md.group(1)}")
+            continue
+        ds = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", l)
+        if ds and re.fullmatch(r"[\d\s\-]+", l):
+            dates += ds
+            continue
+        ma = re.fullmatch(r"(\d[\d,]*(?:\.\d+)?)\s*(?:جم|جنيه|EGP)?", l)
+        if ma and (FLOAT_RE.fullmatch(ma.group(1)) or re.search(r"[^\d.,]", l)):
+            amounts.append(float(ma.group(1).replace(",", "")))
+            continue
+        if re.match(r"^(?:وحدة|منفذ|ميناء|مجمع\s+خدمات)", l):
+            u = detect_unit_from_text(l)
+            if u:
+                unit = unit or u
+                continue
+        if NOISE_LINE_RE.search(l) or COMPANY_WORDS_RE.search(l):
+            continue
+        rest.append(l)
+    cidx = None
+    for i, l in enumerate(rest):
+        c = l.replace(" ", "")
+        if not _AR_LETTER_RE.search(c) and len(c) >= 10 and re.search(r"[A-Za-z]", c) and re.search(r"\d", c):
+            cidx = i
+            break
+    if cidx is None:
+        for i, l in enumerate(rest):
+            if not _AR_LETTER_RE.search(l):
+                cidx = i
+                break
+    if cidx is None:
+        return None
+    head, tail = rest[:cidx], rest[cidx:]
+    plate, others = "-", []
+    for l in head:
+        if plate == "-" and _PLATE_ONLY_RE.match(re.sub(r"[\s\-]", "", l)):
+            plate = fix_plate(l)
+        else:
+            others.append(l)
+    out = {"plate": plate}
+    out["insured"] = " ".join(others).strip(" :-") or "-"
+    out["chassis"] = re.sub(r"\s+", "", tail[0]) if len(tail) > 0 else "-"
+    out["motor"] = re.sub(r"\s+", "", tail[1]) if len(tail) > 1 else "-"
+    out["make"] = tail[2].strip(" .") if len(tail) > 2 else "-"
+    out["model"] = " ".join(tail[3:]).strip(" .") if len(tail) > 3 else "-"
+    out["unit"] = unit
+    ds = sorted(dates)[:2]
+    out["period"] = f"{ds[0]} إلى {ds[1]}" if len(ds) == 2 else "-"
+    out["amount"] = amounts[-1] if amounts else 0.0
+    return _var_finish(out, txt, tm)
+
+def _receipt_score(f):
+    """كام حقل طالع منطقي. بنستبدل نتيجة القراءة الاحتياطية بس لو القراءة الإضافية أحسن منها فعلًا."""
+    if not f: return -1
+    s = 0
+    if f.get("plate", "-") != "-": s += 1
+    ins = f.get("insured", "-")
+    if ins != "-" and not re.search(r"اسم\s*المواطن|رقم\s*المركب|المبلغ|[A-Za-z0-9]{6,}", ins): s += 1
+    if float(f.get("amount") or 0) > 0: s += 2
+    ch, mo = f.get("chassis", "-"), f.get("motor", "-")
+    if ch != "-" and len(ch) >= 5 and not _AR_LETTER_RE.search(ch) and re.search(r"\d", ch): s += 1
+    if mo != "-" and not _AR_LETTER_RE.search(mo): s += 1
+    mk = f.get("make", "-")
+    if mk != "-" and mk != mo: s += 1
+    md = f.get("model", "-")
+    if md != "-" and not re.search(r"المبلغ|جم|من\s+\d|إلى|الاستجابة", md): s += 1
+    if f.get("period", "-") != "-": s += 1
+    if f.get("dt"): s += 1
+    return s
+
+def parse_receipt_variants(txt):
+    txt = txt or ""
+    cands = []
+    if re.search(r"اسم\s*المواطن|رقم\s*المركب", txt):
+        cands.append(_parse_inline_labeled)
+    cands.append(_parse_positional_text)
+    best = None
+    for fn in cands:
+        try: r = fn(txt)
+        except Exception as e:
+            log_exception(f"parse_variant:{fn.__name__}", e)
+            r = None
+        if r and (best is None or _receipt_score(r) > _receipt_score(best)):
+            best = r
+    return best
+
+
 def parse_receipt(path, txt):
     old = parse_receipt_text(txt)
     bb, bb_lines, dbg = None, [], {}
@@ -7010,7 +7181,15 @@ def parse_receipt(path, txt):
     if chosen is None:
         chosen, method = (bb, "bbox-unverified") if bb else (old, "text-unverified")
 
-    if method != "bbox":
+    if method not in ("bbox", "text"):
+        try:
+            var = parse_receipt_variants(txt)
+            if var and _receipt_score(var) > _receipt_score(chosen):
+                chosen, method = var, "variant"
+        except Exception as e:
+            log_exception(f"parse_variants:{os.path.basename(path)}", e)
+
+    if method not in ("bbox", "variant"):
         _dump_parse_debug(path, method, txt, dbg or {})
 
     norm = lambda p: sorted(re.sub(r"[\s\-]", "", p or ""))
