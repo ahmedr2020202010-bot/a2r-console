@@ -97,7 +97,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v52"
+APP_VERSION = "v60"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -173,7 +173,7 @@ try:
 except Exception:  # pragma: no cover
     cv2 = None
 
-ENGINE_VERSION = "4.50"
+ENGINE_VERSION = "60"
 
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
@@ -2556,7 +2556,7 @@ import customtkinter as ctk
 
 import a2r_pos_engine as E
 
-TOOLS_VERSION = "v4.50"
+TOOLS_VERSION = "v60"
 
 # باسورد الفكرتين: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مش نص صريح، ومنفصل تماماً عن باسورد المشرف.
 _PW_SALT = "684cb086e29d8d07046fc249108085fc"
@@ -8762,7 +8762,7 @@ class CustomTkinterApp(ctk.CTk):
             attach_context_menu(e_arch_dir)
 
             def _browse_arch():
-                d = filedialog.askdirectory(initialdir=e_arch_dir.get().strip())
+                d = filedialog.askdirectory(initialdir=e_arch_dir.get().strip(), parent=win)
                 if d:
                     e_arch_dir.delete(0, 'end')
                     e_arch_dir.insert(0, d)
@@ -8829,7 +8829,7 @@ class CustomTkinterApp(ctk.CTk):
                     s_y = int(cb_arch_y.get())
                     target_dt = datetime.date(s_y, s_m, s_d)
                 except Exception:
-                    messagebox.showerror("Error", tr("invalid_date"))
+                    messagebox.showerror("Error", tr("invalid_date"), parent=win)
                     return
 
                 src_folder = e_arch_dir.get().strip()
@@ -8860,7 +8860,7 @@ class CustomTkinterApp(ctk.CTk):
                             os.startfile(new_summary)
                             return
 
-                messagebox.showinfo("Not Found", f"No summary report or archived receipts found for: {date_tag}")
+                messagebox.showinfo("Not Found", f"No summary report or archived receipts found for: {date_tag}", parent=win)
 
             btn_open_samary = ctk.CTkButton(f_pick_date, text=tr("arch_btn_open_day"), font=FONT_BTN_SUB, fg_color="#0F766E",
                                             hover_color="#115E59", text_color="#FFFFFF", width=120, height=26, command=_open_selected_day_summary)
@@ -8883,7 +8883,7 @@ class CustomTkinterApp(ctk.CTk):
             def _execute(archive_all=False):
                 target_folder = e_arch_dir.get().strip()
                 if not os.path.exists(target_folder) or not os.path.isdir(target_folder):
-                    messagebox.showerror("Error", tr("dir_missing"))
+                    messagebox.showerror("Error", tr("dir_missing"), parent=win)
                     return
                 btn_prev.configure(state="disabled")
                 btn_all.configure(state="disabled")
@@ -9278,14 +9278,14 @@ class CustomTkinterApp(ctk.CTk):
 
         def open_backup_folder():
             if os.path.isdir(ARCHIVE_BACKUP_DIR): os.startfile(ARCHIVE_BACKUP_DIR)
-            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."))
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."), parent=win)
 
         bf = {"running": False}
         def backfill_all():
             if bf["running"]: return
             if not messagebox.askyesno(T2("إنشاء الإكسيل للأيام الناقصة", "Build missing day Excels"),
                                        T2("هيتعمل ملف إكسيل لكل يوم مؤرشف ملوش إكسيل (الأيام القديمة).\nممكن ياخد وقت حسب عدد الأيام. تكمّل؟",
-                                          "An Excel file will be built for every archived day that has none (old days).\nThis may take a while. Continue?")):
+                                          "An Excel file will be built for every archived day that has none (old days).\nThis may take a while. Continue?"), parent=win):
                 return
             bf["running"] = True
             def prog(i, n):
@@ -9471,7 +9471,7 @@ class CustomTkinterApp(ctk.CTk):
             if not iso: return
             dd, f = day_folder_of(iso)
             if not os.path.isdir(f):
-                messagebox.showerror(T2("غير موجود", "Not found"), f)
+                messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
                 return
             xp = archive_day_excel_path(f, dd)
             if os.path.exists(xp):
@@ -9488,7 +9488,7 @@ class CustomTkinterApp(ctk.CTk):
                         os.startfile(res)
                     else:
                         _set_status("")
-                        messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."))
+                        messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
                 self.after(0, fin)
             threading.Thread(target=work, daemon=True).start()
 
@@ -9498,14 +9498,14 @@ class CustomTkinterApp(ctk.CTk):
             dd, f = day_folder_of(iso)
             pdfs = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
             if pdfs: os.startfile(pdfs[0])
-            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."))
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."), parent=win)
 
         def d_folder():
             iso = st["iso"]
             if not iso: return
             dd, f = day_folder_of(iso)
             if os.path.isdir(f): os.startfile(f)
-            else: messagebox.showerror(T2("غير موجود", "Not found"), f)
+            else: messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
 
         btn_row = ctk.CTkFrame(right, fg_color="transparent")
         btn_row.pack(fill="x", pady=(4, 2))
@@ -9586,13 +9586,13 @@ class CustomTkinterApp(ctk.CTk):
             if not rec: return
             fpath = rec.get("path", "")
             if fpath and os.path.exists(fpath): os.startfile(fpath)
-            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}")
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=win)
 
         def reprint_receipt():
             rec = _sel_rec()
             if not rec: return
             try: self.reprint_receipt_record(rec)
-            except Exception as e: messagebox.showerror("Error", str(e))
+            except Exception as e: messagebox.showerror("Error", str(e), parent=win)
 
         def open_receipt_folder():
             rec = _sel_rec()
@@ -9777,7 +9777,7 @@ class CustomTkinterApp(ctk.CTk):
             if not sel: return
             p = s_paths.get(sel[0], "")
             if not p or not os.path.exists(p):
-                messagebox.showerror(T2("غير موجود", "Not found"), os.path.basename(p or ""))
+                messagebox.showerror(T2("غير موجود", "Not found"), os.path.basename(p or ""), parent=win)
                 return
             if folder_only: os.startfile(os.path.dirname(p))
             else: os.startfile(p)
@@ -9860,15 +9860,15 @@ class CustomTkinterApp(ctk.CTk):
             on_change()
 
         def add_folder():
-            d = filedialog.askdirectory(title=T2("اختر فولدر الصور / الـ PDF", "Choose folder"))
+            d = filedialog.askdirectory(title=T2("اختر فولدر الصور / الـ PDF", "Choose folder"), parent=parent.winfo_toplevel())
             if d: st["sources"].append(d); refresh()
         def add_files():
-            fs = filedialog.askopenfilenames(title=T2("اختر ملفات", "Choose files"), filetypes=filetypes)
+            fs = filedialog.askopenfilenames(title=T2("اختر ملفات", "Choose files"), filetypes=filetypes, parent=parent.winfo_toplevel())
             if fs: st["sources"].extend(fs); refresh()
         def clear_src():
             st["sources"].clear(); refresh()
         def pick_out():
-            d = filedialog.askdirectory(title=T2("اختر مكان الإخراج", "Choose output folder"))
+            d = filedialog.askdirectory(title=T2("اختر مكان الإخراج", "Choose output folder"), parent=parent.winfo_toplevel())
             if d: st["out"] = d; refresh()
 
         for txt, cmd, col in ((T2("📁 اختيار فولدر", "📁 Add folder"), add_folder, t["primary"]),
@@ -9954,7 +9954,7 @@ class CustomTkinterApp(ctk.CTk):
         def run():
             files = pos_collect_files(st["sources"], POS_IMG_EXT + (".pdf",))
             if not files:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش صور أو PDF في المصدر المختار.", "No images/PDF in source.")); return
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش صور أو PDF في المصدر المختار.", "No images/PDF in source."), parent=win); return
             st["stop"], st["busy"] = False, True; update_buttons()
             def prog(i, n, label):
                 self.after(0, lambda: (bar.set(i / max(1, n)), status.configure(text=T2(f"قراءة {i + 1} من {n}: {label}", f"Reading {i + 1}/{n}: {label}"))))
@@ -9966,13 +9966,13 @@ class CustomTkinterApp(ctk.CTk):
                         st["items"], st["warnings"], st["excluded"], st["busy"] = items, w, ex, False
                         bar.set(1); update_buttons(); fill_tree()
                         status.configure(text=T2(f"تمت القراءة: {len(items)} إيصال. راجع الجدول ثم اضغط إنشاء الملفات.", f"Done: {len(items)} receipts. Review, then Build."))
-                        if not items: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لم يتم العثور على إيصالات إقفال.", "No batch-close receipts found."))
+                        if not items: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لم يتم العثور على إيصالات إقفال.", "No batch-close receipts found."), parent=win)
                     self.after(0, fin)
                 except Exception as e:
                     log_exception("pos_closing_run", e)
                     def bad():
                         st["busy"] = False; update_buttons()
-                        messagebox.showerror("Error", str(e))
+                        messagebox.showerror("Error", str(e), parent=win)
                     self.after(0, bad)
             threading.Thread(target=work, daemon=True).start()
         btn_run.configure(command=run)
@@ -9997,7 +9997,7 @@ class CustomTkinterApp(ctk.CTk):
             def save():
                 try: amt = _r2(float(e_amt.get().replace(",", "").strip()))
                 except ValueError:
-                    messagebox.showerror(T2("خطأ", "Error"), T2("المبلغ غير صحيح.", "Invalid amount.")); return
+                    messagebox.showerror(T2("خطأ", "Error"), T2("المبلغ غير صحيح.", "Invalid amount."), parent=win); return
                 v = cb.get()
                 if v != tid_choices[0]: pos_apply_tid(it, v.split(" - ")[-1].strip())
                 it["amount"], it["how"], it["ok"], it["alt"] = amt, "manual", True, None
@@ -10005,7 +10005,7 @@ class CustomTkinterApp(ctk.CTk):
                 d.destroy(); fill_tree()
             def open_img():
                 try: os.startfile(it["path"])
-                except Exception as e: messagebox.showerror("Error", str(e))
+                except Exception as e: messagebox.showerror("Error", str(e), parent=win)
             r = ctk.CTkFrame(d, fg_color="transparent"); r.pack(pady=10)
             ctk.CTkButton(r, text=T2("💾 حفظ", "💾 Save"), width=110, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(side="left", padx=4)
             ctk.CTkButton(r, text=T2("🖼️ فتح الصورة", "🖼️ Open image"), width=120, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=open_img).pack(side="left", padx=4)
@@ -10015,12 +10015,12 @@ class CustomTkinterApp(ctk.CTk):
 
         def build():
             if not st["items"]:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اعمل قراءة الأول.", "Run a scan first.")); return
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اعمل قراءة الأول.", "Run a scan first."), parent=win); return
             if not st["out"]:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder.")); return
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder."), parent=win); return
             tpl = _pos_find_template()
             if not tpl:
-                tpl = filedialog.askopenfilename(title=T2("اختر قالب الإكسيل (الاسكندريه 00.xlsx)", "Choose Excel template"), filetypes=[("Excel", "*.xlsx")]) or None
+                tpl = filedialog.askopenfilename(title=T2("اختر قالب الإكسيل (الاسكندريه 00.xlsx)", "Choose Excel template"), filetypes=[("Excel", "*.xlsx")], parent=win) or None
             btn_build.configure(state="disabled"); status.configure(text=T2("جاري إنشاء الملفات...", "Building files..."))
             def work():
                 try: res = pos_closing_build(st["items"], st["out"], tpl)
@@ -10029,11 +10029,11 @@ class CustomTkinterApp(ctk.CTk):
                 def fin():
                     btn_build.configure(state="normal")
                     if "error" in res:
-                        messagebox.showerror("Error", res["error"]); return
+                        messagebox.showerror("Error", res["error"], parent=win); return
                     msg = T2(f"تم إنشاء:\n• {len(res['pdfs'])} ملف PDF\n• {'إكسيل' if res['xlsx'] else 'بدون إكسيل'}\n• صور مرقّمة\n\nالتاريخ: {res['report_date']}", f"Created {len(res['pdfs'])} PDF, {'Excel' if res['xlsx'] else 'no Excel'}.")
                     if res["notes"]: msg += "\n\n" + "\n".join(res["notes"])
                     status.configure(text=T2("تم الإنشاء ✓", "Built ✓"))
-                    messagebox.showinfo(T2("تم", "Done"), msg)
+                    messagebox.showinfo(T2("تم", "Done"), msg, parent=win)
                     try: os.startfile(st["out"])
                     except Exception as _e: _log_silent("fin#1", _e)
                 self.after(0, fin)
@@ -10116,7 +10116,7 @@ class CustomTkinterApp(ctk.CTk):
         def run():
             files = pos_collect_files(st["sources"], (".pdf",))
             if not files:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش ملفات PDF في المصدر.", "No PDFs.")); return
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش ملفات PDF في المصدر.", "No PDFs."), parent=win); return
             st["stop"], st["busy"], st["res"] = False, True, []; update_buttons(); fill_tree()
             def work():
                 out = []
@@ -10163,7 +10163,7 @@ class CustomTkinterApp(ctk.CTk):
                 e.insert(0, "" if val is None else str(val)); ents[key] = e
             def save():
                 try: cnt = int(ents["count"].get())
-                except ValueError: messagebox.showerror(T2("خطأ", "Error"), T2("العدد غير صحيح.", "Invalid count.")); return
+                except ValueError: messagebox.showerror(T2("خطأ", "Error"), T2("العدد غير صحيح.", "Invalid count."), parent=win); return
                 v = cb.get()
                 r["tid"] = None if v == tid_choices[0] else v.split(" - ")[-1].strip()
                 r["day"], r["month"] = ents["day"].get().strip() or None, ents["month"].get().strip() or None
@@ -10178,28 +10178,28 @@ class CustomTkinterApp(ctk.CTk):
         tree.bind("<Double-1>", edit_selected)
 
         def save_copies():
-            if not st["out"]: messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder.")); return
+            if not st["out"]: messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder."), parent=win); return
             n = 0
             os.makedirs(st["out"], exist_ok=True)
             for r in st["res"]:
                 if not r["new"]: continue
                 try: shutil.copy2(r["src"], os.path.join(st["out"], r["new"] + ".pdf")); n += 1
                 except Exception as e: log_exception("pos_save_copy", e)
-            messagebox.showinfo(T2("تم", "Done"), T2(f"اتحفظ {n} ملف باسمه الجديد (الأصول ماتلمستش).", f"Saved {n} renamed copies (originals untouched)."))
+            messagebox.showinfo(T2("تم", "Done"), T2(f"اتحفظ {n} ملف باسمه الجديد (الأصول ماتلمستش).", f"Saved {n} renamed copies (originals untouched)."), parent=win)
             try: os.startfile(st["out"])
             except Exception as _e: _log_silent("save_copies#1", _e)
 
         def export_xlsx():
             if not st["res"]: return
-            if not OPENPYXL_AVAILABLE: messagebox.showerror("Error", "openpyxl missing"); return
-            f = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ملخص إيصالات الدفع.xlsx")
+            if not OPENPYXL_AVAILABLE: messagebox.showerror("Error", "openpyxl missing", parent=win); return
+            f = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ملخص إيصالات الدفع.xlsx", parent=win)
             if not f: return
             wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Payments"
             ws.append(["رقم", "الوحدة", "TID", "التاريخ", "عدد الإيصالات", "الاسم الجديد", "ملاحظات", "الملف الأصلي"])
             for r in sorted(st["res"], key=lambda x: (x["order"] or 99, x["name"])):
                 ws.append([r["order"], r["unit"], r["tid"], f"{r['day']}.{r['month']}" if r["day"] else "", r["count"], r["new"], " | ".join(r["notes"]), r["name"]])
             ws.append([]); ws.append(["", "الإجمالي", "", "", sum(max(r["count"], 0) for r in st["res"])])
-            wb.save(f); messagebox.showinfo(T2("تم", "Done"), f)
+            wb.save(f); messagebox.showinfo(T2("تم", "Done"), f, parent=win)
 
         foot = ctk.CTkFrame(win, fg_color="transparent"); foot.pack(fill="x", padx=12, pady=(4, 12))
         for txt, cmd, col in ((T2("✏️ تعديل المحدد", "✏️ Edit"), edit_selected, t["primary"]),
@@ -10302,13 +10302,13 @@ class CustomTkinterApp(ctk.CTk):
             if not rec: return
             fpath = rec.get("path", "")
             if fpath and os.path.exists(fpath): os.startfile(fpath)
-            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}")
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=win)
 
         def reprint_selected():
             rec = _sel_rec()
             if not rec: return
             try: self.reprint_receipt_record(rec)
-            except Exception as e: messagebox.showerror("Error", str(e))
+            except Exception as e: messagebox.showerror("Error", str(e), parent=win)
 
         def open_folder():
             rec = _sel_rec()
@@ -10320,28 +10320,28 @@ class CustomTkinterApp(ctk.CTk):
             if not day_folder: return
             pdfs = sorted(glob.glob(os.path.join(day_folder, "Samary_*.pdf")))
             if pdfs: os.startfile(pdfs[0])
-            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد ملخص لهذا اليوم.", "No summary for this day."))
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد ملخص لهذا اليوم.", "No summary for this day."), parent=win)
 
         def cancel_selected():
             rec = _sel_rec()
             if not rec: return
             if rec.get("is_void"):
-                messagebox.showinfo(tr("done"), tr("void_already"))
+                messagebox.showinfo(tr("done"), tr("void_already"), parent=win)
                 return
             idx = records.index(rec)
             msg = tr("void_confirm_msg", idx=idx + 1, amt=rec['amount'])
-            if messagebox.askyesno(tr("void_confirm_title"), msg):
+            if messagebox.askyesno(tr("void_confirm_title"), msg, parent=win):
                 self.void_selected_record(rec, refresh)
 
         def restore_selected_void():
             rec = _sel_rec()
             if not rec: return
             if not rec.get("is_void"):
-                messagebox.showinfo(tr("done"), tr("restore_already"))
+                messagebox.showinfo(tr("done"), tr("restore_already"), parent=win)
                 return
             idx = records.index(rec)
             msg = tr("restore_confirm_msg", idx=idx + 1, amt=rec['amount'])
-            if messagebox.askyesno(tr("restore_confirm_title"), msg):
+            if messagebox.askyesno(tr("restore_confirm_title"), msg, parent=win):
                 self.unvoid_selected_record(rec, refresh)
 
         def export_day_excel():
@@ -10349,7 +10349,7 @@ class CustomTkinterApp(ctk.CTk):
             except Exception: return
             p_ = archive_write_day_excel(day_folder, dd_, list(records))
             if p_ and os.path.exists(p_): os.startfile(p_)
-            else: messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."))
+            else: messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
 
         def _b(text, color, hover, cmd, w=115):
             ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover,
@@ -10604,7 +10604,7 @@ class CustomTkinterApp(ctk.CTk):
                 amt = parse_manual_amount(e_a.get())
                 if amt is None:
                     if e_a.get().strip():
-                        messagebox.showwarning("Error", "Invalid amount")
+                        messagebox.showwarning("Error", "Invalid amount", parent=win)
                     return
                 dest = self.get_clean_path()
                 file_base, now_dt = unique_manual_filename(dest, amt, datetime.datetime.now())
@@ -10617,7 +10617,7 @@ class CustomTkinterApp(ctk.CTk):
                 n_val = e_name.get().strip() or "-"
 
                 if not REPORTLAB_AVAILABLE:
-                    messagebox.showerror("Error", "ReportLab is not installed!")
+                    messagebox.showerror("Error", "ReportLab is not installed!", parent=win)
                     return
 
                 self.printed_receipts_set.add(file_base)
@@ -10636,7 +10636,7 @@ class CustomTkinterApp(ctk.CTk):
                     log_exception("insert_vault", ex_db)
                 if not db_ok:
                     messagebox.showwarning("Warning", "The receipt was created, but its details (unit / plate / name) "
-                                                      "could not be saved. See app_log.txt.")
+                                                      "could not be saved. See app_log.txt.", parent=win)
 
                 if self.auto_print_enabled:
                     self.send_to_thermal_printer_57x90(full_path)
@@ -10646,7 +10646,7 @@ class CustomTkinterApp(ctk.CTk):
                 done = True
                 win.destroy()
             except Exception as ex_save:
-                messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}")
+                messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}", parent=win)
             finally:
                 if not done:
                     busy[0] = False
