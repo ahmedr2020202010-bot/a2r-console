@@ -4975,12 +4975,18 @@ def extract_date_from_text(txt):
             except Exception as _e: _log_silent("extract_date_from_text#1", _e)
     return None
 
+# عرض لفة الورق الفعلي في الطابعة (مم) لإيصال المعاملة اليدوية وبون التصوير: 80 للفة 80 مم، 57 للفة 57 مم.
+# الإيصال الأساسي (quote_receipt) مش بيتأثر بالرقم ده.
+PRINT_ROLL_W_MM = 80
+
 def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
     if not REPORTLAB_AVAILABLE:
         raise Exception("ReportLab is not installed!")
     op_dt = op_dt or datetime.datetime.now()
-    PAGE_W, PAGE_H = 160, 240
-    c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
+    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض اللفة
+    _k = (PRINT_ROLL_W_MM * 72 / 25.4) / PAGE_W if PRINT_ROLL_W_MM else 1.0
+    c = canvas.Canvas(filepath, pagesize=(PAGE_W * _k, PAGE_H * _k))
+    c.scale(_k, _k)
     font_name = "Helvetica-Bold"
     for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
         if os.path.exists(f_cand):
@@ -5052,7 +5058,7 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, 
     c.save()
 
 SLIP_SIZE_MM = 46        # مقاس البون المربع (مم) — صغّره/كبّره من هنا
-SLIP_PAPER_W_MM = 57     # عرض الورقة
+SLIP_PAPER_W_MM = PRINT_ROLL_W_MM     # عرض الورقة (= عرض لفة الطابعة)
 SLIP_PAPER_H_MM = 90     # طول الورقة
 SLIP_DESIGN_MM = 70      # مقاس التصميم الأصلي (الخطوط والإطار بتتصغر بنفس النسبة)
 SLIP_OFFSET_X_MM = 0     # لو الطابعة بتزحزح البون: + يمين / - شمال
@@ -8881,7 +8887,8 @@ class CustomTkinterApp(ctk.CTk):
                     if temp_copy:
                         target = temp_copy
 
-                scaled_copy = scale_pdf_to_print_width(target)
+                if not MANUAL_NAME_RE.match(clean_name):      # الإيصال اليدوي بيطبع بعرض اللفة كامل
+                    scaled_copy = scale_pdf_to_print_width(target)
                 if scaled_copy:
                     target = scaled_copy
 
@@ -10682,11 +10689,19 @@ class CustomTkinterApp(ctk.CTk):
         row_u.pack(fill="x", padx=14, pady=(8, 4))
         ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
 
-        clean_opts = []
-        if unit_display_name: clean_opts.append(clean_arabic(unit_display_name))
-        for u in UNIT_NAMES + UNITS_LIST:
-            cu = clean_arabic(u)
-            if cu not in clean_opts: clean_opts.append(cu)
+        # قايمة الوحدات = الوحدات اللي في إيصالات اليوم نفسها (الأكتر أولًا)، والاختيار إجباري (قراءة فقط، مفيش كتابة حرة).
+        # لو مفيش ولا وحدة اتقرت من الإيصالات (إيصالات يدوية بس مثلًا) بنرجع لقايمة الوحدات الكاملة عشان المستخدم ميتعلقش.
+        _recs = getattr(self, "last_detailed_records", None) or []
+        _cnt = Counter(clean_arabic(r["unit"]) for r in _recs if r.get("unit") and r["unit"] != UNSPEC)
+        clean_opts = [u for u, _n in _cnt.most_common()]
+        _dn = clean_arabic(unit_display_name) if unit_display_name and unit_display_name != UNSPEC else ""
+        if _dn and _dn not in clean_opts:
+            clean_opts.insert(0, _dn)
+        if not clean_opts:
+            for u in UNIT_NAMES + UNITS_LIST:
+                cu = clean_arabic(u)
+                if cu not in clean_opts: clean_opts.append(cu)
+        _sel_unit = _dn if _dn in clean_opts else clean_opts[0]
 
         def _unit_changed(val):
             if self.last_summary_info is not None:
@@ -10694,9 +10709,10 @@ class CustomTkinterApp(ctk.CTk):
 
         cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=200, height=30, font=FONT_REGULAR_BOLD,
                                      fg_color=t["input"], border_color=t["border"], text_color=t["text"],
-                                     command=_unit_changed)
-        cb_unit.set(clean_arabic(unit_display_name))
+                                     command=_unit_changed, state="readonly")
+        cb_unit.set(_sel_unit)
         cb_unit.pack(side="right")
+        _unit_changed(_sel_unit)
 
         void_cnt = self.last_summary_info.get("void_count", 0)
         void_amt = self.last_summary_info.get("void_sum", 0.0)
