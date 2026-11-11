@@ -4328,6 +4328,96 @@ ARCHIVE_DIRNAME = "_Receipts_Archive_"
 UNSPEC = "وحدة غير محددة"
 PRINT_TEMP_DIR = os.path.join(tempfile.gettempdir(), "A2R_Print")
 _PRINT_LOCK = threading.Lock()   # طباعة واحدة في الوقت (الملفات المؤقتة بنفس الاسم)
+
+# ── مقاس الطباعة ──────────────────────────────────────────────────────────────
+# بيتحفظ في %APPDATA%\A2R\config.json (فولدر اليوزر نفسه) فمش محتاج صلاحيات أدمن، وكل يوزر له مقاسه.
+# المقاس بيتبعت مع كل طباعة (SumatraPDF) بدل ما نغيّر إعدادات الطابعة في الويندوز (دي اللي كانت محتاجة أدمن).
+DEFAULT_PRINT_PAPER_MM = (57, 90)
+PRINT_PAPER_PRESETS_MM = [(57, 90), (80, 90)]
+_PRINT_PAPER_MM = DEFAULT_PRINT_PAPER_MM
+_PRINT_PAPER_NAME = ""   # اسم الورق زي ما الدرايفر معرّفه (لو اتختار من القايمة)
+
+def _fmt_mm(v):
+    v = float(v)
+    return str(int(v)) if v == int(v) else f"{v:g}"
+
+def _read_app_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def load_print_paper():
+    global _PRINT_PAPER_MM
+    try:
+        v = _read_app_config().get("print_paper_mm")
+        w, h = float(v[0]), float(v[1])
+        if 20 <= w <= 300 and 20 <= h <= 600:
+            _PRINT_PAPER_MM = (w, h)
+            global _PRINT_PAPER_NAME
+            _PRINT_PAPER_NAME = str(_read_app_config().get("print_paper_name") or "")
+    except Exception as _e:
+        _log_silent("load_print_paper#1", _e)
+
+def save_print_paper(w, h, name=""):
+    """بترجّع True لو اتحفظ في الملف. المقاس بيتطبّق فورًا حتى لو الحفظ فشل."""
+    global _PRINT_PAPER_MM, _PRINT_PAPER_NAME
+    _PRINT_PAPER_MM = (float(w), float(h))
+    _PRINT_PAPER_NAME = (name or "").strip()
+    try:
+        d = _read_app_config()
+        d["print_paper_mm"] = [float(w), float(h)]
+        d["print_paper_name"] = _PRINT_PAPER_NAME
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, CONFIG_FILE)
+        return True
+    except Exception as e:
+        log_exception("save_print_paper", e)
+        return False
+
+def print_paper_label():
+    return f"{_fmt_mm(_PRINT_PAPER_MM[0])}x{_fmt_mm(_PRINT_PAPER_MM[1])}"
+
+def print_settings_arg():
+    name = _PRINT_PAPER_NAME or f"{_fmt_mm(_PRINT_PAPER_MM[0])} x {_fmt_mm(_PRINT_PAPER_MM[1])} mm"
+    return f"paper={name},shrink"
+
+def list_printer_papers():
+    """مقاسات الورق اللي درايفر الطابعة الافتراضية بيدعمها: (اسم الطابعة, [(اسم الورق, عرض مم, طول مم)]).
+    بتقرا من .NET PrinterSettings فمش محتاجة أدمن. بترجّع ("", []) لو فشلت."""
+    if sys.platform != "win32":
+        return "", []
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$ps = New-Object System.Drawing.Printing.PrinterSettings; "
+        "$items = @($ps.PaperSizes | ForEach-Object { [pscustomobject]@{n=$_.PaperName; w=$_.Width; h=$_.Height} }); "
+        "$o = [pscustomobject]@{printer=$ps.PrinterName; papers=$items}; "
+        "ConvertTo-Json -InputObject $o -Depth 3 -Compress"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+        d = json.loads(r.stdout.decode("utf-8", "replace").strip())
+        papers = d.get("papers") or []
+        if isinstance(papers, dict):
+            papers = [papers]
+        out = []
+        for it in papers:
+            nm = str(it.get("n") or "").strip()
+            w = float(it.get("w")) / 100.0 * 25.4   # PaperSize بالـ 1/100 بوصة
+            h = float(it.get("h")) / 100.0 * 25.4
+            if nm and w > 0 and h > 0:
+                out.append((nm, round(w, 1), round(h, 1)))
+        return str(d.get("printer") or ""), out
+    except Exception as e:
+        log_exception("list_printer_papers", e)
+        return "", []
 MANUAL_NAME_RE = re.compile(r"^[_]?\d+(?:\.\d{2})?_\d{6}\.pdf$", re.IGNORECASE)
 
 SOUND_MUTED = True
@@ -4342,6 +4432,8 @@ logging.basicConfig(
 def log_exception(context, exc):
     try: logging.error(f"[{context}] {exc}")
     except Exception as _e: _log_silent("log_exception#1", _e)
+
+load_print_paper()
 
 def db_connect():
     """اتصال موحّد بقاعدة البيانات: مهلة انتظار 15 ثانية بدل الفشل الفوري لو القاعدة مشغولة (database is locked)."""
@@ -7610,12 +7702,14 @@ def get_print_time_bottom(pdf_path):
 
 PRINT_TARGET_W_PT = 57 / 25.4 * 72   # عرض الطباعة المطلوب: 57 مم
 
-def scale_pdf_to_print_width(src_pdf, target_w=PRINT_TARGET_W_PT):
+def scale_pdf_to_print_width(src_pdf, target_w=None):
     """نسخة مؤقتة من الـ PDF مصغّرة لعرض 57 مم. الإيصالات بتتصمم بعرض 80 مم، وكان الحجم النهائي بيتحدد من
     مقاس الورق المعرّف في كل جهاز (fit): 57x90 بيطلّع الحجم الصح، و80 مم بيطلّعه كبير. دلوقتي البرنامج هو اللي
     بيحدد الحجم. بترجع None لو الصفحة أصلًا بعرض 57 مم أو أقل، أو لو pypdf مش متاح (وساعتها الطباعة زي ما كانت)."""
     if not PYPDF_AVAILABLE:
         return None
+    if target_w is None:
+        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72   # عرض الورق المختار (بيتغيّر من زرار المقاس)
     try:
         reader = PdfReader(src_pdf)
         if not reader.pages:
@@ -8056,10 +8150,145 @@ class CustomTkinterApp(ctk.CTk):
                 _log_silent("quit_app_completely#1", _e)
         self.run_on_main(self.destroy)
 
+    def _paper_btn_text(self):
+        return f"⚙️ {print_paper_label()}"
+
     def fix_printer_paper_action(self):
-        ok, msg = configure_printer_57x90_silent()
-        play_sound_matched()
-        messagebox.showinfo(tr("done"), tr("fix_printer_ok"))
+        """بيفتح نافذة اختيار مقاس الطباعة. مفيش أي تعديل في إعدادات الويندوز/الطابعة، فبيشتغل لأي يوزر عادي."""
+        old = getattr(self, "_paper_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("fix_printer_paper_action#0", _e)
+
+        self._cancel_auto_minimize()
+        t = THEMES[self.current_theme_name]
+        win = ctk.CTkToplevel(self)
+        self._paper_win = win
+        win.title(T2("مقاس الطباعة", "Print Size"))
+        win.resizable(False, False)
+        center_window_relative(win, self, 360, 330)
+        win.configure(fg_color=t["bg"])
+        try: win.transient(self)
+        except Exception as _e: _log_silent("fix_printer_paper_action#1", _e)
+
+        ctk.CTkLabel(win, text=T2("مقاس ورقة الطباعة (مم)", "Paper size (mm)"),
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(12, 4))
+
+        f_pre = ctk.CTkFrame(win, fg_color="transparent")
+        f_pre.pack(fill="x", padx=16)
+
+        f_in = ctk.CTkFrame(win, fg_color="transparent")
+        f_in.pack(fill="x", padx=16, pady=(10, 0))
+        ctk.CTkLabel(f_in, text=T2("العرض", "Width"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
+        e_w = ctk.CTkEntry(f_in, width=64, height=30, font=FONT_ENTRY, justify="center",
+                           fg_color=t["input"], border_color=t["border"], text_color=t["text"])
+        e_w.pack(side="left", padx=(6, 12))
+        ctk.CTkLabel(f_in, text=T2("الطول", "Height"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
+        e_h = ctk.CTkEntry(f_in, width=64, height=30, font=FONT_ENTRY, justify="center",
+                           fg_color=t["input"], border_color=t["border"], text_color=t["text"])
+        e_h.pack(side="left", padx=(6, 0))
+
+        def _fill(w, h):
+            e_w.delete(0, "end"); e_w.insert(0, _fmt_mm(w))
+            e_h.delete(0, "end"); e_h.insert(0, _fmt_mm(h))
+
+        _fill(*_PRINT_PAPER_MM)
+        def _preset(a, b):
+            sel["name"] = ""
+            _fill(a, b)
+        for (pw, ph) in PRINT_PAPER_PRESETS_MM:
+            ctk.CTkButton(f_pre, text=f"{_fmt_mm(pw)} × {_fmt_mm(ph)}", width=90, height=28, font=FONT_BTN_SUB,
+                          fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                          command=lambda a=pw, b=ph: _preset(a, b)).pack(side="left", padx=(0, 6))
+
+        sel = {"name": _PRINT_PAPER_NAME}
+        papers_map = {}
+
+        ctk.CTkLabel(win, text=T2("مقاسات الطابعة الافتراضية", "Default printer paper sizes"),
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(10, 2))
+        cb_papers = ctk.CTkComboBox(win, values=[T2("... بقرا المقاسات من الطابعة", "... reading printer sizes")],
+                                    height=30, font=FONT_ENTRY, state="readonly",
+                                    fg_color=t["input"], border_color=t["border"], text_color=t["text"])
+        cb_papers.set(T2("... بقرا المقاسات من الطابعة", "... reading printer sizes"))
+        cb_papers.pack(fill="x", padx=16)
+
+        def _on_pick(choice):
+            it = papers_map.get(choice)
+            if it:
+                sel["name"] = it[0]
+                _fill(it[1], it[2])
+
+        cb_papers.configure(command=_on_pick)
+
+        def _manual_edit(event=None):
+            sel["name"] = ""      # كتبت مقاس بإيدك: مفيش اسم ورق من الدرايفر
+        e_w.bind("<KeyRelease>", _manual_edit)
+        e_h.bind("<KeyRelease>", _manual_edit)
+
+        def _load_papers():
+            prn, items = list_printer_papers()
+            def _apply():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    if not items:
+                        cb_papers.configure(values=[T2("مقدرتش أقرا مقاسات الطابعة", "Could not read printer sizes")])
+                        cb_papers.set(T2("مقدرتش أقرا مقاسات الطابعة", "Could not read printer sizes"))
+                        return
+                    labels = []
+                    for (nm, pw, ph) in items:
+                        lab = f"{nm}  ({_fmt_mm(pw)}×{_fmt_mm(ph)})"
+                        papers_map[lab] = (nm, pw, ph)
+                        labels.append(lab)
+                    cb_papers.configure(values=labels)
+                    cur = next((l for l, v in papers_map.items() if v[0] == sel["name"]), "")
+                    cb_papers.set(cur or (prn or T2("اختار مقاس", "Pick a size")))
+                except Exception as _e: _log_silent("fix_printer_paper_action#4", _e)
+            self.run_on_main(_apply)
+        threading.Thread(target=_load_papers, daemon=True).start()
+
+        lbl_err = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9, "bold"), text_color="#EF4444")
+        lbl_err.pack(anchor="w", padx=16, pady=(6, 0))
+        ctk.CTkLabel(win, text=T2("المقاس بيتحفظ لليوزر الحالي وبيتطبّق على أي طباعة جاية.",
+                                  "Saved for the current user and used for every next print."),
+                     font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=300, justify="left").pack(anchor="w", padx=16)
+
+        def _close():
+            try: win.destroy()
+            except Exception as _e: _log_silent("fix_printer_paper_action#2", _e)
+            if getattr(self, "is_mini_mode", False):
+                self._schedule_auto_minimize(5000)
+
+        def _save(event=None):
+            try:
+                w = float(e_w.get().strip().replace(",", "."))
+                h = float(e_h.get().strip().replace(",", "."))
+            except Exception:
+                lbl_err.configure(text=T2("اكتب أرقام صحيحة للعرض والطول", "Enter valid numbers for width and height"))
+                return
+            if not (20 <= w <= 300 and 20 <= h <= 600):
+                lbl_err.configure(text=T2("المقاس خارج المدى المسموح (العرض 20-300، الطول 20-600)",
+                                          "Size out of range (width 20-300, height 20-600)"))
+                return
+            saved = save_print_paper(w, h, sel["name"])
+            self.btn_fix_printer.configure(text=self._paper_btn_text())
+            play_sound_matched()
+            if saved:
+                messagebox.showinfo(tr("done"), T2(f"تم ضبط مقاس الطباعة على {print_paper_label()} مم.",
+                                                   f"Print size set to {print_paper_label()} mm."), parent=win)
+            else:
+                messagebox.showwarning(tr("done"), T2("المقاس اتطبّق دلوقتي لكن مقدرتش أحفظه (هيرجع للقديم بعد إعادة التشغيل).",
+                                                      "Size applied now but could not be saved (it will reset after restart)."), parent=win)
+            _close()
+
+        ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
+                      hover_color=t["warning"], text_color="#FFFFFF", command=_save).pack(fill="x", padx=16, pady=(8, 0))
+        win.bind("<Return>", _save)
+        win.bind("<Escape>", lambda e: _close())
+        win.protocol("WM_DELETE_WINDOW", _close)
+        try: e_w.focus_set()
+        except Exception as _e: _log_silent("fix_printer_paper_action#3", _e)
 
     def reprint_receipt_record(self, rec):
         fpath = rec.get("path", "")
@@ -8350,7 +8579,7 @@ class CustomTkinterApp(ctk.CTk):
                                           font=(FONT_FAMILY, 11, "bold"), text_color="#38BDF8")
         self.lbl_mini_title.pack(side="left")
 
-        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=tr("btn_fix_printer"), width=70, height=22,
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=70, height=22,
                                              font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706", hover_color="#B45309",
                                              text_color="#FFFFFF", command=self.fix_printer_paper_action)
         self.btn_fix_printer.pack(side="right")
@@ -8695,7 +8924,7 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
         self.lbl_mini_counter.configure(text=tr("mini_printed_count", count=self.printed_count_today))
-        self.btn_fix_printer.configure(text=L["btn_fix_printer"])
+        self.btn_fix_printer.configure(text=self._paper_btn_text())
         self.update_toggle_appearance()
         if self.last_detailed_records:
             annotate_records(self.last_detailed_records)
@@ -8896,7 +9125,7 @@ class CustomTkinterApp(ctk.CTk):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", "paper=57 x 90 mm,shrink",
+                        "-print-settings", print_settings_arg(),
                         "-silent",
                         target
                     ]
@@ -10902,7 +11131,7 @@ class CustomTkinterApp(ctk.CTk):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", "paper=57 x 90 mm,shrink",
+                        "-print-settings", print_settings_arg(),
                         "-silent",
                         pdf_path
                     ]
