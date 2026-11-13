@@ -1,9 +1,9 @@
-name: Build A2R Console (Windows exe)
+name: Build A2R Console Lite (Windows exe)
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [lite]
+    tags: ['lite-v*']
   workflow_dispatch:
 
 permissions:
@@ -21,36 +21,15 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-lite.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-lite.txt
 
-      - name: Install Tesseract and stage it for bundling
-        shell: pwsh
-        run: |
-          choco install tesseract -y --no-progress
-          $src = $null
-          foreach ($c in 'C:\Program Files\Tesseract-OCR','C:\Program Files (x86)\Tesseract-OCR') {
-            if (Test-Path (Join-Path $c 'tesseract.exe')) { $src = $c; break }
-          }
-          if (-not $src) { Write-Error "tesseract.exe not found after install"; exit 1 }
-          New-Item -ItemType Directory -Force -Path tesseract | Out-Null
-          Copy-Item -Path (Join-Path $src '*') -Destination tesseract -Recurse -Force
-          # keep only the English model to keep the exe small
-          Get-ChildItem tesseract\tessdata -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne 'eng.traineddata' -and $_.Name -ne 'pdf.ttf' } | Remove-Item -Force
-          Get-ChildItem tesseract -Filter 'unins*' -ErrorAction SilentlyContinue | Remove-Item -Force
-          if (-not (Test-Path 'tesseract\tesseract.exe')) { Write-Error "tesseract\tesseract.exe missing"; exit 1 }
-          if (-not (Test-Path 'tesseract\tessdata\eng.traineddata')) { Write-Error "eng.traineddata missing"; exit 1 }
-          & .\tesseract\tesseract.exe --version
-
-      - name: Verify OCR libraries are installed
-        run: python -c "from rapidocr_onnxruntime import RapidOCR; import pypdfium2, onnxruntime; RapidOCR(); print('OCR OK')"
-
-      - name: Verify POS engine libraries
-        run: python -c "import cv2, numpy, pypdf, openpyxl, PIL, pypdfium2; print('POS libs OK', cv2.__version__)"
+      - name: Verify libraries
+        run: python -c "import customtkinter, PIL, pystray, openpyxl, reportlab, arabic_reshaper, bidi, pypdf; print('Lite libs OK')"
 
       - name: Verify required files
         shell: pwsh
@@ -73,69 +52,57 @@ jobs:
             '--icon=app.ico',
             '--add-binary','pdftotext.exe;.',
             '--add-data','app.ico;.',
-            '--add-data','tesseract;tesseract',
             '--collect-all','customtkinter',
             '--collect-all','reportlab',
             '--collect-all','arabic_reshaper',
             '--collect-all','bidi',
             '--collect-all','pystray',
             '--collect-all','PIL',
-            '--collect-all','rapidocr_onnxruntime',
-            '--collect-all','onnxruntime',
-            '--collect-all','pypdfium2',
             '--hidden-import','pystray._win32',
-            '--hidden-import','cv2',
-            '--hidden-import','numpy',
             '--hidden-import','pypdf',
             '--hidden-import','openpyxl',
             '--hidden-import','hmac',
-            '--name','A2R_Console'
+            '--name','A2R_Console_Lite'
           )
           if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
-          # قالب إكسيل التقفيل (الاسكندريه 00.xlsx): لو موجود في الريبو بيتضم جوه الـ exe تلقائياً
-          $tpl = Get-ChildItem -File -Filter '*00.xlsx' | Where-Object { $_.Name -notlike '~*' } | Select-Object -First 1
-          if ($tpl) { Write-Host "Bundling template: $($tpl.Name)"; $pyArgs += @('--add-data', ($tpl.Name + ';.')) }
-          else { Write-Warning "Closing template (*00.xlsx) not found in repo root: users must pick it from the Closing window." }
           $pyArgs += 'collect.py'
           python -m PyInstaller @pyArgs
 
       # نسخة احتياطية من الـ exe تتحمّل من صفحة الـ Run نفسها حتى لو نشر الـ Release فشل
       - name: Upload exe as workflow artifact
-        continue-on-error: true   # لو حصة التخزين خلصت ما يوقفش نشر الـ Release
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: A2R_Console
-          path: dist/A2R_Console.exe
+          name: A2R_Console_Lite
+          path: dist/A2R_Console_Lite.exe
           retention-days: 1
 
-      # نشر تلقائي في Releases (مفيش حاجة تتعمل يدوي): كل بناء بيتحط له Release باسم build-رقم
-      # - من main: Release عادي (Latest). - من أي فرع تانٍ (Run workflow): Pre-release للتجربة.
-      - name: Publish GitHub Release (manual tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish GitHub Release (manual tag lite-v*)
+        if: startsWith(github.ref, 'refs/tags/lite-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/A2R_Console.exe
+          files: dist/A2R_Console_Lite.exe
 
+      # بتنشر باسم lite-رقم عشان متتداخلش مع Releases النسخة الكاملة (build-رقم) ومتاخدش مكان "Latest"
       - name: Publish GitHub Release (automatic)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: A2R Console build ${{ github.run_number }} (${{ github.ref_name }})
+          tag_name: lite-${{ github.run_number }}
+          name: A2R Console Lite build ${{ github.run_number }} (${{ github.ref_name }})
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ github.ref_name != 'main' }}
-          make_latest: ${{ github.ref_name == 'main' }}
+          make_latest: false
           body: |
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
-          files: dist/A2R_Console.exe
+          files: dist/A2R_Console_Lite.exe
 
-      - name: Keep only the newest 10 releases
+      - name: Keep only the newest 10 lite releases
         continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $repo = '${{ github.repository }}'
-          $rels = gh release list --repo $repo --limit 100 --json tagName,createdAt | ConvertFrom-Json | Where-Object { $_.tagName -like 'build-*' } | Sort-Object createdAt -Descending
+          $rels = gh release list --repo $repo --limit 100 --json tagName,createdAt | ConvertFrom-Json | Where-Object { $_.tagName -like 'lite-*' } | Sort-Object createdAt -Descending
           $rels | Select-Object -Skip 10 | ForEach-Object { gh release delete $_.tagName --repo $repo --cleanup-tag --yes }
