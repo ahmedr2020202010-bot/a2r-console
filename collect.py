@@ -5524,6 +5524,8 @@ def archive_maintenance(folder_path, progress=None):
         b = archive_backup(folder_path)
         try: _archive_search_rows()
         except Exception as e: log_exception("archive_search_warm", e)
+        try: archive_backfill_excels(folder_path)     # أي يوم مؤرشف ملوش إكسيل يتبني أوتوماتيك (الموجود بيتخطى)
+        except Exception as e: log_exception("archive_maintenance_excels", e)
         return n, b
     except Exception as e:
         log_exception("archive_maintenance", e)
@@ -8520,10 +8522,28 @@ class CustomTkinterApp(ctk.CTk):
             c = conn.cursor()
             c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
             c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
+            c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_time', ?)",
+                      (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),))
             conn.commit()
             conn.close()
         except Exception as e:
             log_exception("mark_archive_done_today", e)
+
+    def _archive_done_time(self):
+        """وقت آخر أرشفة ناجحة على الجهاز ده (HH:MM) لو اتعملت النهارده، وإلا نص فاضي."""
+        try:
+            conn = db_connect()
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_time'")
+            row = c.fetchone()
+            conn.close()
+            val = row[0] if row else ""
+            if val.startswith(datetime.date.today().strftime("%Y-%m-%d")):
+                return val[11:16]
+        except Exception as e:
+            log_exception("archive_done_time", e)
+        return ""
 
     def auto_archive_on_login(self):
         """أرشفة تلقائية مرة واحدة في اليوم، في الخلفية بدون أي نافذة. لما تخلص بيظهر إشعار بجوار الساعة."""
@@ -9291,177 +9311,141 @@ class CustomTkinterApp(ctk.CTk):
         return ok
 
     def open_downloads_archiver_dialog(self):
+        """زر 📦 الأرشفة (متاح لأي مستخدم): بيأرشف الجهاز ده لو لسه ما اتأرشفش النهارده فقط.
+        مفيش اختيار فولدر ولا تصفح أيام هنا — عرض أي يوم بتفاصيله موجود للمشرف بس في 🗂️ سجل الأرشيف.
+        الأرشفة التلقائية (عند الدخول + كل 10 دقايق) شغالة زي ما هي ومش بتعتمد على النافذة دي."""
         try:
+            old = getattr(self, "_user_archive_win", None)
+            if old is not None:
+                try:
+                    if old.winfo_exists():
+                        old.lift(); old.focus_force()
+                        return
+                except Exception as _e: _log_silent("user_archive#exists", _e)
+
             t = THEMES[self.current_theme_name]
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
             win = ctk.CTkToplevel(self)
+            self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
-            center_window_relative(win, self, 470, 480)
+            center_window_relative(win, self, 450, 330)
             win.configure(fg_color=t["bg"])
 
-            ctk.CTkLabel(win, text=tr("arch_title"), font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
-            ctk.CTkLabel(win, text=tr("arch_subtitle"), font=(FONT_FAMILY, 9), text_color=t["success"]).pack(pady=(0, 6))
+            ctk.CTkLabel(win, text=T2("📦 أرشفة الجهاز", "📦 Device Archive"),
+                         font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(pady=(12, 2))
+            ctk.CTkLabel(win, text=T2("بتنقل إيصالات الأيام السابقة للأرشيف وتعمل إكسيل وملخص (عدد المعاملات والإجمالي) لكل يوم",
+                                      "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
+                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
-            f_src = ctk.CTkFrame(win, fg_color="transparent")
-            f_src.pack(fill="x", padx=16, pady=(0, 4))
-            ctk.CTkLabel(f_src, text=tr("arch_dir_lbl"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=2, pady=(0, 1))
-            
-            f_in = ctk.CTkFrame(f_src, fg_color="transparent")
-            f_in.pack(fill="x")
-
-            e_arch_dir = ctk.CTkEntry(f_in, font=FONT_ENTRY, height=27, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-            default_dir = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-            e_arch_dir.insert(0, default_dir)
-            e_arch_dir.pack(side="left", fill="x", expand=True, padx=(0, 4))
-            attach_context_menu(e_arch_dir)
-
-            def _browse_arch():
-                d = filedialog.askdirectory(initialdir=e_arch_dir.get().strip(), parent=win)
-                if d:
-                    e_arch_dir.delete(0, 'end')
-                    e_arch_dir.insert(0, d)
-
-            btn_browse_arch = ctk.CTkButton(f_in, text=tr("arch_btn_browse"), width=60, height=27, font=FONT_BTN_SUB,
-                                            fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=_browse_arch)
-            btn_browse_arch.pack(side="left")
-
-            f_supervisor = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=8, border_width=1, border_color=t["accent"])
-            f_supervisor.pack(fill="x", padx=16, pady=(6, 4))
-
-            ctk.CTkLabel(f_supervisor, text=tr("arch_open_day_title"), font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"]).pack(anchor="w", padx=10, pady=(6, 2))
-
-            f_pick_date = ctk.CTkFrame(f_supervisor, fg_color="transparent")
-            f_pick_date.pack(fill="x", padx=10, pady=(0, 6))
-
-            today_now = datetime.date.today()
-            cb_arch_d = ctk.CTkComboBox(f_pick_date, values=[f"{d:02d}" for d in range(1, 32)], width=50, height=25, font=FONT_REGULAR_BOLD)
-            cb_arch_d.set(f"{today_now.day:02d}")
-            cb_arch_d.pack(side="left", padx=(0, 2))
-
-            cb_arch_m = ctk.CTkComboBox(f_pick_date, values=[f"{m:02d}" for m in range(1, 13)], width=50, height=25, font=FONT_REGULAR_BOLD)
-            cb_arch_m.set(f"{today_now.month:02d}")
-            cb_arch_m.pack(side="left", padx=(0, 2))
-
-            cb_arch_y = ctk.CTkComboBox(f_pick_date, values=[str(y) for y in range(today_now.year - 3, today_now.year + 3)], width=64, height=25, font=FONT_REGULAR_BOLD)
-            cb_arch_y.set(str(today_now.year))
-            cb_arch_y.pack(side="left", padx=(0, 6))
-
-            def _find_day_archive_folder(base_folder, target_dt):
-                candidates_root = []
-                bname = os.path.basename(os.path.normpath(base_folder)).lower()
-                if bname == ARCHIVE_DIRNAME.lower():
-                    candidates_root.append(base_folder)
-                    candidates_root.append(os.path.dirname(base_folder))
-                else:
-                    candidates_root.append(os.path.join(base_folder, ARCHIVE_DIRNAME))
-                    candidates_root.append(base_folder)
-
-                y_str = str(target_dt.year)
-                d_str = f"{target_dt.day:02d}"
-                m_prefix = f"{target_dt.month:02d}"
-
-                for root in candidates_root:
-                    if not os.path.exists(root) or not os.path.isdir(root):
-                        continue
-                    y_dir = os.path.join(root, y_str)
-                    if not os.path.isdir(y_dir):
-                        continue
-                    try:
-                        for m_entry in os.listdir(y_dir):
-                            if m_entry.startswith(m_prefix) and os.path.isdir(os.path.join(y_dir, m_entry)):
-                                day_dir = os.path.join(y_dir, m_entry, d_str)
-                                if os.path.isdir(day_dir):
-                                    return day_dir
-                    except Exception as _e:
-                        _log_silent("_find_day_archive_folder#1", _e)
-                return None
-
-            def _open_selected_day_summary():
-                try:
-                    s_d = int(cb_arch_d.get())
-                    s_m = int(cb_arch_m.get())
-                    s_y = int(cb_arch_y.get())
-                    target_dt = datetime.date(s_y, s_m, s_d)
-                except Exception:
-                    messagebox.showerror("Error", tr("invalid_date"), parent=win)
-                    return
-
-                src_folder = e_arch_dir.get().strip()
-                day_folder = _find_day_archive_folder(src_folder, target_dt)
-                date_tag = target_dt.strftime("%d-%m-%Y")
-
-                if day_folder and os.path.isdir(day_folder):
-                    summary_candidates = glob.glob(os.path.join(day_folder, "*Samary*.pdf")) + \
-                                         glob.glob(os.path.join(day_folder, "*Summary*.pdf"))
-                    if summary_candidates:
-                        os.startfile(summary_candidates[0])
-                        return
-
-                    manual_map = load_manual_map()
-                    load_void_map()
-                    recs = []
-                    for f in glob.glob(os.path.join(day_folder, "*.pdf")):
-                        if f.endswith("_cropped.pdf") or "samary" in os.path.basename(f).lower() or "summary" in os.path.basename(f).lower():
-                            continue
-                        r = read_pdf_record(f, manual_map)
-                        if r:
-                            recs.append(refresh_void_flag(r))
-                    
-                    if recs:
-                        self._generate_day_summary_pdf(day_folder, date_tag, recs)
-                        new_summary = os.path.join(day_folder, f"Samary_{date_tag}.pdf")
-                        if os.path.exists(new_summary):
-                            os.startfile(new_summary)
-                            return
-
-                messagebox.showinfo("Not Found", f"No summary report or archived receipts found for: {date_tag}", parent=win)
-
-            btn_open_samary = ctk.CTkButton(f_pick_date, text=tr("arch_btn_open_day"), font=FONT_BTN_SUB, fg_color="#0F766E",
-                                            hover_color="#115E59", text_color="#FFFFFF", width=120, height=26, command=_open_selected_day_summary)
-            btn_open_samary.pack(side="left")
+            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+            card.pack(fill="x", padx=16, pady=(0, 6))
+            ctk.CTkLabel(card, text=T2("المجلد:", "Folder:"), font=(FONT_FAMILY, 10, "bold"),
+                         text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 0))
+            ctk.CTkLabel(card, text=folder or "-", font=(FONT_FAMILY, 9), text_color=t["text_muted"],
+                         wraplength=400, justify="left").pack(anchor="w", padx=12, pady=(0, 4))
+            lbl_state = ctk.CTkLabel(card, text="", font=(FONT_FAMILY, 12, "bold"), wraplength=400)
+            lbl_state.pack(padx=12, pady=(2, 10))
 
             f_prog = ctk.CTkFrame(win, fg_color="transparent")
-            f_prog.pack(fill="x", padx=16, pady=(4, 4))
+            f_prog.pack(fill="x", padx=16, pady=(2, 2))
             f_prog.grid_columnconfigure(0, weight=1)
+            p_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color=t["success"])
+            p_bar.set(0)
+            p_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            p_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
+            p_lbl.grid(row=0, column=1)
+            s_lbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410)
+            s_lbl.pack(pady=(0, 4))
 
-            archive_prog_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color=t["success"])
-            archive_prog_bar.set(0)
-            archive_prog_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            st = {"busy": False}
 
-            archive_prog_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
-            archive_prog_lbl.grid(row=0, column=1)
+            def _alive():
+                try: return bool(win.winfo_exists())
+                except Exception: return False
 
-            archive_status_lbl = ctk.CTkLabel(win, text=tr("arch_ready"), font=(FONT_FAMILY, 9), text_color=t["text_muted"])
-            archive_status_lbl.pack(pady=(0, 4))
+            def refresh_state():
+                if not _alive(): return
+                auto_running = bool(getattr(self, "_auto_archive_running", False))
+                if st["busy"] or auto_running:
+                    lbl_state.configure(text=T2("⏳ جاري الأرشفة...", "⏳ Archiving..."), text_color=t["warning"])
+                    btn_go.configure(state="disabled", text=T2("جاري الأرشفة...", "Archiving..."))
+                    if auto_running and not st["busy"]:
+                        win.after(1500, refresh_state)      # الأرشفة التلقائية شغالة: نراقبها لحد ما تخلص
+                elif self._archive_done_today():
+                    tm = self._archive_done_time()
+                    lbl_state.configure(
+                        text=T2("✓ الجهاز ده اتأرشف النهارده", "✓ This device is already archived today") + (f"  ({tm})" if tm else ""),
+                        text_color=t["success"])
+                    btn_go.configure(state="disabled", text=T2("تمت الأرشفة ✓", "Archived ✓"))
+                else:
+                    lbl_state.configure(text=T2("الجهاز ده لسه ما اتأرشفش النهارده", "This device has not been archived today"),
+                                        text_color=t["danger"])
+                    btn_go.configure(state="normal", text=T2("🗄️ أرشفة الآن", "🗄️ Archive now"))
 
-            def _execute(archive_all=False):
-                target_folder = e_arch_dir.get().strip()
-                if not os.path.exists(target_folder) or not os.path.isdir(target_folder):
+            def _start():
+                if st["busy"] or getattr(self, "_auto_archive_running", False): return refresh_state()
+                if self._archive_done_today(): return refresh_state()      # الجهاز اتأرشف خلاص: مفيش أرشفة تانية من هنا
+                if not folder or not os.path.isdir(folder):
                     messagebox.showerror("Error", tr("dir_missing"), parent=win)
                     return
-                btn_prev.configure(state="disabled")
-                btn_all.configure(state="disabled")
-                btn_open_folder.configure(state="disabled")
-                btn_browse_arch.configure(state="disabled")
-                btn_open_samary.configure(state="disabled")
-                threading.Thread(target=self._process_archive_worker, args=(archive_all, win, archive_prog_bar, archive_prog_lbl, archive_status_lbl, target_folder), daemon=True).start()
+                st["busy"] = True
+                p_bar.set(0); p_lbl.configure(text="0%")
+                refresh_state()
 
-            btn_prev = ctk.CTkButton(win, text=tr("arch_btn_prev"), font=FONT_BTN_SUB,
-                                     fg_color="#0F766E", hover_color="#115E59", height=28, text_color="#FFFFFF", command=lambda: _execute(False))
-            btn_prev.pack(fill="x", padx=16, pady=2)
+                def ui(fn):
+                    def _run():
+                        if _alive():
+                            try: fn()
+                            except Exception as _e: _log_silent("user_archive#ui", _e)
+                    self.run_on_main(_run)
 
-            btn_all = ctk.CTkButton(win, text=tr("arch_btn_all"), font=FONT_BTN_SUB,
-                                    fg_color="#312E81", hover_color="#3730A3", height=28, text_color="#FFFFFF", command=lambda: _execute(True))
-            btn_all.pack(fill="x", padx=16, pady=2)
+                def prog(i, n, fname):
+                    pct = int((i / n) * 100) if n else 100
+                    ui(lambda: [p_bar.set(pct / 100.0), p_lbl.configure(text=f"{pct}%"),
+                                s_lbl.configure(text=T2(f"جاري نقل: {fname}", f"Moving: {fname}"))])
 
-            def _open_selected_archive():
-                root = ensure_archive_root(e_arch_dir.get().strip())
-                if os.path.exists(root): os.startfile(root)
+                def stage(i, n, name):
+                    pct = int(i / max(1, n) * 100)
+                    ui(lambda: [p_bar.set(i / max(1, n)), p_lbl.configure(text=f"{pct}%"),
+                                s_lbl.configure(text=T2(f"جاري تحديث ملخص وإكسيل يوم {name}  ({i}/{n})",
+                                                        f"Updating summary & Excel for day {name}  ({i}/{n})"))])
 
-            btn_open_folder = ctk.CTkButton(win, text=tr("arch_btn_open_folder"), font=FONT_BTN_SUB,
-                                            fg_color="#1E293B", hover_color="#334155", border_width=1, border_color=t["border"], height=28,
-                                            text_color=t["text"], command=_open_selected_archive)
-            btn_open_folder.pack(fill="x", padx=16, pady=(3, 8))
+                def work():
+                    moved, ok = None, False
+                    try:
+                        moved = self._run_archive_sweep(folder, prog, stage)
+                        if moved is not None:           # None = كنسة تانية شغالة (مفيش شغل حصل)
+                            self._mark_archive_done_today()
+                            self._start_archive_maintenance(folder)
+                            ok = True
+                    except Exception as e:
+                        log_exception("user_archive_worker", e)
+                    st["busy"] = False
+
+                    def fin():
+                        if ok:
+                            p_bar.set(1.0); p_lbl.configure(text="100%")
+                            s_lbl.configure(text=T2(f"✓ تمت الأرشفة — {moved or 0} ملف اتنقل", f"✓ Done — {moved or 0} file(s) archived"))
+                            play_sound_matched()
+                        elif moved is None and not ok:
+                            s_lbl.configure(text=T2("فيه أرشفة شغالة حالياً، جرّب بعد شوية.", "Another archive is running, try again shortly."))
+                        else:
+                            s_lbl.configure(text=T2("حصل خطأ أثناء الأرشفة (متسجّل في app_log.txt).", "Archive failed (see app_log.txt)."))
+                        refresh_state()
+                    ui(fin)
+
+                threading.Thread(target=work, daemon=True).start()
+
+            btn_go = ctk.CTkButton(win, text="", font=FONT_BTN_MAIN, height=38, text_color="#FFFFFF",
+                                   fg_color="#0F766E", hover_color="#115E59", command=_start)
+            btn_go.pack(fill="x", padx=16, pady=(4, 6))
+
+            ctk.CTkLabel(win, text=T2("🔒 عرض تفاصيل أي يوم متاح للمشرف فقط (🛠️ المشرف ← 🗂️ سجل الأرشيف)",
+                                      "🔒 Viewing any day's details is supervisor-only (🛠️ Supervisor → 🗂️ Archive history)"),
+                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
+
+            refresh_state()
         except Exception as e: log_exception("open_archive_dialog", e)
 
     def open_archive_directory(self):
@@ -9873,30 +9857,6 @@ class CustomTkinterApp(ctk.CTk):
             if os.path.isdir(ARCHIVE_BACKUP_DIR): os.startfile(ARCHIVE_BACKUP_DIR)
             else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."), parent=win)
 
-        bf = {"running": False}
-        def backfill_all():
-            if bf["running"]: return
-            if not messagebox.askyesno(T2("إنشاء الإكسيل للأيام الناقصة", "Build missing day Excels"),
-                                       T2("هيتعمل ملف إكسيل لكل يوم مؤرشف ملوش إكسيل (الأيام القديمة).\nممكن ياخد وقت حسب عدد الأيام. تكمّل؟",
-                                          "An Excel file will be built for every archived day that has none (old days).\nThis may take a while. Continue?"), parent=win):
-                return
-            bf["running"] = True
-            def prog(i, n):
-                self.after(0, lambda: _set_status(T2(f"جاري إنشاء الإكسيل... {i}/{n}", f"Building Excel files... {i}/{n}")))
-            def work():
-                try: n = archive_backfill_excels(folder, prog)
-                except Exception as e:
-                    log_exception("archive_backfill_all", e)
-                    n = -1
-                def fin():
-                    bf["running"] = False
-                    if not win.winfo_exists(): return
-                    if n < 0: _set_status(T2("حصل خطأ أثناء إنشاء الإكسيل.", "Error while building Excel files."))
-                    else: _set_status(T2(f"تم ✓ — اتعمل إكسيل لـ {n} يوم", f"Done ✓ — built Excel for {n} day(s)"))
-                self.after(0, fin)
-            _set_status(T2("جاري الفحص...", "Scanning..."))
-            threading.Thread(target=work, daemon=True).start()
-
         # ---------- إعادة الأرشفة ----------
         rb = {"running": False}
 
@@ -9963,9 +9923,8 @@ class CustomTkinterApp(ctk.CTk):
             ctk.CTkLabel(dlg, text=T2("إعادة قراءة الإيصالات من الأول وإعادة بناء إجمالي اليوم وإيصال السمري وإكسيل اليوم. استخدمها لو في أيام إجماليها صفر أو فيها أخطاء.",
                                       "Re-read receipts and rebuild day total, summary receipt and day Excel. Use it for days with a zero total or errors."),
                          font=(FONT_FAMILY, 10, "bold"), text_color=t["text"], wraplength=430, justify="left").pack(anchor="w", padx=16, pady=(14, 8))
-            scope = tk.StringVar(value="sel" if st["iso"] else "zero")
-            opts = [("sel", T2("اليوم المختار فقط", "Selected day only")),
-                    ("zero", T2("الأيام اللي إجماليها صفر أو فيها ناقص", "Days with a zero total or incomplete rows")),
+            scope = tk.StringVar(value="zero")
+            opts = [("zero", T2("الأيام اللي إجماليها صفر أو فيها ناقص", "Days with a zero total or incomplete rows")),
                     ("shown", T2("كل الأيام الظاهرة في القايمة (حسب الشهر/البحث)", "All days currently listed (month/search filter)")),
                     ("all", T2("كل الأيام (ممكن ياخد وقت)", "All days (may take a while)"))]
             for val, lab in opts:
@@ -9973,8 +9932,7 @@ class CustomTkinterApp(ctk.CTk):
                                    text_color=t["text"]).pack(anchor="w", padx=22, pady=3)
             def go():
                 mode = scope.get()
-                if mode == "sel": days = [st["iso"]] if st["iso"] else []
-                elif mode == "zero": days = sorted({x["day"] for x in st["stats"] if x["total"] <= 0 or x["missing"]})
+                if mode == "zero": days = sorted({x["day"] for x in st["stats"] if x["total"] <= 0 or x["missing"]})
                 elif mode == "shown": days = list(day_tree.get_children())
                 else: days = None
                 try: dlg.destroy()
@@ -9989,8 +9947,6 @@ class CustomTkinterApp(ctk.CTk):
             fs["on"] = not fs["on"]
             try: win.attributes("-fullscreen", fs["on"])
             except Exception as _e: _log_silent("toggle_fullscreen#1", _e)
-            try: btn_fs.configure(text=T2("🗗 خروج", "🗗 Exit") if fs["on"] else T2("⛶ ملء الشاشة", "⛶ Fullscreen"))
-            except Exception as _e: _log_silent("toggle_fullscreen#2", _e)
         def exit_fullscreen(event=None):
             if fs["on"]: toggle_fullscreen()
         def minimize_win():
@@ -10001,24 +9957,28 @@ class CustomTkinterApp(ctk.CTk):
         win.bind("<F11>", toggle_fullscreen)
         win.bind("<Escape>", exit_fullscreen)
 
-        ctk.CTkButton(bar, text=T2("🛠️ إكسيل الأيام الناقصة", "🛠️ Build missing Excels"), font=FONT_BTN_SUB, width=170, height=30,
-                      fg_color="#B45309", hover_color="#92400E", text_color="#FFFFFF",
-                      command=backfill_all).pack(side="right", padx=4, pady=6)
-        ctk.CTkButton(bar, text=T2("🔄 تحديث + نسخ احتياطي", "🔄 Refresh + Backup"), font=FONT_BTN_SUB, width=160, height=30,
-                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
-                      command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
-        ctk.CTkButton(bar, text=T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open Backup"), font=FONT_BTN_SUB, width=160, height=30,
-                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF",
-                      command=open_backup_folder).pack(side="right", padx=4, pady=6)
+        def open_archive_root():
+            root = ensure_archive_root(folder)
+            if os.path.isdir(root): os.startfile(root)
+
+        more_menu = tk.Menu(win, tearoff=0)
+        more_menu.add_command(label=T2("📂 فتح فولدر الأرشيف", "📂 Open archive folder"), command=open_archive_root)
+        more_menu.add_command(label=T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open backup"), command=open_backup_folder)
+        more_menu.add_separator()
+        more_menu.add_command(label=T2("⛶ ملء الشاشة (F11)", "⛶ Fullscreen (F11)"), command=toggle_fullscreen)
+        def show_more():
+            try: more_menu.tk_popup(btn_more.winfo_rootx(), btn_more.winfo_rooty() + btn_more.winfo_height())
+            finally: more_menu.grab_release()
+
+        btn_more = ctk.CTkButton(bar, text=T2("⚙️ المزيد ▾", "⚙️ More ▾"), font=FONT_BTN_SUB, width=110, height=30,
+                                 fg_color="#475569", hover_color="#334155", text_color="#FFFFFF", command=show_more)
+        btn_more.pack(side="right", padx=4, pady=6)
         ctk.CTkButton(bar, text=T2("♻️ إعادة الأرشفة", "♻️ Re-archive"), font=FONT_BTN_SUB, width=150, height=30,
                       fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF",
                       command=open_rearchive).pack(side="right", padx=4, pady=6)
-        btn_fs = ctk.CTkButton(bar, text=T2("⛶ ملء الشاشة", "⛶ Fullscreen"), font=FONT_BTN_SUB, width=120, height=30,
-                               fg_color="#475569", hover_color="#334155", text_color="#FFFFFF", command=toggle_fullscreen)
-        btn_fs.pack(side="right", padx=4, pady=6)
-        ctk.CTkButton(bar, text=T2("🗕 تصغير", "🗕 Minimize"), font=FONT_BTN_SUB, width=90, height=30,
-                      fg_color="#475569", hover_color="#334155", text_color="#FFFFFF",
-                      command=minimize_win).pack(side="right", padx=4, pady=6)
+        ctk.CTkButton(bar, text=T2("🔄 تحديث", "🔄 Refresh"), font=FONT_BTN_SUB, width=120, height=30,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
 
         # ---------- ستايل الجداول ----------
         style = ttk.Style()
@@ -10211,8 +10171,32 @@ class CustomTkinterApp(ctk.CTk):
             if not iso: return
             dd, f = day_folder_of(iso)
             pdfs = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
-            if pdfs: os.startfile(pdfs[0])
-            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."), parent=win)
+            if pdfs:
+                os.startfile(pdfs[0])
+                return
+            if not os.path.isdir(f):
+                messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
+                return
+            if not REPORTLAB_AVAILABLE:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."), parent=win)
+                return
+            _set_status(T2("جاري إنشاء إيصال السمري...", "Building summary receipt..."))
+            def work():
+                try:
+                    recs = archive_day_records(f)
+                    if recs: self._generate_day_summary_pdf(f, dd.strftime("%d-%m-%Y"), recs)
+                except Exception as e: log_exception("archive_d_summary", e)
+                def fin():
+                    if not win.winfo_exists(): return
+                    made = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
+                    if made:
+                        _set_status(T2("تم إنشاء إيصال السمري ✓", "Summary receipt built ✓"))
+                        os.startfile(made[0])
+                    else:
+                        _set_status("")
+                        messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد معاملات لبناء السمري لهذا اليوم.", "No transactions to build a summary for this day."), parent=win)
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
 
         def d_folder():
             iso = st["iso"]
