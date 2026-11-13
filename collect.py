@@ -4668,7 +4668,7 @@ for _n, _roles in _ROLE_BTN.items():
 BUTTON_ROLES = {
     "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_today", "btn_view_rec"],
     "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel", "btn_pos_close"],
-    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_hist", "btn_mini_archive", "btn_chrome"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_chrome"],
     "warn_btn": ["btn_print_slip", "btn_pos_pay", "btn_fix_printer"],
     "secondary": ["btn_yesterday", "btn_mute", "btn_back_to_mini", "btn_pdf_export"],
     "danger_btn": ["btn_elevate"],
@@ -5010,6 +5010,136 @@ def center_window_relative(win, parent, width, height):
     y = py + (ph - height) // 2
     win.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
     win.transient(parent)
+
+# حجم موحد لنافذتي 🗂️ سجل الأرشيف و🔍 عرض السجلات: صغيرة في نص الشاشة، والمستخدم يكبّرها لما يحب
+LOG_WIN_W, LOG_WIN_H = 1000, 600
+LOG_WIN_MIN_W, LOG_WIN_MIN_H = 900, 460
+
+def center_window_on_screen(win, width, height):
+    """يوسّط النافذة في نص الشاشة (مش نسبةً للنافذة الرئيسية) من غير transient، فتفضل قابلة للتكبير/التصغير."""
+    win.update_idletasks()
+    set_window_icon_safe(win)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w, h = min(width, sw - 40), min(height, sh - 110)
+    win.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+
+# ── تلميحات الأزرار + Esc لكل النوافذ + النوافذ بتفتكر حجمها ومكانها ─────────────────
+class _Tooltip:
+    """تلميح بيظهر لما الماوس يقف على الزر شوية. text ممكن يكون نص أو دالة بترجّع النص باللغة الحالية."""
+    def __init__(self, widget, text, delay=450):
+        self.widget, self.text, self.delay = widget, text, delay
+        self._job, self._tip = None, None
+        for seq, fn in (("<Enter>", self._schedule), ("<Leave>", self._hide),
+                        ("<ButtonPress>", self._hide), ("<Destroy>", self._hide)):
+            try: widget.bind(seq, fn, add="+")
+            except Exception as _e: _log_silent("tooltip#bind", _e)
+
+    def _schedule(self, e=None):
+        self._cancel()
+        try: self._job = self.widget.after(self.delay, self._show)
+        except Exception: self._job = None
+
+    def _cancel(self):
+        if self._job is not None:
+            try: self.widget.after_cancel(self._job)
+            except Exception as _e: _log_silent("tooltip#cancel", _e)
+            self._job = None
+
+    def _show(self):
+        self._job = None
+        if self._tip is not None: return
+        try:
+            txt = self.text() if callable(self.text) else self.text
+            if not txt: return
+            tip = tk.Toplevel(self.widget)
+            tip.wm_overrideredirect(True)
+            try: tip.attributes("-topmost", True)
+            except Exception as _e: _log_silent("tooltip#topmost", _e)
+            tk.Label(tip, text=txt, justify="left", background="#1F2937", foreground="#F9FAFB",
+                     relief="solid", borderwidth=1, font=(FONT_FAMILY, 9), padx=6, pady=3).pack()
+            tip.update_idletasks()
+            x = min(self.widget.winfo_pointerx() + 12, tip.winfo_screenwidth() - tip.winfo_reqwidth() - 4)
+            y = self.widget.winfo_pointery() + 18
+            tip.wm_geometry(f"+{max(0, x)}+{y}")
+            self._tip = tip
+        except Exception as e: _log_silent("tooltip#show", e)
+
+    def _hide(self, e=None):
+        self._cancel()
+        if self._tip is not None:
+            try: self._tip.destroy()
+            except Exception as _e: _log_silent("tooltip#hide", _e)
+            self._tip = None
+
+def add_tooltip(widget, text):
+    """بيضيف تلميح للزر (مرة واحدة بس لكل زر). text = نص أو دالة بترجّع النص."""
+    try:
+        if widget is None or getattr(widget, "_a2r_tip", None) is not None: return
+        widget._a2r_tip = _Tooltip(widget, text)
+    except Exception as e: _log_silent("add_tooltip", e)
+
+def close_toplevel_gracefully(win):
+    """بيقفل النافذة بنفس طريقة زر X: لو ليها WM_DELETE_WINDOW مخصوص بينفّذه، وإلا destroy."""
+    try: cmd = win.protocol("WM_DELETE_WINDOW")
+    except Exception: cmd = ""
+    try:
+        if cmd: win.tk.call(cmd)
+        else: win.destroy()
+    except Exception as e:
+        _log_silent("close_toplevel", e)
+        try: win.destroy()
+        except Exception as _e: _log_silent("close_toplevel#destroy", _e)
+
+def _saved_win_geom(key):
+    try:
+        g = (_read_app_config().get("win_geom") or {}).get(key)
+        if isinstance(g, list) and len(g) == 4: return [int(v) for v in g]
+    except Exception as e: _log_silent("saved_win_geom", e)
+    return None
+
+def _save_win_geom(key, geom):
+    try:
+        d = _read_app_config()
+        wg = d.get("win_geom") if isinstance(d.get("win_geom"), dict) else {}
+        wg[key] = [int(v) for v in geom]
+        d["win_geom"] = wg
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, CONFIG_FILE)
+    except Exception as e: log_exception("save_win_geom", e)
+
+def remember_window_geometry(win, key):
+    """بيرجّع النافذة لآخر حجم ومكان اتقفلت عليهم (جوه حدود الشاشة)، وبيحفظهم تاني لما تتقفل.
+    بيتخزن في %APPDATA%\\A2R\\config.json تحت win_geom لكل يوزر. لازم يتنده بعد ما الحجم الافتراضي يتحط."""
+    try:
+        saved = _saved_win_geom(key)
+        if saved:
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            try: sc = float(win._get_window_scaling()) or 1.0
+            except Exception: sc = 1.0
+            w, h, x, y = saved
+            w = max(300, min(w, int((sw - 20) / sc)))
+            h = max(200, min(h, int((sh - 60) / sc)))
+            x = max(0, min(x, sw - int(w * sc)))
+            y = max(0, min(y, sh - int(h * sc) - 40))
+            win.geometry(f"{w}x{h}+{x}+{y}")
+        last = {"g": None}
+
+        def _track(e):
+            if e.widget is not win: return
+            try:
+                if win.state() != "normal" or win.attributes("-fullscreen"): return
+                nums = [int(n) for n in re.findall(r"-?\d+", win.geometry())]
+                if len(nums) == 4: last["g"] = nums
+            except Exception as _e: _log_silent("remember_geom#track", _e)
+
+        def _flush(e):
+            if e.widget is win and last["g"]: _save_win_geom(key, last["g"])
+
+        win.bind("<Configure>", _track, add="+")
+        win.bind("<Destroy>", _flush, add="+")
+    except Exception as e: _log_silent("remember_window_geometry", e)
 
 def clean_arabic(text):
     bidi_chars = ['\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u200e', '\u200f', '\u061c', '\u2066', '\u2067', '\u2068', '\u2069', 'ـ']
@@ -8476,7 +8606,6 @@ class CustomTkinterApp(ctk.CTk):
             w.configure(state="normal")
 
         self.btn_excel.pack_forget()
-        self.btn_arch_hist.pack_forget()
         self.btn_pos_close.pack_forget()
         self.btn_pos_pay.pack_forget()
         if getattr(self, "btn_pos_tools", None) is not None:
@@ -8487,16 +8616,13 @@ class CustomTkinterApp(ctk.CTk):
             self.f_role_btn.configure(border_color="#EF4444")
             if getattr(self, "btn_pos_tools", None) is not None:
                 self.btn_pos_tools.pack(side="left", padx=2)
-                self.btn_arch_hist.pack(side="left", padx=2)      # زرار الأرشيف في الشريط الرئيسي حتى مع POS Hub
             else:
                 self.btn_excel.pack(side="left", padx=2)
-                self.btn_arch_hist.pack(side="left", padx=2)
                 self.btn_pos_close.pack(side="left", padx=2)
                 self.btn_pos_pay.pack(side="left", padx=2)
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
-            self.btn_arch_hist.pack(side="left", padx=2)          # اليوزر: سجل أرشيف للقراءة بس (آخر أسبوع)
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
@@ -8683,7 +8809,10 @@ class CustomTkinterApp(ctk.CTk):
         self.lift()
         self.focus_force()
 
-        self.bind("<Escape>", lambda e: self.confirm_and_reset())
+        # Esc بيقفل النوافذ الفرعية بس. النافذة الرئيسية مفيهاش Esc (المسح بزر "مسح" المخصوص عشان ما يتمسحش بالغلط)
+        if not getattr(self, "_esc_bound", False):
+            self.bind_all("<Escape>", self._on_global_escape, add="+")
+            self._esc_bound = True
         self.bind("<Control-r>", lambda e: self.start_thread())
         self.bind("<F2>", lambda e: self.open_manual())
         self.bind("<F3>", lambda e: self.print_slip())
@@ -8830,8 +8959,6 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
 
-        self.btn_arch_hist = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
         self.btn_pos_close = ctk.CTkButton(self.btn_center_box, fg_color="#0F766E", hover_color="#115E59", width=105,
                                            height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_pos_closing)
         self.btn_pos_pay = ctk.CTkButton(self.btn_center_box, fg_color="#B45309", hover_color="#92400E", width=105,
@@ -9007,6 +9134,45 @@ class CustomTkinterApp(ctk.CTk):
                                        hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
                                        command=self.confirm_and_reset)
         self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
+        self._install_tooltips()
+
+    def _on_global_escape(self, e=None):
+        """Esc = قفل النافذة الفرعية اللي عليها الفوكس. النوافذ اللي ليها Esc خاص بيها (زي سجل الأرشيف) بتفضل زي ما هي."""
+        try: top = e.widget.winfo_toplevel()
+        except Exception: return
+        if top is self or not isinstance(top, ctk.CTkToplevel): return
+        try:
+            if top.bind("<Escape>"): return
+        except Exception as _e: _log_silent("global_escape#bind", _e)
+        close_toplevel_gracefully(top)
+
+    def _install_tooltips(self):
+        """تلميح (الاسم + الاختصار) لأزرار النافذة الرئيسية. النص بيتحسب وقت الظهور فيتبع لغة البرنامج."""
+        tips = {
+            "btn_run":              (lambda: T2("تشغيل الفحص وتجميع الإيصالات (Ctrl+R)", "Run scan & collect receipts (Ctrl+R)")),
+            "btn_manual":           (lambda: T2("إدخال يدوي (F2)", "Manual entry (F2)")),
+            "btn_print_slip":       (lambda: T2("إيصال تصوير (F3)", "Photocopy slip (F3)")),
+            "btn_cash":             (lambda: T2("حاسبة الكاش (F4)", "Cash calculator (F4)")),
+            "btn_summary_reopen":   (lambda: T2("إعادة فتح ملخص الفحص", "Reopen scan summary")),
+            "btn_archive_downloads": (lambda: T2("أرشفة الجهاز", "Archive this device")),
+            "btn_mini_archive":     (lambda: T2("أرشفة الجهاز", "Archive this device")),
+            "btn_reset":            (lambda: T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)")),
+            "btn_view_rec":         (lambda: T2("عرض السجلات", "Records viewer")),
+            "btn_pdf_export":       (lambda: T2("تصدير ملخص PDF", "Export PDF summary")),
+            "btn_excel":            (lambda: T2("فتح ملف الإكسيل", "Open Excel file")),
+            "btn_pos_close":        (lambda: T2("تقفيل POS", "POS closing")),
+            "btn_pos_pay":          (lambda: T2("إيصالات الدفع", "Payment receipts")),
+            "btn_chrome":           (lambda: T2("فتح المتصفح", "Open browser")),
+            "btn_today":            (lambda: T2("تاريخ النهارده", "Set date to today")),
+            "btn_yesterday":        (lambda: T2("تاريخ امبارح", "Set date to yesterday")),
+            "btn_browse":           (lambda: T2("اختيار مجلد الإيصالات", "Choose receipts folder")),
+            "btn_open_f":           (lambda: T2("فتح المجلد", "Open folder")),
+            "btn_pos_check":        (lambda: T2("مطابقة مع إجمالي POS", "Compare with POS total")),
+            "btn_lang":             (lambda: T2("تغيير اللغة", "Switch language")),
+            "btn_mute":             (lambda: T2("كتم / تشغيل الصوت", "Mute / unmute sound")),
+        }
+        for name, fn in tips.items():
+            add_tooltip(getattr(self, name, None), fn)
 
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
@@ -9117,7 +9283,6 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
         self.btn_excel.configure(text=L["open_excel"])
-        self.btn_arch_hist.configure(text=L["arch_hist_btn"])
         self.btn_pos_close.configure(text=L["pos_close_btn"])
         self.btn_pos_pay.configure(text=L["pos_pay_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
@@ -9373,11 +9538,14 @@ class CustomTkinterApp(ctk.CTk):
 
             t = THEMES[self.current_theme_name]
             folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            # المشرف بيفتح السجل من زر 🛠️ المشرف؛ لو الزر ده مش موجود عنده نسيب الزر هنا كبديل
+            _has_hub = getattr(self, "btn_pos_tools", None) is not None
+            _show_hist = not (getattr(self, "is_supervisor", False) and _has_hub)
             win = ctk.CTkToplevel(self)
             self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
-            center_window_relative(win, self, 450, 330)
+            center_window_relative(win, self, 450, 385 if _show_hist else 330)
             win.configure(fg_color=t["bg"])
 
             ctk.CTkLabel(win, text=T2("📦 أرشفة الجهاز", "📦 Device Archive"),
@@ -9476,6 +9644,13 @@ class CustomTkinterApp(ctk.CTk):
                             p_bar.set(1.0); p_lbl.configure(text="100%")
                             s_lbl.configure(text=T2(f"✓ تمت الأرشفة — {moved or 0} ملف اتنقل", f"✓ Done — {moved or 0} file(s) archived"))
                             play_sound_matched()
+                            # بعد ما الأرشفة تخلص بنجاح: النافذة تتقفل لوحدها بعد ثانيتين ونص
+                            def _auto_close():
+                                if _alive():
+                                    try: win.destroy()
+                                    except Exception as _e: _log_silent("user_archive#autoclose", _e)
+                            try: win.after(2500, _auto_close)
+                            except Exception as _e: _log_silent("user_archive#autoclose_sched", _e)
                         elif moved is None and not ok:
                             s_lbl.configure(text=T2("فيه أرشفة شغالة حالياً، جرّب بعد شوية.", "Another archive is running, try again shortly."))
                         else:
@@ -9489,8 +9664,15 @@ class CustomTkinterApp(ctk.CTk):
                                    fg_color="#0F766E", hover_color="#115E59", command=_start)
             btn_go.pack(fill="x", padx=16, pady=(4, 6))
 
-            ctk.CTkLabel(win, text=T2("🔒 عرض تفاصيل أي يوم متاح للمشرف فقط (🛠️ المشرف ← 🗂️ سجل الأرشيف)",
-                                      "🔒 Viewing any day's details is supervisor-only (🛠️ Supervisor → 🗂️ Archive history)"),
+            if _show_hist:
+                btn_hist = ctk.CTkButton(win, text=T2("📚 سجل الأرشيف", "📚 Archive History"), font=FONT_BTN_MAIN, height=38,
+                                         text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9",
+                                         command=self.open_archive_history)
+                btn_hist.pack(fill="x", padx=16, pady=(0, 6))
+
+            ctk.CTkLabel(win, text=(T2("المشرف: كل الأيام بتفاصيلها • المستخدم: آخر 7 أيام للقراءة فقط",
+                                       "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
+                                    T2("🗂️ سجل الأرشيف متاح من زر 🛠️ المشرف", "🗂️ Archive history is available from the 🛠️ Supervisor button")),
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
@@ -9874,10 +10056,11 @@ class CustomTkinterApp(ctk.CTk):
         win.resizable(True, True)
         set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_relative(win, self, min(1320, _sw - 40), min(720, _sh - 110))
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        remember_window_geometry(win, "archive_history")
         try: win.transient("")   # center_window_relative بتخليها transient = ويندوز بيشيل أزرار التصغير/التكبير وبتختفي من شريط المهام
         except Exception as _e: _log_silent("open_archive_history#transient", _e)
-        win.minsize(min(900, _sw - 40), min(480, _sh - 100))
+        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("open_archive_history#1", _e)
@@ -10042,6 +10225,7 @@ class CustomTkinterApp(ctk.CTk):
             except Exception as _e: _log_silent("toggle_fullscreen#1", _e)
         def exit_fullscreen(event=None):
             if fs["on"]: toggle_fullscreen()
+            else: close_toplevel_gracefully(win)      # Esc تاني (أو أول مرة لو مش fullscreen) = يقفل السجل
         def minimize_win():
             try:
                 if fs["on"]: toggle_fullscreen()
@@ -10710,6 +10894,7 @@ class CustomTkinterApp(ctk.CTk):
         win.title(T2("🧾 تقفيل POS", "🧾 POS Closing"))
         set_window_icon_safe(win)
         center_window_relative(win, self, 1100, 720)
+        remember_window_geometry(win, "pos_closing")
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("open_pos_closing#1", _e)
@@ -10874,6 +11059,7 @@ class CustomTkinterApp(ctk.CTk):
         win.title(T2("💳 إيصالات الدفع", "💳 Payment Receipts"))
         set_window_icon_safe(win)
         center_window_relative(win, self, 1150, 720)
+        remember_window_geometry(win, "pos_payments")
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("open_pos_payments#1", _e)
@@ -11046,8 +11232,9 @@ class CustomTkinterApp(ctk.CTk):
         win.resizable(True, True)
         set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_relative(win, self, min(1340, _sw - 40), min(680, _sh - 110))   # على قد الشاشة
-        win.minsize(min(1000, _sw - 40), 420)
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        remember_window_geometry(win, "records_viewer")
+        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
         win.configure(fg_color=t["bg"])
         try: win.lift(); win.focus_force()
         except Exception as _e: _log_silent("_records_window#1", _e)
