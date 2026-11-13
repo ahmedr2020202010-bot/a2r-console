@@ -4418,6 +4418,46 @@ def list_printer_papers():
     except Exception as e:
         log_exception("list_printer_papers", e)
         return "", []
+def set_default_printer_paper(w_mm, h_mm):
+    """بتضبط مقاس الورق في إعدادات الطابعة الافتراضية لليوزر الحالي (UserPrintTicket): بدون أدمن.
+    بترجّع dict فيه: ok, printer, w, h (المقاس الفعلي اللي الدرايفر قبله بالمم) أو err. بتتنفذ في thread مش في الواجهة."""
+    if sys.platform != "win32":
+        return {"ok": False, "err": "Windows required"}
+    w96 = float(w_mm) / 25.4 * 96.0      # PageMediaSize بوحدة 1/96 بوصة
+    h96 = float(h_mm) / 25.4 * 96.0
+    ps_cmd = (
+        "$ErrorActionPreference='Stop'; "
+        "try { "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Printing; Add-Type -AssemblyName System.Drawing; "
+        "$name = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName; "
+        "if (-not $name) { throw 'No default printer' }; "
+        "$srv = New-Object System.Printing.LocalPrintServer; "
+        "$q = New-Object System.Printing.PrintQueue($srv, $name, 1, [System.Printing.PrintSystemDesiredAccess]::UsePrinter); "
+        "$new = New-Object System.Printing.PrintTicket; "
+        f"$new.PageMediaSize = New-Object System.Printing.PageMediaSize([double]{w96:.3f}, [double]{h96:.3f}); "
+        "$m = $q.MergeAndValidatePrintTicket($q.UserPrintTicket, $new); "
+        "$q.UserPrintTicket = $m.ValidatedPrintTicket; "
+        "$q.Commit(); $q.Refresh(); "
+        "$r = $q.UserPrintTicket.PageMediaSize; "
+        "ConvertTo-Json -Compress -InputObject @{ok=$true; printer=$name; w=[double]$r.Width; h=[double]$r.Height} "
+        "} catch { ConvertTo-Json -Compress -InputObject @{ok=$false; err=$_.Exception.Message} }"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        d = json.loads(r.stdout.decode("utf-8", "replace").strip())
+        if d.get("ok"):
+            d["w"] = round(float(d.get("w") or 0) / 96.0 * 25.4, 1)
+            d["h"] = round(float(d.get("h") or 0) / 96.0 * 25.4, 1)
+        else:
+            log_exception("set_default_printer_paper", d.get("err"))
+        return d
+    except Exception as e:
+        log_exception("set_default_printer_paper", e)
+        return {"ok": False, "err": str(e)}
+
 MANUAL_NAME_RE = re.compile(r"^[_]?\d+(?:\.\d{2})?_\d{6}\.pdf$", re.IGNORECASE)
 
 SOUND_MUTED = True
@@ -8334,6 +8374,9 @@ class CustomTkinterApp(ctk.CTk):
 
         def _save(event=None):
             try:
+                if btn_save.cget("state") == "disabled": return   # منع الضغط المتكرر (Enter) أثناء ضبط الطابعة
+            except Exception as _e: _log_silent("fix_printer_paper_action#7", _e)
+            try:
                 w = float(e_w.get().strip().replace(",", "."))
                 h = float(e_h.get().strip().replace(",", "."))
             except Exception:
@@ -8345,17 +8388,41 @@ class CustomTkinterApp(ctk.CTk):
                 return
             saved = save_print_paper(w, h, sel["name"])
             self.btn_fix_printer.configure(text=self._paper_btn_text())
-            play_sound_matched()
-            if saved:
-                messagebox.showinfo(tr("done"), T2(f"تم ضبط مقاس الطباعة على {print_paper_label()} مم.",
-                                                   f"Print size set to {print_paper_label()} mm."), parent=win)
-            else:
-                messagebox.showwarning(tr("done"), T2("المقاس اتطبّق دلوقتي لكن مقدرتش أحفظه (هيرجع للقديم بعد إعادة التشغيل).",
-                                                      "Size applied now but could not be saved (it will reset after restart)."), parent=win)
-            _close()
+            try: btn_save.configure(state="disabled", text=T2("⏳ بضبط إعدادات الطابعة...", "⏳ Setting printer..."))
+            except Exception as _e: _log_silent("fix_printer_paper_action#5", _e)
 
-        ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
-                      hover_color=t["warning"], text_color="#FFFFFF", command=_save).pack(fill="x", padx=16, pady=(8, 0))
+            def _apply_printer():
+                res = set_default_printer_paper(w, h)
+                def _done():
+                    try:
+                        play_sound_matched()
+                        if res.get("ok"):
+                            aw, ah = res.get("w", 0), res.get("h", 0)
+                            exact = abs(aw - w) <= 2 and abs(ah - h) <= 2
+                            if exact:
+                                msg = T2(f"تم ضبط الطابعة الافتراضية ({res.get('printer','')}) على {_fmt_mm(w)}×{_fmt_mm(h)} مم.",
+                                         f"Default printer ({res.get('printer','')}) set to {_fmt_mm(w)}x{_fmt_mm(h)} mm.")
+                                messagebox.showinfo(tr("done"), msg, parent=win)
+                            else:
+                                msg = T2(f"الطابعة ({res.get('printer','')}) قبلت مقاس مختلف: {_fmt_mm(aw)}×{_fmt_mm(ah)} مم بدل {_fmt_mm(w)}×{_fmt_mm(h)}.\n"
+                                         f"الدرايفر مش بيدعم المقاس ده بالظبط.",
+                                         f"Printer ({res.get('printer','')}) accepted a different size: {_fmt_mm(aw)}x{_fmt_mm(ah)} mm instead of {_fmt_mm(w)}x{_fmt_mm(h)}.\n"
+                                         f"The driver does not support this exact size.")
+                                messagebox.showwarning(tr("done"), msg, parent=win)
+                        else:
+                            msg = T2("المقاس اتحفظ في البرنامج لكن معرفتش أغيّر إعدادات الطابعة الافتراضية.\n"
+                                     "اتأكد إن فيه طابعة افتراضية متوصلة، والتفاصيل في app_log.txt.",
+                                     "Size saved in the app, but the default printer settings could not be changed.\n"
+                                     "Make sure a default printer is connected. Details in app_log.txt.")
+                            messagebox.showwarning(tr("done"), msg, parent=win)
+                    except Exception as _e: _log_silent("fix_printer_paper_action#6", _e)
+                    _close()
+                self.run_on_main(_done)
+            threading.Thread(target=_apply_printer, daemon=True).start()
+
+        btn_save = ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
+                                 hover_color=t["warning"], text_color="#FFFFFF", command=_save)
+        btn_save.pack(fill="x", padx=16, pady=(8, 0))
         win.bind("<Return>", _save)
         win.bind("<Escape>", lambda e: _close())
         win.protocol("WM_DELETE_WINDOW", _close)
@@ -11299,7 +11366,9 @@ class CustomTkinterApp(ctk.CTk):
                                                       "could not be saved. See app_log.txt.", parent=win)
 
                 if self.auto_print_enabled:
-                    self.send_to_thermal_printer_57x90(full_path)
+                    # الطباعة في thread الطباعة (الطابور) بدل ما تقفل الواجهة لحد ما الطابعة ترد
+                    try: self._print_queue.put(full_path)
+                    except Exception as _e: _log_silent("manual_print_queue", _e)
 
                 try: os.startfile(full_path)
                 except Exception as _e: _log_silent("save#1", _e)
