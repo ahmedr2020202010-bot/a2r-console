@@ -126,8 +126,22 @@ try:
     _tm = ctk.ThemeManager.theme
     for _w, _r in (("CTkButton", 8), ("CTkEntry", 8), ("CTkComboBox", 8), ("CTkOptionMenu", 8), ("CTkFrame", 12)):
         if _w in _tm and "corner_radius" in _tm[_w]: _tm[_w]["corner_radius"] = _r
+    _tm["CTkButton"]["border_width"] = 1
+    _tm["CTkButton"]["border_color"] = ["#B8860B", "#D4AF37"]
 except Exception:
     pass
+
+_RED_FILLS = {"#DC2626", "#EF4444", "#991B1B", "#B91C1C", "#BE123C", "#7F1D1D"}
+_orig_btn_init = ctk.CTkButton.__init__
+def _btn_init(self, *a, **kw):
+    _orig_btn_init(self, *a, **kw)
+    try:
+        _fg = kw.get("fg_color")
+        if "border_width" not in kw and isinstance(_fg, str) and _fg.upper() in _RED_FILLS:
+            self.configure(border_width=0)   # الأزرار الحمرا من غير إطار ذهبي
+    except Exception:
+        pass
+ctk.CTkButton.__init__ = _btn_init
 
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = sys._MEIPASS
@@ -494,17 +508,17 @@ def archive_day_dir(folder_path, d):
 THEMES = {
     "Modern Dark": {
         "mode": "Dark",
-        "bg": "#0A0A0C", "card": "#131317", "sub_card": "#0F0F12",
-        "border": "#26262C", "input": "#0C0C0F", "text": "#F4F4F5",
-        "text_muted": "#9A9AA5", "primary": "#2563EB", "primary_hover": "#1D4ED8",
-        "success": "#34D399", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#60A5FA"
+        "bg": "#1A1F2B", "card": "#262D3E", "sub_card": "#202636",
+        "border": "#3A4358", "input": "#1B2130", "text": "#F5F6FA",
+        "text_muted": "#AEB6C8", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#34D399", "danger": "#F87171", "warning": "#F59E0B", "accent": "#E5B93C"
     },
     "Modern Light": {
         "mode": "Light",
         "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
         "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
         "text_muted": "#71717A", "primary": "#2563EB", "primary_hover": "#1D4ED8",
-        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#2563EB"
+        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#A16207"
     },
     "Aero Dark": {
         "mode": "Dark",
@@ -555,8 +569,8 @@ THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
 #  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
 _ROLE_BTN = {
     "Modern Dark": {
-        "secondary": ("#26262C", "#34343C"), "success_btn": ("#26262C", "#34343C"),
-        "tool": ("#26262C", "#34343C"), "warn_btn": ("#26262C", "#34343C"), "danger_btn": ("#DC2626", "#B91C1C")},
+        "secondary": ("#323B52", "#3F4A66"), "success_btn": ("#323B52", "#3F4A66"),
+        "tool": ("#323B52", "#3F4A66"), "warn_btn": ("#323B52", "#3F4A66"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Modern Light": {
         "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#52525B", "#3F3F46"),
         "tool": ("#52525B", "#3F3F46"), "warn_btn": ("#52525B", "#3F3F46"), "danger_btn": ("#DC2626", "#B91C1C")},
@@ -597,9 +611,9 @@ BUTTON_ROLES = {
 
 TAG_COLORS = {
     "Dark": {
-        "dup": ("#3B1219", "#FCA5A5"), "wrong": ("#3A1F0F", "#FDBA74"),
-        "missing": ("#33290C", "#FDE68A"), "manual": ("#14263F", "#93C5FD"),
-        "void": ("#1F1F24", "#8B8B96")
+        "dup": ("#5B2430", "#FECACA"), "wrong": ("#5A3A1C", "#FED7AA"),
+        "missing": ("#524718", "#FEF08A"), "manual": ("#24406B", "#BFDBFE"),
+        "void": ("#2E3444", "#9AA3B5")
     },
     "Light": {
         "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
@@ -609,7 +623,7 @@ TAG_COLORS = {
 }
 
 FONT_FAMILY = "Segoe UI"
-FONT_TITLE_LOGO = (FONT_FAMILY, 16, "bold")
+FONT_TITLE_LOGO = (FONT_FAMILY, 18, "bold")
 FONT_SECTION_LBL = (FONT_FAMILY, 9, "bold")
 FONT_REGULAR_BOLD = (FONT_FAMILY, 10, "normal")
 FONT_KPI_VAL = (FONT_FAMILY, 15, "bold")
@@ -650,7 +664,7 @@ def apply_tree_style(t, rowheight=30):
     except Exception as _e: _log_silent("apply_tree_style#2", _e)
     style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
                     font=(FONT_FAMILY, 10, "normal"), rowheight=rowheight, borderwidth=0, relief="flat")
-    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["text_muted"],
+    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
                     font=(FONT_FAMILY, 9, "bold"), relief="flat", borderwidth=0, padding=(4, 5))
     style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
     style.configure("Vertical.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
@@ -4019,6 +4033,8 @@ class CustomTkinterApp(ctk.CTk):
         self.header = ctk.CTkFrame(self, corner_radius=0, height=34)
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
+        self.header_line = ctk.CTkFrame(self, height=1, corner_radius=0, fg_color="#D4AF37")
+        self.header_line.pack(fill="x")
 
         f_left = ctk.CTkFrame(self.header, fg_color="transparent")
         f_left.pack(side="left", padx=(10, 0), pady=4)
@@ -4331,6 +4347,7 @@ class CustomTkinterApp(ctk.CTk):
         self.configure(fg_color=t["bg"])
         self.header.configure(fg_color=t["sub_card"])
         self.lbl_logo.configure(text_color=t["accent"])
+        self.header_line.configure(fg_color=t["accent"])
         self.card_top.configure(fg_color=t["card"], border_color=t["border"])
         self.card_dash.configure(fg_color=t["card"], border_color=t["border"])
         self.card_actions.configure(fg_color=t["card"], border_color=t["border"])
@@ -4374,13 +4391,16 @@ class CustomTkinterApp(ctk.CTk):
                 if b is None:
                     continue
                 try:
-                    b.configure(fg_color=col, hover_color=hov)
+                    if role == "danger_btn":
+                        b.configure(fg_color=col, hover_color=hov, border_width=0)
+                    else:
+                        b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["accent"])
                 except Exception as e:
                     log_exception("apply_button_role:" + a, e)
-        for a in ("btn_browse",):   # الحد المضيء حوالين زر الاختيار
+        for a in ("btn_run", "btn_pos_check"):
             b = getattr(self, a, None)
             if b is not None:
-                try: b.configure(border_width=0)
+                try: b.configure(border_width=1, border_color=t["accent"])
                 except Exception as e: log_exception("apply_button_border:" + a, e)
 
     def update_toggle_appearance(self):
