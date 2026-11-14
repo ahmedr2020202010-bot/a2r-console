@@ -122,6 +122,12 @@ def _log_silent(ctx, e):
 
 
 ctk.set_appearance_mode("Dark")
+try:
+    _tm = ctk.ThemeManager.theme
+    for _w, _r in (("CTkButton", 8), ("CTkEntry", 8), ("CTkComboBox", 8), ("CTkOptionMenu", 8), ("CTkFrame", 12)):
+        if _w in _tm and "corner_radius" in _tm[_w]: _tm[_w]["corner_radius"] = _r
+except Exception:
+    pass
 
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = sys._MEIPASS
@@ -486,6 +492,20 @@ def archive_day_dir(folder_path, d):
                         f"{d.month:02d}-{d.strftime('%B')}", f"{d.day:02d}")
 
 THEMES = {
+    "Modern Dark": {
+        "mode": "Dark",
+        "bg": "#0A0A0C", "card": "#131317", "sub_card": "#0F0F12",
+        "border": "#26262C", "input": "#0C0C0F", "text": "#F4F4F5",
+        "text_muted": "#9A9AA5", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#34D399", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#60A5FA"
+    },
+    "Modern Light": {
+        "mode": "Light",
+        "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
+        "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
+        "text_muted": "#71717A", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#2563EB"
+    },
     "Aero Dark": {
         "mode": "Dark",
         "bg": "#080E17", "card": "#121E2E", "sub_card": "#0F1926",
@@ -534,6 +554,12 @@ THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
 #  primary = الإجراء الأساسي | success_btn = إنشاء/إضافة | tool = تقارير وأرشيف | warn_btn = طباعة ودفع
 #  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
 _ROLE_BTN = {
+    "Modern Dark": {
+        "secondary": ("#26262C", "#34343C"), "success_btn": ("#26262C", "#34343C"),
+        "tool": ("#26262C", "#34343C"), "warn_btn": ("#26262C", "#34343C"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Modern Light": {
+        "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#52525B", "#3F3F46"),
+        "tool": ("#52525B", "#3F3F46"), "warn_btn": ("#52525B", "#3F3F46"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Aero Dark": {
         "secondary": ("#334155", "#475569"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
@@ -571,9 +597,9 @@ BUTTON_ROLES = {
 
 TAG_COLORS = {
     "Dark": {
-        "dup": ("#7F1D1D", "#FECACA"), "wrong": ("#7C2D12", "#FED7AA"),
-        "missing": ("#713F12", "#FEF08A"), "manual": ("#1E3A5F", "#BFDBFE"),
-        "void": ("#374151", "#9CA3AF")
+        "dup": ("#3B1219", "#FCA5A5"), "wrong": ("#3A1F0F", "#FDBA74"),
+        "missing": ("#33290C", "#FDE68A"), "manual": ("#14263F", "#93C5FD"),
+        "void": ("#1F1F24", "#8B8B96")
     },
     "Light": {
         "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
@@ -584,12 +610,12 @@ TAG_COLORS = {
 
 FONT_FAMILY = "Segoe UI"
 FONT_TITLE_LOGO = (FONT_FAMILY, 16, "bold")
-FONT_SECTION_LBL = (FONT_FAMILY, 10, "bold")
-FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "bold")
-FONT_KPI_VAL = (FONT_FAMILY, 18, "bold")
-FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
-FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
-FONT_ENTRY = (FONT_FAMILY, 11, "bold")
+FONT_SECTION_LBL = (FONT_FAMILY, 9, "bold")
+FONT_REGULAR_BOLD = (FONT_FAMILY, 10, "normal")
+FONT_KPI_VAL = (FONT_FAMILY, 15, "bold")
+FONT_BTN_MAIN = (FONT_FAMILY, 11, "bold")
+FONT_BTN_SUB = (FONT_FAMILY, 10, "bold")
+FONT_ENTRY = (FONT_FAMILY, 10, "normal")
 
 
 def theme_btn_colors(t, kind="quiet"):
@@ -623,9 +649,9 @@ def apply_tree_style(t, rowheight=30):
     try: style.layout("A2R.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
     except Exception as _e: _log_silent("apply_tree_style#2", _e)
     style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
-                    font=(FONT_FAMILY, 10, "bold"), rowheight=rowheight, borderwidth=0, relief="flat")
-    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
-                    font=(FONT_FAMILY, 11, "bold"), relief="flat", borderwidth=0, padding=(6, 8))
+                    font=(FONT_FAMILY, 10, "normal"), rowheight=rowheight, borderwidth=0, relief="flat")
+    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["text_muted"],
+                    font=(FONT_FAMILY, 9, "bold"), relief="flat", borderwidth=0, padding=(4, 5))
     style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
     style.configure("Vertical.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
                     arrowcolor=t["text_muted"], lightcolor=t["border"], darkcolor=t["border"], relief="flat")
@@ -3295,7 +3321,7 @@ class CustomTkinterApp(ctk.CTk):
         global CURRENT_LANG
         self.current_lang = "en"
         CURRENT_LANG = "en"
-        self.current_theme_name = "Aero Dark"
+        self.current_theme_name = "Modern Dark"
 
         self.is_mini_mode = True
         self.auto_sync_enabled = True
@@ -3928,8 +3954,9 @@ class CustomTkinterApp(ctk.CTk):
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 690, 585
-        self.minsize(690, 585)
+        self.update_idletasks()
+        width, height = max(430, self.winfo_reqwidth()), max(330, self.winfo_reqheight())
+        self.minsize(width, height)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -3989,7 +4016,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
 
     def setup_ui(self):
-        self.header = ctk.CTkFrame(self, corner_radius=0, height=46)
+        self.header = ctk.CTkFrame(self, corner_radius=0, height=34)
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
 
@@ -3999,28 +4026,28 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=FONT_TITLE_LOGO)
         self.lbl_logo.pack(side="left", padx=(0, 6))
 
-        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=112, height=30, state="readonly",
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=100, height=24, state="readonly",
                                         font=FONT_REGULAR_BOLD, command=self.on_theme_select)
         self.cb_theme.set(self.current_theme_name)
         self.cb_theme.pack(side="left", padx=(0, 3))
 
-        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=72, height=30, font=FONT_REGULAR_BOLD,
+        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=58, height=24, font=FONT_REGULAR_BOLD,
                                       command=self.toggle_language)
         self.btn_lang.pack(side="left", padx=(0, 3))
 
-        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=82, height=30, font=(FONT_FAMILY, 10, "bold"),
+        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=68, height=24, font=(FONT_FAMILY, 9, "bold"),
                                       fg_color="#334155", hover_color="#475569", command=self.toggle_mute)
         self.btn_mute.pack(side="left")
 
         f_right = ctk.CTkFrame(self.header, fg_color="transparent")
         f_right.pack(side="right", padx=(0, 10), pady=4)
 
-        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=125, height=30,
-                                         font=(FONT_FAMILY, 10, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
+        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=105, height=24,
+                                         font=(FONT_FAMILY, 9, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
                                          border_width=1, border_color="#EF4444", command=self.request_full_console)
         self.btn_elevate.pack(side="right", padx=(6, 0))
 
-        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=105, height=30,
+        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=88, height=24,
                                               font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
                                               command=self.switch_to_mini_view)
 
@@ -4034,7 +4061,7 @@ class CustomTkinterApp(ctk.CTk):
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=10, border_width=1)
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=12, border_width=1)
         self.card_mini_status.pack(fill="x", pady=(2, 4))
 
         f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
@@ -4066,92 +4093,92 @@ class CustomTkinterApp(ctk.CTk):
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
         self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
 
-        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=58)
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=44)
         self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(8, 2))
+        self.btn_center_box.pack(anchor="center", pady=(3, 0))
 
         self.btn_view_rec = ctk.CTkButton(
-            self.btn_center_box, width=115, height=30, font=(FONT_FAMILY, 10, "bold"),
+            self.btn_center_box, width=115, height=24, font=(FONT_FAMILY, 10, "bold"),
             text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1",
             command=self.open_records_viewer
         )
         self.btn_view_rec.pack(side="left", padx=2)
 
-        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=30, font=FONT_BTN_SUB,
+        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=24, font=FONT_BTN_SUB,
                                            fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
         self.btn_pdf_export.pack(side="left", padx=2)
 
         self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
-                                           height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
+                                           height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
         self.btn_print_slip.pack(side="left", padx=2)
 
         self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
-                                       height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
+                                       height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
 
         # النسخة المخففة: بدل زر المشرف (التقفيل/الدفع) فيه زر واحد بيفتح سجل الأرشيف الكامل (للمشرف فقط)
         self.btn_arch_full = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
-                                           height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
+                                           height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
 
         self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
-                                        height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
+                                        height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
 
         self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
                                 font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        self.lbl_foot.pack(anchor="center", pady=(0, 4))
+        self.lbl_foot.pack(anchor="center", pady=(0, 1))
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_top.pack(fill="x", pady=(0, 6))
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_top.pack(fill="x", pady=(0, 3))
 
         self.lbl_folder = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_folder.pack(anchor="w", padx=12, pady=(8, 3))
+        self.lbl_folder.pack(anchor="w", padx=8, pady=(3, 1))
 
         f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_dir.pack(fill="x", padx=12, pady=3)
+        f_dir.pack(fill="x", padx=8, pady=1)
 
-        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=32, text_color="#FFFFFF")
+        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=26, text_color="#FFFFFF")
         self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 4))
         self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
         attach_context_menu(self.e_path)
 
         self.btn_browse = ctk.CTkButton(
-            f_dir, width=82, height=32, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            f_dir, width=64, height=26, font=FONT_BTN_SUB, text_color="#FFFFFF",
             fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
             command=self.browse_folder
         )
         self.btn_browse.pack(side="left", padx=(0, 3))
 
         self.btn_open_f = ctk.CTkButton(
-            f_dir, width=72, height=32, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            f_dir, width=54, height=26, font=FONT_BTN_SUB, text_color="#FFFFFF",
             fg_color="#0F766E", hover_color="#115E59",
             command=self.open_current_folder
         )
         self.btn_open_f.pack(side="left")
 
         self.lbl_d = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_d.pack(anchor="w", padx=12, pady=(6, 3))
+        self.lbl_d.pack(anchor="w", padx=8, pady=(2, 1))
 
         f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_date.pack(fill="x", padx=12, pady=(2, 10))
+        f_date.pack(fill="x", padx=8, pady=(1, 4))
 
         today = datetime.date.today()
-        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=56, height=30, font=FONT_REGULAR_BOLD)
+        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=48, height=24, font=FONT_REGULAR_BOLD)
         self.cb_d.set(f"{today.day:02d}")
         self.cb_d.pack(side="left", padx=(0, 2))
 
-        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=56, height=30, font=FONT_REGULAR_BOLD)
+        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=48, height=24, font=FONT_REGULAR_BOLD)
         self.cb_m.set(f"{today.month:02d}")
         self.cb_m.pack(side="left", padx=(0, 2))
 
-        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=72, height=30, font=FONT_REGULAR_BOLD)
+        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=60, height=24, font=FONT_REGULAR_BOLD)
         self.cb_y.set(str(today.year))
         self.cb_y.pack(side="left", padx=(0, 4))
 
-        self.btn_today = ctk.CTkButton(f_date, width=62, height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
+        self.btn_today = ctk.CTkButton(f_date, width=50, height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
         self.btn_today.pack(side="left", padx=(0, 2))
 
-        self.btn_yesterday = ctk.CTkButton(f_date, width=78, height=30, font=FONT_BTN_SUB, text_color="#FFFFFF",
+        self.btn_yesterday = ctk.CTkButton(f_date, width=62, height=24, font=FONT_BTN_SUB, text_color="#FFFFFF",
                                            fg_color="#334155", hover_color="#475569", command=self.set_yesterday)
         self.btn_yesterday.pack(side="left", padx=(0, 6))
 
@@ -4171,11 +4198,11 @@ class CustomTkinterApp(ctk.CTk):
         self.sw_autosync.select()
         self.sw_autoprint.select()
 
-        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_dash.pack(fill="x", pady=(0, 6))
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 3))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
-        dash_grid.pack(fill="x", padx=12, pady=10)
+        dash_grid.pack(fill="x", padx=8, pady=4)
 
         f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_kpi.pack(side="left", fill="both", expand=True)
@@ -4183,16 +4210,16 @@ class CustomTkinterApp(ctk.CTk):
         self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
         self.pill_c1.pack(side="left", padx=(0, 4), fill="both", expand=True)
         self.lbl_kpi1_title = ctk.CTkLabel(self.pill_c1, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi1_title.pack(anchor="w", padx=8, pady=(5, 0))
+        self.lbl_kpi1_title.pack(anchor="w", padx=6, pady=(2, 0))
         self.lbl_cnt = ctk.CTkLabel(self.pill_c1, text="0", font=FONT_KPI_VAL, text_color="#FFFFFF")
-        self.lbl_cnt.pack(anchor="w", padx=8, pady=(0, 5))
+        self.lbl_cnt.pack(anchor="w", padx=6, pady=(0, 2))
 
         self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
         self.pill_c2.pack(side="left", padx=(0, 4), fill="both", expand=True)
         self.lbl_kpi2_title = ctk.CTkLabel(self.pill_c2, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi2_title.pack(anchor="w", padx=8, pady=(5, 0))
+        self.lbl_kpi2_title.pack(anchor="w", padx=6, pady=(2, 0))
         self.lbl_sum = ctk.CTkLabel(self.pill_c2, text="0.00 EGP", font=FONT_KPI_VAL, text_color="#00FF66")
-        self.lbl_sum.pack(anchor="w", padx=8, pady=(0, 5))
+        self.lbl_sum.pack(anchor="w", padx=6, pady=(0, 2))
 
         f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_pos.pack(side="right", fill="both")
@@ -4204,57 +4231,57 @@ class CustomTkinterApp(ctk.CTk):
         f_pos_in.pack(fill="x")
 
         vcmd = (self.register(self.validate_numeric_input), '%P')
-        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=115, height=30,
+        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=98, height=24,
                                   justify="center", font=FONT_ENTRY, text_color="#FFFFFF",
                                   validate="key", validatecommand=vcmd)
         self.e_pos.pack(side="left", padx=(0, 3))
         self.e_pos.bind("<Return>", lambda e: self.check_pos())
         attach_context_menu(self.e_pos)
 
-        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=62, height=30, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
+        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=48, height=24, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
         self.btn_pos_check.pack(side="left")
 
         self.lbl_diff = ctk.CTkLabel(f_pos, text="", font=(FONT_FAMILY, 10, "bold"))
         self.lbl_diff.pack(anchor="w", pady=(1, 0))
 
-        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_actions.pack(fill="x", pady=(0, 6))
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 3))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=40, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=12, pady=(10, 6))
+        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=8, pady=(4, 3))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
         f_prog.pack(fill="x", padx=10, pady=(0, 2))
 
-        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, progress_color="#00FF66", fg_color="#064E3B")
+        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=6, progress_color="#00FF66", fg_color="#064E3B")
         self.progress_bar.set(0)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=34)
         self.lbl_progress_pct.pack(side="right")
 
-        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8", height=16)
+        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8", height=12)
         self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 0))
 
         f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_act.pack(fill="x", padx=12, pady=(4, 10))
+        f_act.pack(fill="x", padx=8, pady=(1, 5))
 
-        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=34, width=72, command=self.open_manual)
-        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=26, width=72, command=self.open_manual)
+        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 2))
 
-        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=34, width=72, command=self.reopen_summary_modal)
-        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(3, 3))
+        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=26, width=72, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(2, 2))
 
-        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=34, width=60, command=self.open_cash_counter)
-        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(3, 3))
+        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=26, width=60, command=self.open_cash_counter)
+        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(2, 2))
 
-        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=34, width=68, command=self.open_downloads_archiver_dialog)
-        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(3, 3))
+        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=26, width=68, command=self.open_downloads_archiver_dialog)
+        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(2, 2))
 
         self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
-                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=34, width=52,
+                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=26, width=52,
                                        command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(3, 0))
+        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(2, 0))
         self._install_tooltips()
 
     def _on_global_escape(self, e=None):
@@ -4310,16 +4337,16 @@ class CustomTkinterApp(ctk.CTk):
         self.card_mini_status.configure(fg_color=t["card"], border_color=t["border"])
         self.b_bar.configure(fg_color=t["sub_card"])
 
-        self.lbl_folder.configure(text_color=t["accent"])
-        self.lbl_d.configure(text_color=t["accent"])
-        self.lbl_kpi1_title.configure(text_color=t["accent"])
-        self.lbl_kpi2_title.configure(text_color=t["accent"])
-        self.lbl_pos_title.configure(text_color=t["accent"])
+        self.lbl_folder.configure(text_color=t["text_muted"])
+        self.lbl_d.configure(text_color=t["text_muted"])
+        self.lbl_kpi1_title.configure(text_color=t["text_muted"])
+        self.lbl_kpi2_title.configure(text_color=t["text_muted"])
+        self.lbl_pos_title.configure(text_color=t["text_muted"])
         self.lbl_sum.configure(text_color=t["success"])
         try:
             self.lbl_cnt.configure(text_color=t["text"])
             for _p in (self.pill_c1, self.pill_c2):
-                _p.configure(fg_color=t["input"], border_color=t["border"], corner_radius=8)
+                _p.configure(fg_color=t["input"], border_color=t["border"], corner_radius=10)
             self.progress_bar.configure(progress_color=t["success"], fg_color=t["border"])
             self.lbl_progress_pct.configure(text_color=t["text"])
             self.lbl_current_file.configure(text_color=t["text_muted"])
@@ -4328,7 +4355,7 @@ class CustomTkinterApp(ctk.CTk):
             self.f_role_btn.configure(fg_color=t["card"])
             for _e in (self.e_path, self.e_pos): style_entry(_e, t)
             for _c in (self.cb_d, self.cb_m, self.cb_y, self.cb_theme): style_combo(_c, t)
-            apply_tree_style(t, 30)
+            apply_tree_style(t, 25)
         except Exception as _e: log_exception("apply_theme_extras", _e)
         self.btn_run.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
         self.btn_pos_check.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
@@ -4353,7 +4380,7 @@ class CustomTkinterApp(ctk.CTk):
         for a in ("btn_browse",):   # الحد المضيء حوالين زر الاختيار
             b = getattr(self, a, None)
             if b is not None:
-                try: b.configure(border_color=t["accent"])
+                try: b.configure(border_width=0)
                 except Exception as e: log_exception("apply_button_border:" + a, e)
 
     def update_toggle_appearance(self):
@@ -4682,7 +4709,7 @@ class CustomTkinterApp(ctk.CTk):
                                       "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
-            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=12, border_width=1, border_color=t["border"])
             card.pack(fill="x", padx=16, pady=(0, 6))
             ctk.CTkLabel(card, text=T2("المجلد:", "Folder:"), font=(FONT_FAMILY, 10, "bold"),
                          text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 0))
@@ -5198,7 +5225,7 @@ class CustomTkinterApp(ctk.CTk):
               "load_id": 0, "cache": {}, "sel_job": None}
 
         # ---------- شريط الحالة والأدوات ----------
-        bar = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        bar = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         bar.pack(fill="x", padx=14, pady=(12, 6))
         status_lbl = ctk.CTkLabel(bar, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"])
         status_lbl.pack(side="left", padx=12, pady=8)
@@ -5404,10 +5431,10 @@ class CustomTkinterApp(ctk.CTk):
                          font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(side="left", padx=8)
 
         # ---------- ستايل الجداول ----------
-        apply_tree_style(t, 30)
+        apply_tree_style(t, 25)
 
         def make_tree(parent, columns, headers, widths):
-            fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            fr = ctk.CTkFrame(parent, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             fr.pack(fill="both", expand=True, padx=2, pady=(4, 2))
             tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
             for c in columns:
@@ -5529,7 +5556,7 @@ class CustomTkinterApp(ctk.CTk):
         for e in (day_q,): e.bind("<KeyRelease>", apply_days)
 
         # ---------- اليمين: بطاقة اليوم المختار ----------
-        hdr = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+        hdr = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
         hdr.pack(fill="x", pady=(2, 0))
         day_title = ctk.CTkLabel(hdr, text=T2("👈 اختار يوم من القائمة لعرض معاملاته", "👈 Pick a day from the list"),
                                  font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"])
@@ -5539,7 +5566,7 @@ class CustomTkinterApp(ctk.CTk):
         cards.pack(fill="x", pady=(6, 2))
         card_lbls = {}
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
             ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
             lb = ctk.CTkLabel(f, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
@@ -5629,7 +5656,7 @@ class CustomTkinterApp(ctk.CTk):
         def _b(text, kind, cmd, w=140):
             _fg, _hv = theme_btn_colors(t, kind)
             ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
-                          text_color="#FFFFFF", width=w, height=34, command=cmd).pack(side="left", padx=(0, 6), pady=3)
+                          text_color="#FFFFFF", width=w, height=28, command=cmd).pack(side="left", padx=(0, 6), pady=2)
         if is_admin: _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", d_excel, 125)
         _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "primary", d_summary, 135)
         if is_admin:
@@ -5638,7 +5665,7 @@ class CustomTkinterApp(ctk.CTk):
                lambda: run_rearchive([st["iso"]] if st["iso"] else []), 145)
 
         # ---------- بحث وفلتر معاملات اليوم ----------
-        search_row = ctk.CTkFrame(right, corner_radius=10, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row = ctk.CTkFrame(right, corner_radius=12, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
         search_row.pack(fill="x", pady=(4, 4))
         tx_q = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
                             text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -5660,7 +5687,7 @@ class CustomTkinterApp(ctk.CTk):
         tx_count.pack(side="right", padx=14)
 
         # ---------- جدول معاملات اليوم ----------
-        tree_frame = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, pady=(0, 2))
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
         headers = {
@@ -5954,7 +5981,7 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as _e: _log_silent("_records_window#1", _e)
 
         if not live:
-            hdr = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+            hdr = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
             hdr.pack(fill="x", padx=14, pady=(12, 0))
             ctk.CTkLabel(hdr, text=T2(f"📅 أرشيف يوم {day_txt}", f"📅 Archive day {day_txt}"),
                          font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
@@ -5965,7 +5992,7 @@ class CustomTkinterApp(ctk.CTk):
         card_lbls = {}
 
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
             ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
             lb = ctk.CTkLabel(f, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
@@ -5979,7 +6006,7 @@ class CustomTkinterApp(ctk.CTk):
         mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
 
         # ---------- البحث والفلاتر ----------
-        search_row = ctk.CTkFrame(win, corner_radius=10, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row = ctk.CTkFrame(win, corner_radius=12, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
         search_row.pack(fill="x", padx=14, pady=(6, 4))
 
         search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=300,
@@ -6076,7 +6103,7 @@ class CustomTkinterApp(ctk.CTk):
         def _b(text, kind, cmd, w=115):
             _fg, _hv = theme_btn_colors(t, kind)
             ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
-                          text_color="#FFFFFF", width=w, height=34, command=cmd).pack(side="left", padx=(0, 8), pady=3)
+                          text_color="#FFFFFF", width=w, height=28, command=cmd).pack(side="left", padx=(0, 6), pady=2)
 
         _b(tr("open_pdf_btn"), "primary", open_selected)
         _b(tr("btn_reprint"), "quiet", reprint_selected, 105)
@@ -6092,7 +6119,7 @@ class CustomTkinterApp(ctk.CTk):
                                   "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
 
-        tree_frame = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, padx=14, pady=(2, 14))
 
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
@@ -6103,7 +6130,7 @@ class CustomTkinterApp(ctk.CTk):
             "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
         }
 
-        apply_tree_style(t, 32)
+        apply_tree_style(t, 26)
 
         tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="A2R.Treeview")
 
@@ -6206,7 +6233,7 @@ class CustomTkinterApp(ctk.CTk):
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=6)
 
-        card_box = ctk.CTkFrame(modal, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card_box = ctk.CTkFrame(modal, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         card_box.pack(fill="both", expand=True, padx=14, pady=10)
 
         row_u = ctk.CTkFrame(card_box, fg_color="transparent")
@@ -6616,7 +6643,7 @@ class CustomTkinterApp(ctk.CTk):
         win.configure(fg_color=t["bg"])
 
         ctk.CTkLabel(win, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
-        f_quick = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        f_quick = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         f_quick.pack(fill="x", padx=16, pady=(4, 8))
 
         r_c = ctk.CTkFrame(f_quick, fg_color="transparent")
@@ -6633,7 +6660,7 @@ class CustomTkinterApp(ctk.CTk):
         e_pos_in.pack(side="right")
         attach_context_menu(e_pos_in)
 
-        frame_box = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        frame_box = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         frame_box.pack(fill="both", expand=True, padx=16, pady=2)
 
         denoms = [200, 100, 50, 20, 10, 5, 1]
