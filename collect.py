@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v63-lite"
+APP_VERSION = "v64-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -574,7 +574,7 @@ BUTTON_ROLES = {
     "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
     "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
     "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_arch_full"],
-    "warn_btn": ["btn_print_slip", "btn_fix_printer"],
+    "warn_btn": ["btn_print_slip", "btn_fix_printer", "btn_mini_reprint"],
     "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
     "danger_btn": ["btn_elevate"],
 }
@@ -704,6 +704,7 @@ LANGUAGES = {
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
+        "mini_reprint_last": "🖨️ Reprint Last",
         "tray_open": "Open", "tray_console": "Full Console", "tray_exit": "Exit Application",
         "btn_reprint": "🖨️ Reprint", "menu_reprint": "🖨️ Reprint Receipt", "reprint_success": "Receipt sent to printer!",
         "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "Default printer paper set to 57x90 mm!"
@@ -760,6 +761,7 @@ LANGUAGES = {
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
+        "mini_reprint_last": "🖨️ إعادة طباعة الأخير",
         "tray_open": "فتح البرنامج", "tray_console": "النسخة الكاملة", "tray_exit": "إغلاق البرنامج نهائياً",
         "btn_reprint": "🖨️ إعادة طباعة", "menu_reprint": "🖨️ إعادة طباعة هذا الإيصال", "reprint_success": "تم إرسال الإيصال للطابعة الحرارية!",
         "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "تم ضبط مقاس الطابعة الافتراضية 57x90 مم بنجاح!"
@@ -3396,6 +3398,55 @@ def scale_pdf_to_print_width(src_pdf, target_w=None):
         log_exception("scale_pdf_to_print_width", e)
         return None
 
+def _make_print_copy_pypdf(src_pdf):
+    """بديل آمن للقص باستخدام pypdf في حال كانت بنية ملف الـ PDF مضغوطة أو غير متوافقة مع التعديل المباشر."""
+    if not PYPDF_AVAILABLE:
+        return None
+    try:
+        reader = PdfReader(src_pdf)
+        if not reader.pages:
+            return None
+        pg = reader.pages[0]
+        x0, y0 = float(pg.mediabox.left), float(pg.mediabox.bottom)
+        x1, y1 = float(pg.mediabox.right), float(pg.mediabox.top)
+
+        new_y0 = None
+        try:
+            contents = pg.get_contents()
+            raw_c = contents.get_data() if contents is not None else b""
+            qr_top = _find_qr_top(raw_c)
+            if qr_top is not None:
+                new_y0 = qr_top + 4.5
+        except Exception as _e:
+            _log_silent("make_print_copy_pypdf#qr", _e)
+
+        if new_y0 is None:
+            info = get_print_time_bottom(src_pdf)
+            if info:
+                new_y0 = y1 - (info[0] + 12.0)
+
+        if new_y0 is None:
+            return None
+        new_y0 = max(y0, new_y0)
+        if new_y0 >= y1 - 40:
+            return None
+
+        pg.mediabox.lower_left = (x0, new_y0)
+        pg.mediabox.upper_right = (x1, y1)
+        pg.cropbox.lower_left = (x0, new_y0)
+        pg.cropbox.upper_right = (x1, y1)
+
+        writer = PdfWriter()
+        writer.add_page(pg)
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, os.path.basename(src_pdf))
+        with open(dst, "wb") as fh:
+            writer.write(fh)
+        return dst
+    except Exception as e:
+        log_exception("make_print_copy_pypdf", e)
+        return None
+
 def make_print_copy(src_pdf):
     try:
         data = bytearray(open(src_pdf, "rb").read())
@@ -3404,10 +3455,12 @@ def make_print_copy(src_pdf):
             if re.search(rb"/Type\s*/Page(?![A-Za-z])", m.group(1)):
                 page_obj = m
                 break
-        if not page_obj: return None
+        if not page_obj:
+            return _make_print_copy_pypdf(src_pdf)
         page_body = bytes(data[page_obj.start(1):page_obj.end(1)])
         mb = re.search(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]", page_body)
-        if not mb: return None
+        if not mb:
+            return _make_print_copy_pypdf(src_pdf)
         x0, y0, x1, y1 = [float(v) for v in mb.groups()]
 
         new_y0 = None
@@ -3419,9 +3472,11 @@ def make_print_copy(src_pdf):
             if info:
                 new_y0 = y1 - (info[0] + 12.0)
 
-        if new_y0 is None: return None
+        if new_y0 is None:
+            return _make_print_copy_pypdf(src_pdf)
         new_y0 = max(y0, new_y0)
-        if new_y0 >= y1 - 40: return None
+        if new_y0 >= y1 - 40:
+            return None
 
         new_y1 = y1
 
@@ -3436,7 +3491,8 @@ def make_print_copy(src_pdf):
         old_len = reg_end - reg_start
         new = b"/MediaBox " + box + b" /CropBox " + box
         if len(new) > old_len: new = b"/MediaBox " + box
-        if len(new) > old_len: return None
+        if len(new) > old_len:
+            return _make_print_copy_pypdf(src_pdf)
 
         new = new + b" " * (old_len - len(new))
         data[reg_start:reg_end] = new
@@ -3448,7 +3504,7 @@ def make_print_copy(src_pdf):
         return dst
     except Exception as e:
         log_exception("make_print_copy", e)
-        return None
+        return _make_print_copy_pypdf(src_pdf)
 
 class ElevateLoginGate(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
@@ -3568,6 +3624,8 @@ class CustomTkinterApp(ctk.CTk):
         self.last_summary_info = {}
 
         self.printed_count_today = 0
+        self._printed_count_day = datetime.date.today()
+        self.last_printed_pdf = None
         self.processing_lock = threading.Lock()
         self.is_processing = False
         self.last_pdf_state_sig = ""
@@ -3957,6 +4015,63 @@ class CustomTkinterApp(ctk.CTk):
         else:
             messagebox.showerror("Error", f"File not found: {rec.get('file', '')}")
 
+    def reprint_last_receipt(self):
+        """إعادة طباعة آخر إيصال تم طباعته (أو أحدث إيصال في المجلد اليوم لو البرنامج لسه مفتوح)."""
+        self._cancel_auto_minimize()
+        target = self.last_printed_pdf if (self.last_printed_pdf and os.path.exists(self.last_printed_pdf)) else None
+        if not target:
+            p = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            if p and os.path.isdir(p):
+                today_d = datetime.date.today()
+                best_mt, best_p = 0.0, None
+                try:
+                    with os.scandir(p) as it:
+                        for ent in it:
+                            if not ent.is_file(): continue
+                            fn = ent.name
+                            fn_l = fn.lower()
+                            if not fn_l.endswith(".pdf") or fn_l.endswith("_cropped.pdf") or fn_l.endswith("_summary.pdf"):
+                                continue
+                            if not (fn_l.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fn)):
+                                continue
+                            if fn.lstrip("_") in _VOID_KEYS:
+                                continue
+                            st = ent.stat()
+                            if datetime.date.fromtimestamp(st.st_mtime) == today_d and st.st_mtime > best_mt:
+                                best_mt, best_p = st.st_mtime, ent.path
+                except Exception as e:
+                    log_exception("reprint_last_scan", e)
+                target = best_p
+
+        if not target or not os.path.exists(target):
+            messagebox.showinfo(T2("تنبيه", "Notice"),
+                                T2("لا يوجد إيصال مطبوع اليوم لإعادة طباعته.", "No receipt printed today to reprint."))
+            if self.is_mini_mode:
+                self._schedule_auto_minimize(5000)
+            return
+
+        self.last_printed_pdf = target
+        try: self.btn_mini_reprint.configure(state="disabled")
+        except Exception as _e: _log_silent("reprint_last#dis", _e)
+
+        def _work():
+            ok = self.send_to_thermal_printer_57x90(target)
+            def _done():
+                try: self.btn_mini_reprint.configure(state="normal")
+                except Exception as _e: _log_silent("reprint_last#en", _e)
+                if ok:
+                    play_sound_matched()
+                    self._tray_notify(T2(f"تمت إعادة طباعة: {os.path.basename(target)}",
+                                         f"Reprinted: {os.path.basename(target)}"))
+                else:
+                    messagebox.showerror("Error", T2("تعذرت الطباعة. اتأكد من الطابعة وحاول تاني.",
+                                                     "Printing failed. Check the printer and try again."))
+                if self.is_mini_mode:
+                    self._schedule_auto_minimize(5000)
+            self.run_on_main(_done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def _sync_watch_path(self):
         try: self._watch_path = self.get_clean_path()
         except Exception as _e: _log_silent("_sync_watch_path#1", _e)
@@ -4301,10 +4416,18 @@ class CustomTkinterApp(ctk.CTk):
                                             font=(FONT_FAMILY, 10, "bold"), text_color="#94A3B8")
         self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 10))
 
-        self.btn_mini_archive = ctk.CTkButton(self.body_mini, text=tr("clean_downloads"), height=40, corner_radius=10,
-                                              font=FONT_BTN_MAIN, fg_color="#4F46E5", hover_color="#4338CA",
+        f_mini_btns = ctk.CTkFrame(self.body_mini, fg_color="transparent")
+        f_mini_btns.pack(fill="x", pady=(2, 6))
+
+        self.btn_mini_reprint = ctk.CTkButton(f_mini_btns, text=tr("mini_reprint_last"), height=40, corner_radius=10,
+                                              font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309",
+                                              text_color="#FFFFFF", command=self.reprint_last_receipt)
+        self.btn_mini_reprint.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.btn_mini_archive = ctk.CTkButton(f_mini_btns, text=tr("clean_downloads"), height=40, corner_radius=10,
+                                              font=FONT_BTN_SUB, fg_color="#4F46E5", hover_color="#4338CA",
                                               text_color="#FFFFFF", command=self.open_downloads_archiver_dialog)
-        self.btn_mini_archive.pack(fill="x", pady=(2, 6))
+        self.btn_mini_archive.pack(side="right", fill="x", expand=True, padx=(4, 0))
 
         self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
@@ -4530,6 +4653,7 @@ class CustomTkinterApp(ctk.CTk):
             "btn_summary_reopen":   (lambda: T2("إعادة فتح ملخص الفحص", "Reopen scan summary")),
             "btn_archive_downloads": (lambda: T2("أرشفة الجهاز", "Archive this device")),
             "btn_mini_archive":     (lambda: T2("أرشفة الجهاز", "Archive this device")),
+            "btn_mini_reprint":     (lambda: T2("إعادة طباعة آخر إيصال (في حالة نفاد الورق أو انحشاره)", "Reprint the last receipt (if paper ran out or jammed)")),
             "btn_reset":            (lambda: T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)")),
             "btn_view_rec":         (lambda: T2("عرض السجلات", "Records viewer")),
             "btn_pdf_export":       (lambda: T2("تصدير ملخص PDF", "Export PDF summary")),
@@ -4670,6 +4794,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_cash.configure(text=L["cash_btn"])
         self.btn_archive_downloads.configure(text=L["clean_downloads"])
         self.btn_mini_archive.configure(text=L["clean_downloads"])
+        self.btn_mini_reprint.configure(text=L["mini_reprint_last"])
         self.btn_reset.configure(text=L["reset"])
         self.lbl_kpi1_title.configure(text=L["kpi1"])
         self.lbl_kpi2_title.configure(text=L["kpi2"])
@@ -4770,14 +4895,35 @@ class CustomTkinterApp(ctk.CTk):
         webbrowser.open(target_url)
 
     def init_watchdogs(self):
+        def _scan_dir(folder):
+            """قراءة سريعة لمجلد الإيصالات بـ os.scandir (بدون glob أو استدعاءات قرص مكررة).
+            ترجّع: ([(path, name, size)], set_of_crdownload_base_names)."""
+            pdfs, cr_bases = [], set()
+            try:
+                with os.scandir(folder) as it:
+                    for ent in it:
+                        name = ent.name
+                        nl = name.lower()
+                        if nl.endswith(".pdf"):
+                            try:
+                                if ent.is_file(follow_symlinks=False):
+                                    pdfs.append((ent.path, name, ent.stat(follow_symlinks=False).st_size))
+                            except OSError:
+                                pass
+                        elif nl.endswith(".crdownload"):
+                            cr_bases.add(nl[:-11])
+            except OSError:
+                pass
+            return pdfs, cr_bases
+
         def _routine():
             # استبعاد وتسكين الملفات الموجودة قبل تشغيل البرنامج
             initial_path = self._watch_path
             last_seeded = None   # آخر مجلد اتعلّمت ملفاته "اتطبعت"
-            if initial_path and os.path.exists(initial_path):
+            if initial_path and os.path.isdir(initial_path):
                 try:
-                    for f in glob.glob(os.path.join(initial_path, "*.pdf")):
-                        fn = os.path.basename(f)
+                    pdfs, _ = _scan_dir(initial_path)
+                    for _, fn, _ in pdfs:
                         self.printed_receipts_set.add(fn)
                         self.printed_receipts_set.add(clean_download_filename(fn))
                     last_seeded = initial_path
@@ -4789,47 +4935,59 @@ class CustomTkinterApp(ctk.CTk):
                 time.sleep(0.5 if self.auto_print_enabled else 2)
                 try:
                     p = self._watch_path
-                    if not p or not os.path.exists(p): continue
+                    if not p or not os.path.isdir(p): continue
+
+                    # تصفير عدّاد المطبوعات تلقائيًا عند بداية يوم جديد مع الحفاظ على منع إعادة طباعة الملفات القديمة
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
+                        self.last_printed_pdf = None
+                        self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                            text=tr("mini_printed_count", count=0)))
+                        pdfs_now, _ = _scan_dir(p)
+                        keep = set()
+                        for _, fn, _ in pdfs_now:
+                            keep.add(fn)
+                            keep.add(clean_download_filename(fn))
+                        self.printed_receipts_set = keep
+
                     if p != last_seeded:
                         # مجلد جديد اتختار: الملفات اللي فيه دلوقتي قديمة، مش بتتطبع تلقائيًا.
                         # الطباعة التلقائية بتشتغل بس على الملفات اللي تظهر بعد كده.
-                        for f in glob.glob(os.path.join(p, "*.pdf")):
-                            fn = os.path.basename(f)
+                        pdfs_s, _ = _scan_dir(p)
+                        for _, fn, _ in pdfs_s:
                             self.printed_receipts_set.add(fn)
                             self.printed_receipts_set.add(clean_download_filename(fn))
                         last_seeded = p
                         continue
                     if not (self.auto_print_enabled or self.auto_sync_enabled): continue
 
-                    pdf_files = glob.glob(os.path.join(p, "*.pdf"))
+                    pdf_entries, cr_bases = _scan_dir(p)
 
                     if self.auto_print_enabled:
-                        for pdf_file in pdf_files:
-                            fname = os.path.basename(pdf_file)
-                            if fname.endswith("_cropped.pdf") or fname.endswith("_Summary.pdf"):
+                        for pdf_file, fname, fsize in pdf_entries:
+                            fl = fname.lower()
+                            if fl.endswith("_cropped.pdf") or fl.endswith("_summary.pdf"):
                                 continue
-                            if not (fname.lower().startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
+                            if not (fl.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
                                 continue
-
                             if fname.lstrip("_") in _VOID_KEYS:
                                 continue
                             clean_fn = clean_download_filename(fname)
                             if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
-                                cr_file = pdf_file + ".crdownload"
-                                if not os.path.exists(cr_file):
-                                    try:
-                                        if os.path.getsize(pdf_file) > 1000:
-                                            self.printed_receipts_set.add(fname)
-                                            self.printed_receipts_set.add(clean_fn)
-                                            self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
-                                    except Exception as _e: _log_silent("_routine#1", _e)
+                                if fl not in cr_bases and fsize > 1000:
+                                    self.printed_receipts_set.add(fname)
+                                    self.printed_receipts_set.add(clean_fn)
+                                    self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
 
                     if (self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode
                             and time.time() - _last_sync[0] >= 2):
                         _last_sync[0] = time.time()
                         try:
-                            valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-                            current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
+                            valid = [(fn, sz) for _, fn, sz in pdf_entries
+                                     if not fn.lower().endswith(("_summary.pdf", "_cropped.pdf"))]
+                            current_sig = f"{len(valid)}_{sum(sz for _, sz in valid)}"
                             if self.last_pdf_state_sig == "":
                                 self.last_pdf_state_sig = current_sig
                             elif current_sig != self.last_pdf_state_sig:
@@ -4843,11 +5001,16 @@ class CustomTkinterApp(ctk.CTk):
             while True:
                 pdf = self._print_queue.get()
                 fname = os.path.basename(pdf)
+                self.last_printed_pdf = pdf
                 try: ok = self.send_to_thermal_printer_57x90(pdf)
                 except Exception as e:
                     log_exception(f"print_worker:{fname}", e)
                     ok = False
                 if ok:
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
                     self.printed_count_today += 1
                     self.run_on_main(lambda: self.lbl_mini_counter.configure(
                         text=tr("mini_printed_count", count=self.printed_count_today)))
