@@ -97,7 +97,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v61-lite"
+APP_VERSION = "v62-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -3394,36 +3394,45 @@ class ElevateLoginGate(ctk.CTkToplevel):
         self.title("A2R Authorization")
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 360, 205)
+        center_window_relative(self, parent, 380, 238)
 
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(self, text="A2R OPERATIONS", font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 1))
-        ctk.CTkLabel(self, text=tr("login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 6))
+        ctk.CTkFrame(self, height=3, corner_radius=0, fg_color=t["danger_btn"]).pack(fill="x")
 
-        f_entry = ctk.CTkFrame(self, fg_color="transparent")
-        f_entry.pack(fill="x", padx=24, pady=4)
+        card = ctk.CTkFrame(self, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="both", expand=True, padx=16, pady=(12, 8))
 
-        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", font=(FONT_FAMILY, 13, "bold"),
+        ctk.CTkLabel(card, text="A2R OPERATIONS", font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(12, 2))
+        ctk.CTkLabel(card, text=tr("login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+
+        f_entry = ctk.CTkFrame(card, fg_color="transparent")
+        f_entry.pack(fill="x", padx=18, pady=4)
+
+        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", height=34, font=(FONT_FAMILY, 13, "bold"),
                                   text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_pwd.bind("<Return>", lambda e: self.check_pwd())
         attach_context_menu(self.e_pwd)
 
         self.pwd_visible = False
-        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=35, command=self.toggle_eye, fg_color=t["card"], text_color=t["text"])
+        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=40, height=34, corner_radius=9, command=self.toggle_eye,
+                                     fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF")
         self.btn_eye.pack(side="right")
 
-        self.lbl_err = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_err.pack(pady=(1, 0))
+        self.lbl_err = ctk.CTkLabel(card, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_err.pack(pady=(2, 0))
 
-        btn_enter = ctk.CTkButton(self, text=tr("btn_full_console"), font=FONT_BTN_MAIN,
-                                  fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF", command=self.check_pwd)
-        btn_enter.pack(fill="x", padx=24, pady=(6, 4))
+        btn_enter = ctk.CTkButton(card, text=tr("btn_full_console"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+                                  fg_color=t["danger_btn"], hover_color=t["danger_btn_hover"], text_color="#FFFFFF",
+                                  command=self.check_pwd)
+        btn_enter.pack(fill="x", padx=18, pady=(6, 12))
 
         ctk.CTkLabel(self, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
-                     font=(FONT_FAMILY, 9, "bold"), text_color="#64748B").pack(pady=(4, 6))
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+        try: self.grab_set()
+        except Exception as _e: _log_silent("ElevateLoginGate#grab", _e)
         self.after(150, self.e_pwd.focus_set)
 
     def toggle_eye(self):
@@ -3748,9 +3757,9 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkLabel(win, text=T2("مقاسات الطابعة الافتراضية", "Default printer paper sizes"),
                      font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(10, 2))
         cb_papers = ctk.CTkComboBox(win, values=[T2("... بقرا المقاسات من الطابعة", "... reading printer sizes")],
-                                    height=30, font=FONT_ENTRY, state="readonly",
-                                    fg_color=t["input"], border_color=t["border"], text_color=t["text"])
+                                    height=32, font=FONT_ENTRY, state="readonly")
         cb_papers.set(T2("... بقرا المقاسات من الطابعة", "... reading printer sizes"))
+        style_combo(cb_papers, t)
         cb_papers.pack(fill="x", padx=16)
 
         def _on_pick(choice):
@@ -3848,8 +3857,8 @@ class CustomTkinterApp(ctk.CTk):
                 self.run_on_main(_done)
             threading.Thread(target=_apply_printer, daemon=True).start()
 
-        btn_save = ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
-                                 hover_color=t["warning"], text_color="#FFFFFF", command=_save)
+        btn_save = ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+                                 fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF", command=_save)
         btn_save.pack(fill="x", padx=16, pady=(8, 0))
         win.bind("<Return>", _save)
         win.bind("<Escape>", lambda e: _close())
@@ -3886,8 +3895,13 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as _e: _log_silent("_sync_watch_path#2", _e)
 
     def request_full_console(self):
+        old = getattr(self, "_login_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("request_full_console#exists", _e)
         self._cancel_auto_minimize()
-        ElevateLoginGate(self, self.unlock_full_console)
+        self._login_win = ElevateLoginGate(self, self.unlock_full_console)
 
     def unlock_full_console(self, is_supervisor):
         self.is_supervisor = is_supervisor
@@ -4972,7 +4986,8 @@ class CustomTkinterApp(ctk.CTk):
 
             ctk.CTkLabel(win, text=(T2("المشرف: كل الأيام بتفاصيلها • المستخدم: آخر 7 أيام للقراءة فقط",
                                        "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
-                                    T2("🗂️ سجل الأرشيف متاح من زر 🛠️ المشرف", "🗂️ Archive history is available from the 🛠️ Supervisor button")),
+                                    T2("📚 سجل الأرشيف متاح من زر سجل الأرشيف في الشريط السفلي",
+                                       "📚 Archive history is available from the Archive History button below")),
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
@@ -5672,9 +5687,12 @@ class CustomTkinterApp(ctk.CTk):
         def mk_card(key, title, color):
             f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
-            lb = ctk.CTkLabel(f, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
-            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkFrame(f, width=4, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=8)
+            inner = ctk.CTkFrame(f, fg_color="transparent")
+            inner.pack(side="left", fill="both", expand=True, pady=6)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            lb.pack(anchor="w")
             card_lbls[key] = lb
         mk_card("total", T2("إجمالي اليوم (الصافي)", "Day total (net)"), t["success"])
         mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
@@ -6178,9 +6196,12 @@ class CustomTkinterApp(ctk.CTk):
         def mk_card(key, title, color):
             f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
-            lb = ctk.CTkLabel(f, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
-            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkFrame(f, width=4, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=8)
+            inner = ctk.CTkFrame(f, fg_color="transparent")
+            inner.pack(side="left", fill="both", expand=True, pady=6)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            lb.pack(anchor="w")
             card_lbls[key] = lb
 
         mk_card("total", T2("إجمالي المبلغ (الصافي)", "Net total"), t["success"])
@@ -6405,24 +6426,32 @@ class CustomTkinterApp(ctk.CTk):
         refresh()
 
     def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
+        old = getattr(self, "_summary_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception as _e: _log_silent("show_custom_summary#old", _e)
+
         t = THEMES[self.current_theme_name]
         modal = ctk.CTkToplevel(self)
+        self._summary_win = modal
         modal.title(tr("summary_title"))
         modal.resizable(False, False)
         set_window_icon_safe(modal)
-        center_window_relative(modal, self, 440, 420)
+        center_window_relative(modal, self, 456, 465)
         modal.configure(fg_color=t["bg"])
 
-        hdr = ctk.CTkFrame(modal, corner_radius=0, height=42, fg_color=t["card"])
+        hdr = ctk.CTkFrame(modal, corner_radius=0, height=44, fg_color=t["sub_card"])
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=6)
+        ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
+        ctk.CTkFrame(modal, height=2, corner_radius=0, fg_color=t["primary"]).pack(fill="x")
 
-        card_box = ctk.CTkFrame(modal, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
-        card_box.pack(fill="both", expand=True, padx=14, pady=10)
+        card_box = ctk.CTkFrame(modal, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card_box.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
         row_u = ctk.CTkFrame(card_box, fg_color="transparent")
-        row_u.pack(fill="x", padx=14, pady=(8, 4))
-        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
+        row_u.pack(fill="x", padx=14, pady=(10, 6))
+        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left")
 
         # قايمة الوحدات = الوحدات اللي في إيصالات اليوم نفسها (الأكتر أولًا)، والاختيار إجباري (قراءة فقط، مفيش كتابة حرة).
         # لو مفيش ولا وحدة اتقرت من الإيصالات (إيصالات يدوية بس مثلًا) بنرجع لقايمة الوحدات الكاملة عشان المستخدم ميتعلقش.
@@ -6442,12 +6471,14 @@ class CustomTkinterApp(ctk.CTk):
             if self.last_summary_info is not None:
                 self.last_summary_info["unit"] = val
 
-        cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=200, height=30, font=FONT_REGULAR_BOLD,
-                                     fg_color=t["input"], border_color=t["border"], text_color=t["text"],
+        cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=215, height=32, font=FONT_REGULAR_BOLD,
                                      command=_unit_changed, state="readonly")
+        style_combo(cb_unit, t)
         cb_unit.set(_sel_unit)
         cb_unit.pack(side="right")
         _unit_changed(_sel_unit)
+
+        ctk.CTkFrame(card_box, height=1, fg_color=t["border"]).pack(fill="x", padx=14, pady=(2, 6))
 
         void_cnt = self.last_summary_info.get("void_count", 0)
         void_amt = self.last_summary_info.get("void_sum", 0.0)
@@ -6461,26 +6492,34 @@ class CustomTkinterApp(ctk.CTk):
         ]
         if duplicates: details.append((tr("duplicates_lbl"), f"{duplicates}", t["danger"], 12))
         if wrong: details.append((tr("wrong_lbl"), f"{wrong}", t["warning"], 12))
-        details.append((tr("total_amt_lbl"), f"{total_sum:,.2f} {tr('currency')}", t["success"], 16))
 
         for lbl_t, val_t, val_c, val_sz in details:
             row = ctk.CTkFrame(card_box, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=2)
-            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
+            row.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"]).pack(side="left")
             ctk.CTkLabel(row, text=val_t, font=(FONT_FAMILY, val_sz, "bold"), text_color=val_c).pack(side="right")
 
+        tot_box = ctk.CTkFrame(card_box, corner_radius=10, fg_color=t["input"], border_width=1, border_color=t["border"])
+        tot_box.pack(fill="x", padx=14, pady=(10, 12))
+        ctk.CTkFrame(tot_box, width=4, corner_radius=2, fg_color=t["success"]).pack(side="left", fill="y", padx=(6, 8), pady=6)
+        ctk.CTkLabel(tot_box, text=tr("total_amt_lbl"), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"]).pack(side="left", pady=8)
+        ctk.CTkLabel(tot_box, text=f"{total_sum:,.2f} {tr('currency')}", font=(FONT_FAMILY, 17, "bold"),
+                     text_color=t["success"]).pack(side="right", padx=12, pady=8)
+
         b_bar = ctk.CTkFrame(modal, fg_color="transparent")
-        b_bar.pack(fill="x", padx=14, pady=(0, 10))
+        b_bar.pack(fill="x", padx=14, pady=(0, 12))
 
-        ctk.CTkButton(b_bar, text="Close", width=70, height=32, font=FONT_BTN_SUB, fg_color=t["border"],
-                      hover_color=t["card"], text_color=t["text"], command=modal.destroy).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(b_bar, text=T2("إغلاق", "Close"), width=80, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=modal.destroy).pack(side="right", padx=(6, 0))
 
-        ctk.CTkButton(b_bar, text=tr("export_pdf"), width=90, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=4)
+        ctk.CTkButton(b_bar, text=tr("export_pdf"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=6)
 
         if self.is_supervisor:
-            ctk.CTkButton(b_bar, text=tr("open_excel"), width=95, height=32, font=FONT_BTN_SUB, fg_color=t["success"],
-                          hover_color=t["primary_hover"], text_color="#FFFFFF",
+            ctk.CTkButton(b_bar, text=tr("open_excel"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                          fg_color=t["success_btn"], hover_color=t["success_btn_hover"], text_color="#FFFFFF",
                           command=lambda: [modal.destroy(), self.open_excel()]).pack(side="right")
 
     def reopen_summary_modal(self):
@@ -6493,32 +6532,44 @@ class CustomTkinterApp(ctk.CTk):
                                  info.get("wrong_count", 0), info.get("missing_count", 0))
 
     def open_manual(self):
+        old = getattr(self, "_manual_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_manual#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 380, 340)
+        center_window_relative(win, self, 400, 390)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("manual_amt_lbl"), font=FONT_SECTION_LBL, text_color=t["warning"]).pack(anchor="w", padx=18, pady=(12, 2))
-        e_a = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_a.pack(fill="x", padx=18)
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
+        card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
+
+        ctk.CTkLabel(card, text=tr("manual_amt_lbl"), font=FONT_SECTION_LBL, text_color=t["warning"]).pack(anchor="w", padx=14, pady=(12, 2))
+        e_a = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_a.pack(fill="x", padx=14)
         attach_context_menu(e_a)
 
-        ctk.CTkLabel(win, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        e_name = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_name.pack(fill="x", padx=18)
+        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        e_name = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_name.pack(fill="x", padx=14)
         attach_context_menu(e_name)
 
-        ctk.CTkLabel(win, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        e_p = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_p.pack(fill="x", padx=18)
+        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        e_p = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_p.pack(fill="x", padx=14)
         attach_context_menu(e_p)
 
-        ctk.CTkLabel(win, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, fg_color=t["input"], border_color=t["border"], height=32)
+        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_u, t)
         cb_u.set("")
-        cb_u.pack(fill="x", padx=18)
+        cb_u.pack(fill="x", padx=14, pady=(0, 12))
         attach_context_menu(cb_u)
 
         busy = [False]   # منع الضغط المتكرر (Enter مرتين أو دبل كليك) أثناء الإنشاء والطباعة
@@ -6585,40 +6636,61 @@ class CustomTkinterApp(ctk.CTk):
                     try: btn_gen.configure(state="normal")
                     except Exception as _e: _log_silent("manual_save_btn2", _e)
 
-        e_a.bind("<Return>", save)
-        btn_gen = ctk.CTkButton(win, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN, fg_color=t["success"],
-                                hover_color=t["primary_hover"], text_color="#FFFFFF", height=36, command=save)
-        btn_gen.pack(fill="x", padx=18, pady=16)
+        for _ent in (e_a, e_name, e_p):
+            _ent.bind("<Return>", save)
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=14, pady=(0, 12))
+        btn_gen = ctk.CTkButton(f_btns, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN,
+                                fg_color=t["success_btn"], hover_color=t["success_btn_hover"],
+                                text_color="#FFFFFF", height=38, corner_radius=10, command=save)
+        btn_gen.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=82, height=38, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=win.destroy).pack(side="right")
         win.after(100, lambda: e_a.focus_set())
 
     def print_slip(self):
+        old = getattr(self, "_slip_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("print_slip#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 340, 285)
+        center_window_relative(win, self, 370, 310)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(12, 2))
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["warn_btn"]).pack(fill="x")
+        card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
-        cb_employee = SafeArabicComboBox(win, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=32,
-                                         fg_color=t["input"], border_color=t["border"])
+        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(12, 2))
+        cb_employee = SafeArabicComboBox(card, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_employee, t)
         cb_employee.set("")
-        cb_employee.pack(fill="x", padx=16)
+        cb_employee.pack(fill="x", padx=14)
         attach_context_menu(cb_employee)
 
-        ctk.CTkLabel(win, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(6, 2))
-        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=32, fg_color=t["input"], border_color=t["border"])
+        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_u, t)
         cb_u.set("")
-        cb_u.pack(fill="x", padx=16)
+        cb_u.pack(fill="x", padx=14)
         attach_context_menu(cb_u)
 
-        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
-        lbl_tid.pack(anchor="w", padx=16, pady=(6, 0))
+        tid_pill = ctk.CTkFrame(card, corner_radius=8, fg_color=t["input"], border_width=1, border_color=t["border"])
+        tid_pill.pack(fill="x", padx=14, pady=(10, 12))
+        lbl_tid = ctk.CTkLabel(tid_pill, text=T2("رقم الماكينة: —", "Terminal ID: —"),
+                               font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        lbl_tid.pack(pady=6)
 
         def _update_tid(*_):
             tid = UNIT_TERMINALS.get(cb_u.get().strip(), "")
-            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else T2("رقم الماكينة: —", "Terminal ID: —"))
 
         cb_u._user_command = lambda raw: _update_tid()
         cb_u.bind("<KeyRelease>", _update_tid)
@@ -6628,34 +6700,45 @@ class CustomTkinterApp(ctk.CTk):
             unit_val = cb_u.get().strip()
             tid_val = UNIT_TERMINALS.get(unit_val, "")
             date_val = datetime.date.today().strftime('%d/%m/%Y')
-            
-            pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
-            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
-                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
-                if not os.path.exists(sumatra_path):
-                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
-                
-                if os.path.exists(sumatra_path):
-                    cmd = [
-                        sumatra_path,
-                        "-print-to-default",
-                        "-print-settings", "shrink",     # البون: من غير paper= عشان طول الورقة يتبع الـ PDF الصغير مش 57x90
-                        "-silent",
-                        pdf_path
-                    ]
-                    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
-                else:
-                    if sys.platform == "win32": os.startfile(pdf_path, "print")
-            else:
-                txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
-                lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
-                with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
-                if sys.platform == "win32": os.startfile(txt_path, "print")
             win.destroy()
 
+            def _print_bg():
+                try:
+                    pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+                    if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
+                        sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                        if not os.path.exists(sumatra_path):
+                            sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                        if os.path.exists(sumatra_path):
+                            cmd = [
+                                sumatra_path,
+                                "-print-to-default",
+                                "-print-settings", "shrink",     # البون: من غير paper= عشان طول الورقة يتبع الـ PDF الصغير مش 57x90
+                                "-silent",
+                                pdf_path
+                            ]
+                            subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
+                        else:
+                            if sys.platform == "win32": os.startfile(pdf_path, "print")
+                    else:
+                        txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
+                        lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
+                        with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+                        if sys.platform == "win32": os.startfile(txt_path, "print")
+                except Exception as e:
+                    log_exception("print_slip_bg", e)
+
+            threading.Thread(target=_print_bg, daemon=True).start()
+
         cb_employee.bind("<Return>", do_p)
-        ctk.CTkButton(win, text=tr("slip_btn_print"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=do_p).pack(fill="x", padx=16, pady=16)
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkButton(f_btns, text=tr("slip_btn_print"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+                      fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF",
+                      command=do_p).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=80, height=36, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=win.destroy).pack(side="right")
         win.after(100, lambda: cb_employee.focus_set())
 
     def ask_summary_unit(self, parent=None):
@@ -6673,14 +6756,14 @@ class CustomTkinterApp(ctk.CTk):
         res = {"v": None}
 
         ctk.CTkLabel(win, text=T2("اختار الوحدة (إجباري):", "Choose the unit (required):"),
-                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(14, 2))
-        cb = SafeArabicComboBox(win, values=UNITS_LIST, font=FONT_REGULAR_BOLD, height=32,
-                                fg_color=t["input"], border_color=t["border"], state="readonly")
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        cb = SafeArabicComboBox(win, values=UNITS_LIST, font=FONT_REGULAR_BOLD, height=34, state="readonly")
+        style_combo(cb, t)
         cb.set("")
         cb.pack(fill="x", padx=16)
-        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
+        lbl_tid = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
         lbl_tid.pack(anchor="w", padx=16, pady=(8, 0))
-        msg = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#EF4444")
+        msg = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["danger"])
         msg.pack(anchor="w", padx=16, pady=(2, 0))
 
         def _update(*_):
@@ -6819,47 +6902,69 @@ class CustomTkinterApp(ctk.CTk):
             messagebox.showerror("Error", str(e))
 
     def open_cash_counter(self):
+        old = getattr(self, "_cash_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_cash_counter#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 420, 500)
+        center_window_relative(win, self, 440, 575)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
-        f_quick = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
+        hdr = ctk.CTkFrame(win, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(10, 4))
+        ctk.CTkLabel(hdr, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(side="left")
+        if self.system_total_sum > 0:
+            sys_badge = ctk.CTkFrame(hdr, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
+            sys_badge.pack(side="right")
+            ctk.CTkLabel(sys_badge, text=T2(f"السيستم: {self.system_total_sum:,.2f}", f"Sys: {self.system_total_sum:,.2f}"),
+                         font=(FONT_FAMILY, 10, "bold"), text_color=t["success"], padx=8, pady=3).pack()
+
+        f_quick = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
         f_quick.pack(fill="x", padx=16, pady=(4, 8))
 
         r_c = ctk.CTkFrame(f_quick, fg_color="transparent")
-        r_c.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r_c, text=tr("cash_manual_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["warning"]).pack(side="left")
-        e_manual_cash = ctk.CTkEntry(r_c, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        r_c.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(r_c, text=tr("cash_manual_lbl"), width=165, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["warning"]).pack(side="left")
+        e_manual_cash = ctk.CTkEntry(r_c, width=140, height=32, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_manual_cash.pack(side="right")
         attach_context_menu(e_manual_cash)
 
         r_p = ctk.CTkFrame(f_quick, fg_color="transparent")
-        r_p.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r_p, text=tr("cash_pos_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(side="left")
-        e_pos_in = ctk.CTkEntry(r_p, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        r_p.pack(fill="x", padx=12, pady=(4, 8))
+        ctk.CTkLabel(r_p, text=tr("cash_pos_lbl"), width=165, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(side="left")
+        e_pos_in = ctk.CTkEntry(r_p, width=140, height=32, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_pos_in.pack(side="right")
         attach_context_menu(e_pos_in)
 
-        frame_box = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
-        frame_box.pack(fill="both", expand=True, padx=16, pady=2)
+        frame_box = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        frame_box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         denoms = [200, 100, 50, 20, 10, 5, 1]
         entries = {}
+        sub_lbls = {}
 
-        lbl_tot_cash = ctk.CTkLabel(win, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
-        lbl_combined_total = ctk.CTkLabel(win, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"])
-        lbl_diff_sys = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"))
+        sum_card = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        sum_card.pack(fill="x", padx=16, pady=(0, 8))
+        lbl_tot_cash = ctk.CTkLabel(sum_card, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
+        lbl_combined_total = ctk.CTkLabel(sum_card, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 13, "bold"), text_color=t["text"])
+        lbl_diff_sys = ctk.CTkLabel(sum_card, text="", font=(FONT_FAMILY, 11, "bold"))
         current_calculated = [0.0, 0.0]
 
         def recalc(*_):
             c_sum = 0.0
             for d, ent in entries.items():
                 v = ent.get().strip()
-                if v.isdigit(): c_sum += int(v) * d
+                sub = int(v) * d if v.isdigit() else 0
+                c_sum += sub
+                sub_lbls[d].configure(text=f"= {sub:,}" if sub else "= 0",
+                                      text_color=t["success"] if sub else t["text_muted"])
 
             manual_str = e_manual_cash.get().strip().replace(",", "")
             if manual_str:
@@ -6890,19 +6995,30 @@ class CustomTkinterApp(ctk.CTk):
         e_manual_cash.bind("<KeyRelease>", recalc)
         e_pos_in.bind("<KeyRelease>", recalc)
 
-        for d in denoms:
+        for idx_d, d in enumerate(denoms):
             r = ctk.CTkFrame(frame_box, fg_color="transparent")
-            r.pack(fill="x", padx=12, pady=1)
-            ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=90, anchor="w", font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(side="left")
-            e = ctk.CTkEntry(r, width=85, height=22, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+            r.pack(fill="x", padx=12, pady=(8 if idx_d == 0 else 2, 8 if idx_d == len(denoms) - 1 else 2))
+            ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=95, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
+            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"])
+            lbl_s.pack(side="right", padx=(6, 0))
+            sub_lbls[d] = lbl_s
+            e = ctk.CTkEntry(r, width=90, height=28, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
             e.pack(side="right")
             e.bind("<KeyRelease>", recalc)
             attach_context_menu(e)
             entries[d] = e
 
-        lbl_tot_cash.pack(pady=(4, 0))
-        lbl_combined_total.pack(pady=(1, 0))
-        lbl_diff_sys.pack(pady=(1, 6))
+        lbl_tot_cash.pack(pady=(8, 1))
+        lbl_combined_total.pack(pady=(1, 1))
+        lbl_diff_sys.pack(pady=(1, 8))
+
+        def clear_cash():
+            e_manual_cash.delete(0, "end")
+            e_pos_in.delete(0, "end")
+            for ent in entries.values():
+                ent.delete(0, "end")
+            recalc()
+            e_manual_cash.focus_set()
 
         def apply_and_close(event=None):
             if current_calculated[1] > 0:
@@ -6911,9 +7027,15 @@ class CustomTkinterApp(ctk.CTk):
                 self.check_pos()
             win.destroy()
 
-        btn_apply = ctk.CTkButton(win, text=tr("cash_apply_btn"), font=FONT_BTN_MAIN,
-                                  fg_color=t["success"], hover_color=t["primary_hover"], height=36, command=apply_and_close)
-        btn_apply.pack(fill="x", padx=20, pady=(0, 12))
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=16, pady=(0, 12))
+        btn_apply = ctk.CTkButton(f_btns, text=tr("cash_apply_btn"), font=FONT_BTN_MAIN, corner_radius=10,
+                                  fg_color=t["success_btn"], hover_color=t["success_btn_hover"], text_color="#FFFFFF",
+                                  height=38, command=apply_and_close)
+        btn_apply.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("تصفير", "Reset"), font=FONT_BTN_SUB, width=80, height=38, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=clear_cash).pack(side="right")
         win.bind("<Return>", apply_and_close)
         e_manual_cash.focus_set()
 
