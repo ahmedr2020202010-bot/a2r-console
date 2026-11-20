@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v67-lite"
+APP_VERSION = "v68-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -2135,6 +2135,12 @@ _SWEEP_LOCK = threading.Lock()
 
 _CACHE_LIMIT = 20000
 _CACHE_LOCK = threading.Lock()
+_CACHE_MISS = object()
+
+def _cache_get(cache, key):
+    """قراءة آمنة مع التعدد (Threads) من الكاش، ترجع _CACHE_MISS لو المفتاح غير موجود."""
+    with _CACHE_LOCK:
+        return cache.get(key, _CACHE_MISS)
 
 def _cache_put(cache, key, val):
     """تخزين مؤقت بحد أقصى: لما يعدّي الحد بنشيل أقدم نصف الإدخالات (القاموس بيحفظ ترتيب الإضافة).
@@ -2144,6 +2150,23 @@ def _cache_put(cache, key, val):
         if len(cache) > _CACHE_LIMIT:
             for k in list(cache)[:_CACHE_LIMIT // 2]:
                 cache.pop(k, None)
+
+def _is_pdf_ready(path):
+    """يتحقق أن ملف الـ PDF اكتملت كتابته بالكامل (يبدأ بـ %PDF- وينتهي بـ %%EOF وقابل للقراءة) قبل الطباعة."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if not head.startswith(b"%PDF-"):
+                return False
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size <= 1000:
+                return False
+            fh.seek(max(0, size - 2048))
+            tail = fh.read(2048)
+            return b"%%EOF" in tail
+    except OSError:
+        return False
 
 def _unique_dest(dest):
     """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
@@ -2189,8 +2212,8 @@ def archive_sweep(folder_path, progress=None):
         except OSError: continue
         mdate = datetime.date.fromtimestamp(stt.st_mtime)
         ck = (path, stt.st_mtime, stt.st_size)
-        file_date = _SWEEP_CACHE.get(ck)
-        if file_date is None:
+        file_date = _cache_get(_SWEEP_CACHE, ck)
+        if file_date is _CACHE_MISS:
             try: file_date = _sweep_file_date(path, fname, manual_map, mdate)
             except Exception as e:
                 log_exception(f"sweep_date:{fname}", e)
@@ -3191,8 +3214,9 @@ def read_pdf_record(path, manual_map):
             dt = parse_vault_dt(ca) or datetime.datetime.fromtimestamp(st.st_mtime)
             return make_record(path, unit, p or "-", n or "-", a, dt, mdate, True)
         key = (path, st.st_mtime, st.st_size, "manual")
-        if key in _PARSE_CACHE:
-            return dict(_PARSE_CACHE[key])
+        cached_m = _cache_get(_PARSE_CACHE, key)
+        if cached_m is not _CACHE_MISS:
+            return dict(cached_m)
         txt = run_pdftotext(path)
         unit = detect_unit_from_text(txt) or UNSPEC
         tm = TIME_RE.search(txt)
@@ -3203,8 +3227,8 @@ def read_pdf_record(path, manual_map):
         return rec
 
     key = (path, st.st_mtime, st.st_size)
-    if key in _PARSE_CACHE:
-        cached = _PARSE_CACHE[key]
+    cached = _cache_get(_PARSE_CACHE, key)
+    if cached is not _CACHE_MISS:
         return dict(cached) if cached else None
     txt = run_pdftotext(path)
     if not is_receipt_text(txt):
@@ -4379,6 +4403,9 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
+        # حساب إجمالي إيصالات اليوم الموجودة فور الدخول للنسخة الكاملة بدون انتظار نزول ملف جديد
+        if self.auto_sync_enabled and not self.is_processing:
+            self.after(250, self.start_thread)
         # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
         self.after(400, self.auto_archive_on_login)
         if not getattr(self, "_archive_tick_started", False):
@@ -5277,7 +5304,7 @@ class CustomTkinterApp(ctk.CTk):
                                 continue
                             clean_fn = clean_download_filename(fname)
                             if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
-                                if fl not in cr_bases and fsize > 1000:
+                                if fl not in cr_bases and fsize > 1000 and _is_pdf_ready(pdf_file):
                                     self.printed_receipts_set.add(fname)
                                     self.printed_receipts_set.add(clean_fn)
                                     self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
