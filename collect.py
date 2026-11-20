@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v69-lite"
+APP_VERSION = "v70-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -1087,32 +1087,57 @@ def _focus_target(widget):
     except Exception as _e:
         _log_silent("focus_target", _e)
 
+def _set_win_alpha(win, alpha):
+    """تغيير شفافية النافذة بسلاسة (0.0 أثناء الرسم، 1.0 بعد الاكتمال) بدون withdraw اللي بتتعارض مع CustomTkinter."""
+    try:
+        if win.winfo_exists():
+            win.attributes("-alpha", float(alpha))
+    except Exception as _e:
+        _log_silent("set_win_alpha", _e)
+
 def _win32_raise(win):
-    """رفع فعلي للنافذة على مستوى ويندوز (Win32) لضمان ظهورها أمام التطبيق الرئيسي دائمًا."""
+    """رفع فعلي للنافذة نفسها على مستوى ويندوز 64-bit باستخدام GetAncestor(GA_ROOT) بدون المساس بالنافذة الرئيسية."""
     if sys.platform != "win32":
         return
     try:
         import ctypes
+        from ctypes import wintypes
         user32 = ctypes.windll.user32
-        hwnd = win.winfo_id()
-        parent_hwnd = user32.GetParent(hwnd)
-        target_hwnd = parent_hwnd if parent_hwnd else hwnd
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        hwnd = wintypes.HWND(win.winfo_id())
+        root_hwnd = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT = 2 (النافذة نفسها فقط، ليس المالك)
         SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
-        user32.SetWindowPos(target_hwnd, -1, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-        user32.BringWindowToTop(target_hwnd)
-        user32.SetForegroundWindow(target_hwnd)
-        user32.SetWindowPos(target_hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        HWND_TOPMOST = wintypes.HWND(-1)
+        HWND_NOTOPMOST = wintypes.HWND(-2)
+        user32.SetWindowPos(root_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(root_hwnd)
+        user32.SetForegroundWindow(root_hwnd)
+        user32.SetWindowPos(root_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
     except Exception as _e:
         _log_silent("win32_raise", _e)
 
-def bring_window_to_front(win, focus_widget=None, delay=10):
-    """يظهر النافذة دفعة واحدة بدون تقطيع ويرفعها أمام البرنامج بشكل مضمون مع توجيه مؤشر الكتابة."""
+def bring_window_to_front(win, focus_widget=None, delay=15):
+    """يظهر النافذة مكتملة في إطار واحد بسلاسة ويرفعها أمام البرنامج بشكل مضمون مع توجيه مؤشر الكتابة."""
     def _raise():
         try:
             if not win.winfo_exists():
                 return
             win.update_idletasks()
-            win.deiconify()
+            try:
+                if win.state() != "normal":
+                    win.deiconify()
+                    win.state("normal")
+            except Exception as _e:
+                _log_silent("bring_window_to_front#st", _e)
+            _set_win_alpha(win, 1.0)
             win.lift()
             win.attributes("-topmost", True)
             _win32_raise(win)
@@ -1123,6 +1148,7 @@ def bring_window_to_front(win, focus_widget=None, delay=10):
                 try:
                     if not win.winfo_exists():
                         return
+                    _set_win_alpha(win, 1.0)
                     win.attributes("-topmost", False)
                     win.lift()
                     _win32_raise(win)
@@ -1130,7 +1156,7 @@ def bring_window_to_front(win, focus_widget=None, delay=10):
                         _focus_target(focus_widget)
                 except Exception as _e:
                     _log_silent("bring_window_to_front#rel", _e)
-            # 280ms: بعد انتهاء مؤقت CustomTkinter الداخلي (200ms) عشان النافذة متتنزلش ورا التطبيق
+            # 280ms: بعد انتهاء مؤقت CustomTkinter الداخلي (200ms) عشان النافذة تفضل قدام التطبيق
             win.after(280, _release)
         except Exception as _e:
             _log_silent("bring_window_to_front", _e)
@@ -3769,7 +3795,7 @@ def make_print_copy(src_pdf):
 class ElevateLoginGate(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
         super().__init__(parent)
-        self.withdraw()
+        _set_win_alpha(self, 0.0)
         self.parent = parent
         self.on_success = on_success
         self.title("A2R Authorization")
@@ -3855,7 +3881,7 @@ class CustomTkinterApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.withdraw()   # إخفاء مؤقت أثناء بناء العناصر حتى تفتح النافذة كاملة وسلسة في إطار واحد بدون تقطيع
+        _set_win_alpha(self, 0.0)   # شفافية مؤقتة أثناء بناء العناصر لتفتح النافذة مكتملة في إطار واحد بدون اختفاء أو تقطيع
         self.title(f"A2R Operations Console - {APP_OWNER}")
         self.resizable(False, False)
         
@@ -4070,6 +4096,7 @@ class CustomTkinterApp(ctk.CTk):
         def _restore():
             self.deiconify()
             self.state("normal")
+            _set_win_alpha(self, 1.0)
             if self.is_mini_mode:
                 self.switch_to_mini_view()
             else:
@@ -4108,7 +4135,7 @@ class CustomTkinterApp(ctk.CTk):
         self._cancel_auto_minimize()
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
@@ -4597,8 +4624,7 @@ class CustomTkinterApp(ctk.CTk):
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
         if show:
-            try: self.withdraw()
-            except Exception as _e: _log_silent("switch_to_mini#w", _e)
+            _set_win_alpha(self, 0.0)
         self.body_full.pack_forget()
         self.b_bar.pack_forget()
         self.btn_back_to_mini.pack_forget()
@@ -4620,18 +4646,24 @@ class CustomTkinterApp(ctk.CTk):
         self.update_idletasks()
 
         if not show:
+            _set_win_alpha(self, 1.0)
             return
 
-        self.deiconify()
-        self.state("normal")
+        try:
+            if self.state() != "normal":
+                self.deiconify()
+                self.state("normal")
+        except Exception as _e:
+            _log_silent("switch_to_mini#show", _e)
+        self.update()
+        _set_win_alpha(self, 1.0)
         self.lift()
         self.focus_force()
         self._schedule_auto_minimize(5000)
 
     def switch_to_full_view(self):
         self.is_mini_mode = False
-        try: self.withdraw()
-        except Exception as _e: _log_silent("switch_to_full#w", _e)
+        _set_win_alpha(self, 0.0)
         self.body_mini.pack_forget()
         
         self.btn_back_to_mini.pack(side="right", padx=(6, 0))
@@ -4652,8 +4684,14 @@ class CustomTkinterApp(ctk.CTk):
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.update_idletasks()
 
-        self.deiconify()
-        self.state("normal")
+        try:
+            if self.state() != "normal":
+                self.deiconify()
+                self.state("normal")
+        except Exception as _e:
+            _log_silent("switch_to_full#show", _e)
+        self.update()
+        _set_win_alpha(self, 1.0)
         self.lift()
         self.focus_force()
 
@@ -5459,7 +5497,7 @@ class CustomTkinterApp(ctk.CTk):
             _has_hub = getattr(self, "btn_arch_full", None) is not None
             _show_hist = not (getattr(self, "is_supervisor", False) and _has_hub)
             win = ctk.CTkToplevel(self)
-            win.withdraw()
+            _set_win_alpha(win, 0.0)
             self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
@@ -5932,7 +5970,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         self._arch_win, self._arch_win_admin = win, is_admin
         win.title(T2("📚 سجل الأرشيف", "📚 Archive History"))
         win.resizable(True, True)
@@ -6770,7 +6808,7 @@ class CustomTkinterApp(ctk.CTk):
         """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         day_txt = ""
         if day_iso:
             yy, mm, dd_ = day_iso.split("-")
@@ -7037,7 +7075,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         modal = ctk.CTkToplevel(self)
-        modal.withdraw()
+        _set_win_alpha(modal, 0.0)
         self._summary_win = modal
         modal.title(tr("summary_title"))
         modal.resizable(False, False)
@@ -7148,7 +7186,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
@@ -7266,7 +7304,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
@@ -7518,7 +7556,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
-        win.withdraw()
+        _set_win_alpha(win, 0.0)
         self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
