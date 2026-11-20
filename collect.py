@@ -97,7 +97,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v60-lite"
+APP_VERSION = "v61-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -124,24 +124,11 @@ def _log_silent(ctx, e):
 ctk.set_appearance_mode("Dark")
 try:
     _tm = ctk.ThemeManager.theme
-    for _w, _r in (("CTkButton", 8), ("CTkEntry", 8), ("CTkComboBox", 8), ("CTkOptionMenu", 8), ("CTkFrame", 12)):
+    for _w, _r in (("CTkButton", 10), ("CTkEntry", 9), ("CTkComboBox", 9), ("CTkOptionMenu", 9), ("CTkFrame", 14)):
         if _w in _tm and "corner_radius" in _tm[_w]: _tm[_w]["corner_radius"] = _r
-    _tm["CTkButton"]["border_width"] = 1
-    _tm["CTkButton"]["border_color"] = ["#B8860B", "#D4AF37"]
+    _tm["CTkButton"]["border_width"] = 0
 except Exception:
     pass
-
-_RED_FILLS = {"#DC2626", "#EF4444", "#991B1B", "#B91C1C", "#BE123C", "#7F1D1D"}
-_orig_btn_init = ctk.CTkButton.__init__
-def _btn_init(self, *a, **kw):
-    _orig_btn_init(self, *a, **kw)
-    try:
-        _fg = kw.get("fg_color")
-        if "border_width" not in kw and isinstance(_fg, str) and _fg.upper() in _RED_FILLS:
-            self.configure(border_width=0)   # الأزرار الحمرا من غير إطار ذهبي
-    except Exception:
-        pass
-ctk.CTkButton.__init__ = _btn_init
 
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = sys._MEIPASS
@@ -202,28 +189,6 @@ def setup_windows_autostart():
         winreg.CloseKey(key)
     except Exception as _e:
         _log_silent("setup_windows_autostart#1", _e)
-def configure_printer_57x90_silent():
-    if sys.platform != "win32":
-        return False, "Windows required"
-    ps_cmd = (
-        "$p = Get-CimInstance Win32_Printer | Where-Object { $_.Default -eq $true }; "
-        "if ($p) { "
-        "  $n = $p.Name; "
-        "  try { "
-        "    Set-PrintConfiguration -PrinterName $n -PaperSize Custom -ErrorAction SilentlyContinue; "
-        "  } catch {} "
-        "} "
-    )
-    try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            timeout=8
-        )
-        return True, "Success"
-    except Exception as e:
-        return False, str(e)
-
 DEFAULT_RECEIPTS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "A2R_Reports")
 os.makedirs(DOCUMENTS_DIR, exist_ok=True)
@@ -387,10 +352,12 @@ def log_exception(context, exc):
 load_print_paper()
 
 def db_connect():
-    """اتصال موحّد بقاعدة البيانات: مهلة انتظار 15 ثانية بدل الفشل الفوري لو القاعدة مشغولة (database is locked)."""
+    """اتصال موحّد بقاعدة البيانات مع تفعيل WAL ومهلة انتظار 15 ثانية لمنع database is locked."""
     conn = sqlite3.connect(DB_FILE, timeout=15)
     try:
         conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     except Exception as e:
         log_exception("db_connect", e)
     return conn
@@ -408,18 +375,6 @@ def init_local_database():
                 amount REAL,
                 created_at TEXT,
                 file_name TEXT
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS void_tx (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                unit TEXT,
-                plate TEXT,
-                insured TEXT,
-                amount REAL,
-                created_at TEXT,
-                file_name TEXT,
-                reason TEXT
             )
         ''')
         c.execute('''
@@ -569,11 +524,11 @@ THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
 #  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
 _ROLE_BTN = {
     "Modern Dark": {
-        "secondary": ("#323B52", "#3F4A66"), "success_btn": ("#323B52", "#3F4A66"),
-        "tool": ("#323B52", "#3F4A66"), "warn_btn": ("#323B52", "#3F4A66"), "danger_btn": ("#DC2626", "#B91C1C")},
+        "secondary": ("#334155", "#475569"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Modern Light": {
-        "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#52525B", "#3F3F46"),
-        "tool": ("#52525B", "#3F3F46"), "warn_btn": ("#52525B", "#3F3F46"), "danger_btn": ("#DC2626", "#B91C1C")},
+        "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Aero Dark": {
         "secondary": ("#334155", "#475569"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
@@ -582,7 +537,7 @@ _ROLE_BTN = {
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Cyber Amber": {
         "secondary": ("#3F3F46", "#52525B"), "success_btn": ("#047857", "#065F46"),
-        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#9A3412", "#7C2D12"), "danger_btn": ("#DC2626", "#B91C1C")},
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Emerald Glass": {
         "secondary": ("#1E3A34", "#2A4D45"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#BE123C", "#9F1239")},
@@ -590,10 +545,6 @@ _ROLE_BTN = {
         "secondary": ("#3B2A5A", "#4C3A73"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#1D4ED8", "#1E40AF"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
 }
-# توحيد الألوان: لون أساسي للأزرار المهمة، ولون هادي واحد لباقي الأزرار، وأحمر للخطر فقط
-for _n, _r in _ROLE_BTN.items():
-    for _k in ("success_btn", "tool", "warn_btn"):
-        _r[_k] = _r["secondary"]
 for _n, _roles in _ROLE_BTN.items():
     for _k, (_c, _h) in _roles.items():
         THEMES[_n][_k] = _c
@@ -601,21 +552,23 @@ for _n, _roles in _ROLE_BTN.items():
 
 # أي زر في أي دور (أسماء الـ attributes في النافذة الرئيسية)
 BUTTON_ROLES = {
-    "primary": ["btn_run", "btn_pos_check", "btn_browse"],
+    "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
     "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
-    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_chrome"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_arch_full"],
     "warn_btn": ["btn_print_slip", "btn_fix_printer"],
-    "secondary": ["btn_yesterday", "btn_today", "btn_view_rec", "btn_arch_full", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export"],
+    "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
     "danger_btn": ["btn_elevate"],
 }
 
 TAG_COLORS = {
     "Dark": {
+        "odd": ("#22293A", "#F5F6FA"),
         "dup": ("#5B2430", "#FECACA"), "wrong": ("#5A3A1C", "#FED7AA"),
         "missing": ("#524718", "#FEF08A"), "manual": ("#24406B", "#BFDBFE"),
         "void": ("#2E3444", "#9AA3B5")
     },
     "Light": {
+        "odd": ("#F1F5F9", "#18181B"),
         "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
         "missing": ("#FFEB9C", "#7F6000"), "manual": ("#DDEBF7", "#1F3864"),
         "void": ("#E5E7EB", "#4B5563")
@@ -1494,16 +1447,64 @@ def _hide_path(p):
     except Exception as e:
         log_exception("hide_path", e)
 
+_FTS5_SUPPORTED = None
+
+def _has_fts5(conn):
+    global _FTS5_SUPPORTED
+    if _FTS5_SUPPORTED is not None:
+        return _FTS5_SUPPORTED
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(path UNINDEXED, search_text, tokenize='unicode61')")
+        _FTS5_SUPPORTED = True
+    except Exception as e:
+        _log_silent("fts5_init", e)
+        _FTS5_SUPPORTED = False
+    return _FTS5_SUPPORTED
+
+def _norm_fts_text(unit, plate, insured, fname, chassis, motor):
+    parts = [unit, plate, insured, fname, chassis, motor]
+    tokens = []
+    for p in parts:
+        s = clean_arabic(str(p or "")).lower()
+        for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+            s = s.replace(a, b)
+        s_sp = re.sub(r"[^0-9a-zء-ي]+", " ", s).strip()
+        s_cp = re.sub(r"\s+", "", s_sp)
+        if s_sp and s_sp != "-":
+            tokens.append(s_sp)
+        if s_cp and s_cp != s_sp and s_cp != "-":
+            tokens.append(s_cp)
+    return " ".join(tokens)
+
 def _ensure_archive_index():
     conn = db_connect()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS archive_index (
             path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
             insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
-            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER
+            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER,
+            chassis TEXT DEFAULT '-', motor TEXT DEFAULT '-'
         )
     ''')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_index)").fetchall()}
+    if "chassis" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN chassis TEXT DEFAULT '-'")
+    if "motor" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN motor TEXT DEFAULT '-'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_unit ON archive_index(unit)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_amount ON archive_index(amount)")
+    if _has_fts5(conn):
+        fts_cnt = conn.execute("SELECT COUNT(*) FROM archive_fts").fetchone()[0]
+        rec_cnt = conn.execute("SELECT COUNT(*) FROM archive_index WHERE is_receipt = 1").fetchone()[0]
+        if rec_cnt > 0 and fts_cnt == 0:
+            rows = conn.execute(
+                "SELECT path, unit, plate, insured, file, IFNULL(chassis,'-'), IFNULL(motor,'-') "
+                "FROM archive_index WHERE is_receipt = 1").fetchall()
+            conn.executemany(
+                "INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                [(r[0], _norm_fts_text(r[1], r[2], r[3], r[4], r[5], r[6])) for r in rows]
+            )
     conn.commit()
     return conn
 
@@ -1537,8 +1538,11 @@ def archive_index_update(folder_path, progress=None):
         existing = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT path, mtime, size FROM archive_index")}
         current = {p for p, _ in files}
         stale = [(p,) for p in existing if p not in current]
+        use_fts = _has_fts5(conn)
         if stale:
             conn.executemany("DELETE FROM archive_index WHERE path = ?", stale)
+            if use_fts:
+                conn.executemany("DELETE FROM archive_fts WHERE path = ?", stale)
 
         todo = []
         for p, day in files:
@@ -1557,11 +1561,22 @@ def archive_index_update(folder_path, progress=None):
             except Exception as e: log_exception(f"archive_index:{os.path.basename(p)}", e)
             fname = os.path.basename(p)
             if rec:
+                ch = str(rec.get("chassis") or "-")
+                mo = str(rec.get("motor") or "-")
                 row = (p, day, fname, rec["unit"], rec["plate"], rec["insured"], float(rec["amount"]),
-                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size)
+                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size, ch, mo)
             else:
-                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size)
-            conn.execute("INSERT OR REPLACE INTO archive_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                ch, mo = "-", "-"
+                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size, ch, mo)
+            conn.execute(
+                "INSERT OR REPLACE INTO archive_index "
+                "(path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, is_receipt, mtime, size, chassis, motor) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            if use_fts:
+                conn.execute("DELETE FROM archive_fts WHERE path = ?", (p,))
+                if rec:
+                    conn.execute("INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                                 (p, _norm_fts_text(rec["unit"], rec["plate"], rec["insured"], fname, ch, mo)))
             done_new += 1
             if i % 40 == 0:
                 conn.commit()
@@ -1716,8 +1731,7 @@ _ARCH_SEARCH_CACHE = {"sig": None, "rows": []}
 _ARCH_SEARCH_LOCK = threading.Lock()
 
 def _archive_search_rows():
-    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file) محسوبة مرة واحدة.
-    بتتجدد بس لما الفهرس يتغيّر (بصمة: عدد الصفوف ومجاميع mtime/is_void/amount)."""
+    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file/chassis/motor/unit) محسوبة مرة واحدة كـ Fallback."""
     conn = _ensure_archive_index()
     try:
         sig = conn.execute("SELECT COUNT(*), IFNULL(SUM(mtime),0), IFNULL(SUM(is_void),0), "
@@ -1726,30 +1740,161 @@ def _archive_search_rows():
             if _ARCH_SEARCH_CACHE["sig"] == sig:
                 return _ARCH_SEARCH_CACHE["rows"]
         rows = conn.execute(
-            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, "
+            "IFNULL(chassis,'-'), IFNULL(motor,'-') "
             "FROM archive_index WHERE is_receipt = 1").fetchall()
     finally:
         conn.close()
-    prepared = [(r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2])) for r in rows]
+    prepared = [
+        (r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2]),
+         _norm_search(r[10]), _norm_search(r[11]), _norm_search(r[3]))
+        for r in rows
+    ]
     with _ARCH_SEARCH_LOCK:
         _ARCH_SEARCH_CACHE["sig"] = sig
         _ARCH_SEARCH_CACHE["rows"] = prepared
     return prepared
 
-def archive_search(query, include_void=True, limit=3000, min_day=""):
-    q = _norm_search(query)
-    if not q: return []
-    amt = None
-    try: amt = float(str(query).strip().replace(",", ""))
-    except Exception as _e: _log_silent("archive_search#1", _e)
+def _parse_amount_query(raw_q):
+    """يدعم مبلغ محدد (521.57) أو نطاق مبلغ (500-1000 أو 500..1000)."""
+    s = str(raw_q or "").strip().replace(",", "")
+    if not s:
+        return None, None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:-|\.\.)\s*(\d+(?:\.\d+)?)", s)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        return (lo, hi) if lo <= hi else (hi, lo)
+    try:
+        v = float(s)
+        return v - 0.005, v + 0.005
+    except Exception:
+        return None, None
+
+def archive_units_list(min_day=""):
+    conn = _ensure_archive_index()
+    try:
+        if min_day:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND day >= ? AND unit != '' ORDER BY unit",
+                (min_day,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND unit != '' ORDER BY unit").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+def archive_search(query="", include_void=True, limit=3000, min_day="", max_day="", unit_filter="", status_filter="all"):
+    raw_q = str(query or "").strip()
+    q_norm = _norm_search(raw_q)
+    amt_lo, amt_hi = _parse_amount_query(raw_q)
+    has_filter = bool(min_day or max_day or unit_filter or (status_filter and status_filter != "all"))
+    if not q_norm and amt_lo is None and not has_filter:
+        return []
+
+    where = ["a.is_receipt = 1"]
+    params = []
+    if not include_void and status_filter != "void":
+        where.append("a.is_void = 0")
+    if status_filter == "void":
+        where.append("a.is_void = 1")
+    elif status_filter == "manual":
+        where.append("a.is_void = 0 AND a.is_manual = 1")
+    elif status_filter == "ok":
+        where.append("a.is_void = 0 AND a.is_manual = 0")
+    if min_day:
+        where.append("a.day >= ?")
+        params.append(min_day)
+    if max_day:
+        where.append("a.day <= ?")
+        params.append(max_day)
+    if unit_filter:
+        where.append("a.unit = ?")
+        params.append(unit_filter)
+
+    conn = _ensure_archive_index()
+    try:
+        # 1. بحث بالفلاتر فقط أو بالمبلغ/النطاق مباشرة عبر فهرس SQLite
+        if not q_norm or amt_lo is not None:
+            sql_where = list(where)
+            sql_params = list(params)
+            if amt_lo is not None:
+                # لو رقم واحد: نطابق المبلغ أو نسمح بمطابقة جزء من اللوحة/الشاسيه/الملف
+                if abs(amt_hi - amt_lo) <= 0.02 and q_norm:
+                    pass  # هنكمل للبحث النصي + المبلغ تحت
+                else:
+                    sql_where.append("a.amount BETWEEN ? AND ?")
+                    sql_params.extend([amt_lo, amt_hi])
+                    sql = (
+                        "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                        "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                        "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                        " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                    )
+                    sql_params.append(limit)
+                    return conn.execute(sql, sql_params).fetchall()
+            else:
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                sql_params.append(limit)
+                return conn.execute(sql, sql_params).fetchall()
+
+        # 2. بحث فوري عبر SQLite FTS5 (يدعم الكلمات المتعددة والبادئات) + مطابقة المبلغ لو رقم
+        if _has_fts5(conn):
+            raw_tokens = [t for t in re.split(r"[\s\-_]+", clean_arabic(raw_q).lower()) if t]
+            norm_tokens = []
+            for tk in raw_tokens:
+                for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+                    tk = tk.replace(a, b)
+                tk = re.sub(r"[^0-9a-zء-ي]", "", tk)
+                if tk:
+                    norm_tokens.append(tk)
+            if norm_tokens:
+                fts_match = " AND ".join(f'"{tk}"*' for tk in norm_tokens)
+                fts_where = list(where)
+                fts_params = list(params)
+                if amt_lo is not None:
+                    fts_where.append("(a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?) OR a.amount BETWEEN ? AND ?)")
+                    fts_params.extend([fts_match, amt_lo, amt_hi])
+                else:
+                    fts_where.append("a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?)")
+                    fts_params.append(fts_match)
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(fts_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                fts_params.append(limit)
+                rows = conn.execute(sql, fts_params).fetchall()
+                if rows:
+                    return rows
+    except Exception as e:
+        log_exception("archive_search_fts", e)
+    finally:
+        conn.close()
+
+    # 3. Fallback: بحث جزئي داخل الكلمة (substring) عبر الكاش المطبّع (مثلاً آخر 4 أرقام من الشاسيه)
     out = []
-    for r, n_plate, n_insured, n_file in _archive_search_rows():
-        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
-        if is_void and not include_void: continue
-        if min_day and day < min_day: continue   # وضع اليوزر: آخر أيام محددة بس
-        hit = q in n_plate or q in n_insured or q in n_file
-        if not hit and amt is not None and abs(amount - amt) < 0.005: hit = True
-        if hit: out.append(r)
+    for r, n_plate, n_insured, n_file, n_chassis, n_motor, n_unit in _archive_search_rows():
+        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void, ch, mo = r
+        if is_void and not include_void and status_filter != "void": continue
+        if status_filter == "void" and not is_void: continue
+        if status_filter == "manual" and (is_void or not is_manual): continue
+        if status_filter == "ok" and (is_void or is_manual): continue
+        if min_day and day < min_day: continue
+        if max_day and day > max_day: continue
+        if unit_filter and unit != unit_filter: continue
+        hit = (q_norm in n_plate or q_norm in n_insured or q_norm in n_file
+               or q_norm in n_chassis or q_norm in n_motor or q_norm in n_unit)
+        if not hit and amt_lo is not None and amt_lo <= amount <= amt_hi:
+            hit = True
+        if hit:
+            out.append(r)
     out.sort(key=lambda r: (r[1], r[7]), reverse=True)
     return out[:limit]
 
@@ -1973,7 +2118,11 @@ def archive_reindex(folder_path, days=None, progress=None):
         try:
             if days is None:
                 conn.execute("DELETE FROM archive_index")
+                if _has_fts5(conn):
+                    conn.execute("DELETE FROM archive_fts")
             else:
+                if _has_fts5(conn):
+                    conn.executemany("DELETE FROM archive_fts WHERE path IN (SELECT path FROM archive_index WHERE day = ?)", [(d,) for d in days])
                 conn.executemany("DELETE FROM archive_index WHERE day = ?", [(d,) for d in days])
             conn.commit()
         finally:
@@ -3294,42 +3443,6 @@ class ElevateLoginGate(ctk.CTkToplevel):
             try: winsound.MessageBeep(winsound.MB_ICONHAND)
             except Exception as _e: _log_silent("check_pwd#1", _e)
 
-class AdminPasswordDialog(ctk.CTkToplevel):
-    def __init__(self, parent, on_success):
-        super().__init__(parent)
-        self.title("Admin Access Required")
-        self.resizable(False, False)
-        set_window_icon_safe(self)
-        center_window_relative(self, parent, 320, 160)
-        t = THEMES[parent.current_theme_name]
-        self.configure(fg_color=t["bg"])
-
-        ctk.CTkLabel(self, text="🔒 Admin Password for Excel", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
-        self.e = ctk.CTkEntry(self, show="•", justify="center", font=(FONT_FAMILY, 12, "bold"))
-        self.e.pack(padx=20, pady=4, fill="x")
-        self.e.focus_set()
-        attach_context_menu(self.e)
-
-        def _chk(event=None):
-            rem = sup_lock_remaining()
-            if rem > 0:
-                messagebox.showerror("Access Denied", T2(f"مقفول مؤقتًا. حاول بعد {rem} ثانية.", f"Locked. Try again in {rem}s."))
-                self.destroy()
-                return
-            if is_supervisor_password(self.e.get()):
-                sup_register_success()
-                self.destroy()
-                on_success()
-            else:
-                sup_register_fail()
-                try: winsound.MessageBeep(winsound.MB_ICONHAND)
-                except Exception as _e: _log_silent("_chk#1", _e)
-                messagebox.showerror("Access Denied", tr("restricted_admin"))
-                self.destroy()
-
-        self.e.bind("<Return>", _chk)
-        ctk.CTkButton(self, text="Unlock", font=FONT_BTN_SUB, fg_color=t["primary"], command=_chk).pack(pady=8)
-
 class CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
         if val == "": return True
@@ -3419,9 +3532,6 @@ class CustomTkinterApp(ctk.CTk):
         else:
             self.switch_to_mini_view()
 
-    def on_app_close(self):
-        self.hide_to_system_tray()
-
     def _init_tray_icon(self):
         try:
             menu = pystray.Menu(
@@ -3435,24 +3545,6 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             self.tray_icon = None
             log_exception("init_tray_icon", e)
-
-    def _trigger_daily_full_archive_once(self):
-        today_tag = datetime.date.today().strftime("%Y-%m-%d")
-        try:
-            conn = db_connect()
-            c = conn.cursor()
-            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
-            row = c.fetchone()
-            last_date = row[0] if row else ""
-            if last_date != today_tag:
-                target_folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-                if os.path.exists(target_folder) and os.path.isdir(target_folder):
-                    self._silent_archive_all_historical(target_folder)
-                c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
-                conn.commit()
-            conn.close()
-        except Exception as e:
-            log_exception("trigger_daily_full_archive_once", e)
 
     def _run_archive_sweep(self, folder_path, progress=None, stage=None):
         """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان.
@@ -3494,10 +3586,6 @@ class CustomTkinterApp(ctk.CTk):
             log_exception("archive_tick", e)
         finally:
             self.after(600000, self._archive_tick)
-
-    def _silent_archive_all_historical(self, folder_path):
-        self._run_archive_sweep(folder_path)
-        self._start_archive_maintenance(folder_path)
 
     def _cancel_auto_minimize(self):
         if self._auto_minimize_timer:
@@ -3955,8 +4043,8 @@ class CustomTkinterApp(ctk.CTk):
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 440, 210
-        self.minsize(440, 210)
+        width, height = 460, 232
+        self.minsize(460, 232)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -3981,7 +4069,7 @@ class CustomTkinterApp(ctk.CTk):
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.update_idletasks()
-        width, height = max(590, self.winfo_reqwidth()), max(465, self.winfo_reqheight())
+        width, height = max(640, self.winfo_reqwidth()), max(520, self.winfo_reqheight())
         self.minsize(width, height)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
@@ -4042,274 +4130,282 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
 
     def setup_ui(self):
-        self.header = ctk.CTkFrame(self, corner_radius=0, height=36)
+        self.header = ctk.CTkFrame(self, corner_radius=0, height=44)
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
-        self.header_line = ctk.CTkFrame(self, height=1, corner_radius=0, fg_color="#D4AF37")
+        self.header_line = ctk.CTkFrame(self, height=2, corner_radius=0, fg_color="#2563EB")
         self.header_line.pack(fill="x")
 
         f_left = ctk.CTkFrame(self.header, fg_color="transparent")
-        f_left.pack(side="left", padx=(10, 0), pady=4)
+        f_left.pack(side="left", padx=(12, 0), pady=6)
 
-        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=FONT_TITLE_LOGO)
-        self.lbl_logo.pack(side="left", padx=(0, 6))
+        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=(FONT_FAMILY, 19, "bold"))
+        self.lbl_logo.pack(side="left", padx=(0, 8))
 
-        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=108, height=25, state="readonly",
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=116, height=28, state="readonly",
                                         font=FONT_REGULAR_BOLD, command=self.on_theme_select)
         self.cb_theme.set(self.current_theme_name)
-        self.cb_theme.pack(side="left", padx=(0, 3))
+        self.cb_theme.pack(side="left", padx=(0, 5))
 
-        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=54, height=25, font=FONT_REGULAR_BOLD,
-                                      command=self.toggle_language)
-        self.btn_lang.pack(side="left", padx=(0, 3))
+        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=66, height=28, corner_radius=8,
+                                      font=(FONT_FAMILY, 10, "bold"), command=self.toggle_language)
+        self.btn_lang.pack(side="left", padx=(0, 5))
 
-        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=62, height=25, font=(FONT_FAMILY, 9, "bold"),
-                                      fg_color="#334155", hover_color="#475569", command=self.toggle_mute)
+        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=70, height=28, corner_radius=8,
+                                      font=(FONT_FAMILY, 9, "bold"), fg_color="#334155", hover_color="#475569",
+                                      command=self.toggle_mute)
         self.btn_mute.pack(side="left")
 
         f_right = ctk.CTkFrame(self.header, fg_color="transparent")
-        f_right.pack(side="right", padx=(0, 10), pady=4)
+        f_right.pack(side="right", padx=(0, 12), pady=6)
 
-        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=115, height=26,
+        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=124, height=29, corner_radius=9,
                                          font=(FONT_FAMILY, 10, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
-                                         border_width=1, border_color="#EF4444", command=self.request_full_console)
-        self.btn_elevate.pack(side="right", padx=(6, 0))
+                                         border_width=0, command=self.request_full_console)
+        self.btn_elevate.pack(side="right", padx=(8, 0))
 
-        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=95, height=25,
+        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=100, height=28, corner_radius=8,
                                               font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
                                               command=self.switch_to_mini_view)
 
-        self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=6, border_width=1.2, fg_color="#121E2E")
-        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", font=(FONT_FAMILY, 9, "bold"), padx=8, pady=1)
+        self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=8, border_width=1.2, fg_color="#121E2E")
+        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", font=(FONT_FAMILY, 9, "bold"), padx=9, pady=2)
         self.badge_role.pack()
 
-        self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_clock.pack(side="right", padx=(0, 2))
+        self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#38BDF8")
+        self.lbl_clock.pack(side="right", padx=(0, 6))
         self.update_live_clock()
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=12, border_width=1)
-        self.card_mini_status.pack(fill="x", pady=(2, 4))
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=14, border_width=1)
+        self.card_mini_status.pack(fill="x", pady=(6, 8))
 
         f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
-        f_mini_title_row.pack(fill="x", padx=14, pady=(6, 2))
+        f_mini_title_row.pack(fill="x", padx=14, pady=(10, 4))
 
         self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"),
-                                          font=(FONT_FAMILY, 11, "bold"), text_color="#38BDF8")
+                                          font=(FONT_FAMILY, 12, "bold"), text_color="#38BDF8")
         self.lbl_mini_title.pack(side="left")
 
-        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=70, height=22,
-                                             font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706", hover_color="#B45309",
-                                             text_color="#FFFFFF", command=self.fix_printer_paper_action)
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=78, height=26,
+                                             corner_radius=8, font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706",
+                                             hover_color="#B45309", text_color="#FFFFFF", command=self.fix_printer_paper_action)
         self.btn_fix_printer.pack(side="right")
 
         self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"),
                                          font=(FONT_FAMILY, 10, "bold"), text_color="#10B981")
-        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 2))
+        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 3))
 
         self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0),
-                                            font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
-        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 6))
+                                            font=(FONT_FAMILY, 10, "bold"), text_color="#94A3B8")
+        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 10))
 
-        self.btn_mini_archive = ctk.CTkButton(self.body_mini, text=tr("clean_downloads"), height=36,
-                                              font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3",
+        self.btn_mini_archive = ctk.CTkButton(self.body_mini, text=tr("clean_downloads"), height=40, corner_radius=10,
+                                              font=FONT_BTN_MAIN, fg_color="#4F46E5", hover_color="#4338CA",
                                               text_color="#FFFFFF", command=self.open_downloads_archiver_dialog)
-        self.btn_mini_archive.pack(fill="x", pady=(2, 4))
+        self.btn_mini_archive.pack(fill="x", pady=(2, 6))
 
         self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
-        self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
+        self.lbl_mini_foot.pack(anchor="center", pady=(0, 2))
 
-        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=56)
         self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(2, 0))
+        self.btn_center_box.pack(anchor="center", pady=(6, 2))
 
         self.btn_view_rec = ctk.CTkButton(
-            self.btn_center_box, width=115, height=25, font=(FONT_FAMILY, 10, "bold"),
-            text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1",
+            self.btn_center_box, width=122, height=30, corner_radius=9, font=(FONT_FAMILY, 10, "bold"),
+            text_color="#FFFFFF", fg_color="#2563EB", hover_color="#1D4ED8",
             command=self.open_records_viewer
         )
-        self.btn_view_rec.pack(side="left", padx=2)
+        self.btn_view_rec.pack(side="left", padx=3)
 
-        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=25, font=FONT_BTN_SUB,
-                                           fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
-        self.btn_pdf_export.pack(side="left", padx=2)
+        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=96, height=30, corner_radius=9, font=FONT_BTN_SUB,
+                                           fg_color="#334155", hover_color="#475569", text_color="#FFFFFF", command=self.export_pdf_summary)
+        self.btn_pdf_export.pack(side="left", padx=3)
 
-        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
-        self.btn_print_slip.pack(side="left", padx=2)
+        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=98,
+                                           height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
+        self.btn_print_slip.pack(side="left", padx=3)
 
-        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
-                                       height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
+        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=95,
+                                       height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
 
         # النسخة المخففة: بدل زر المشرف (التقفيل/الدفع) فيه زر واحد بيفتح سجل الأرشيف الكامل (للمشرف فقط)
-        self.btn_arch_full = ctk.CTkButton(self.btn_center_box, fg_color="#7C3AED", hover_color="#6D28D9", width=105,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
+        self.btn_arch_full = ctk.CTkButton(self.btn_center_box, fg_color="#4F46E5", hover_color="#4338CA", width=116,
+                                           height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_archive_history)
 
-        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
-                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
+        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#334155", hover_color="#475569", width=102,
+                                        height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
 
         self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
                                 font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        self.lbl_foot.pack(anchor="center", pady=(0, 2))
+        self.lbl_foot.pack(anchor="center", pady=(0, 3))
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_top.pack(fill="x", pady=(0, 2))
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
+        self.card_top.pack(fill="x", pady=(6, 6))
 
         self.lbl_folder = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_folder.pack(anchor="w", padx=8, pady=(2, 1))
+        self.lbl_folder.pack(anchor="w", padx=12, pady=(8, 2))
 
         f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_dir.pack(fill="x", padx=8, pady=1)
+        f_dir.pack(fill="x", padx=12, pady=(0, 4))
 
-        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=27, text_color="#FFFFFF")
-        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=32, text_color="#FFFFFF")
+        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
         attach_context_menu(self.e_path)
 
         self.btn_browse = ctk.CTkButton(
-            f_dir, width=70, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
-            fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
-            command=self.browse_folder
+            f_dir, width=76, height=32, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#2563EB", hover_color="#1D4ED8", command=self.browse_folder
         )
-        self.btn_browse.pack(side="left", padx=(0, 3))
+        self.btn_browse.pack(side="left", padx=(0, 4))
 
         self.btn_open_f = ctk.CTkButton(
-            f_dir, width=60, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
-            fg_color="#0F766E", hover_color="#115E59",
-            command=self.open_current_folder
+            f_dir, width=66, height=32, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#059669", hover_color="#047857", command=self.open_current_folder
         )
         self.btn_open_f.pack(side="left")
 
         self.lbl_d = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_d.pack(anchor="w", padx=8, pady=(1, 1))
+        self.lbl_d.pack(anchor="w", padx=12, pady=(4, 2))
 
         f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_date.pack(fill="x", padx=8, pady=(1, 3))
+        f_date.pack(fill="x", padx=12, pady=(0, 8))
 
         today = datetime.date.today()
-        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=56, height=30, font=FONT_REGULAR_BOLD)
         self.cb_d.set(f"{today.day:02d}")
-        self.cb_d.pack(side="left", padx=(0, 2))
+        self.cb_d.pack(side="left", padx=(0, 3))
 
-        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=56, height=30, font=FONT_REGULAR_BOLD)
         self.cb_m.set(f"{today.month:02d}")
-        self.cb_m.pack(side="left", padx=(0, 2))
+        self.cb_m.pack(side="left", padx=(0, 3))
 
-        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=66, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=70, height=30, font=FONT_REGULAR_BOLD)
         self.cb_y.set(str(today.year))
-        self.cb_y.pack(side="left", padx=(0, 4))
+        self.cb_y.pack(side="left", padx=(0, 6))
 
-        self.btn_today = ctk.CTkButton(f_date, width=52, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
-        self.btn_today.pack(side="left", padx=(0, 2))
+        self.btn_today = ctk.CTkButton(f_date, width=58, height=30, corner_radius=8, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
+        self.btn_today.pack(side="left", padx=(0, 4))
 
-        self.btn_yesterday = ctk.CTkButton(f_date, width=62, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF",
+        self.btn_yesterday = ctk.CTkButton(f_date, width=68, height=30, corner_radius=8, font=FONT_BTN_SUB, text_color="#FFFFFF",
                                            fg_color="#334155", hover_color="#475569", command=self.set_yesterday)
-        self.btn_yesterday.pack(side="left", padx=(0, 6))
+        self.btn_yesterday.pack(side="left", padx=(0, 8))
 
         f_switches = ctk.CTkFrame(f_date, fg_color="transparent")
         f_switches.pack(side="right")
 
-        self.sw_autosync = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autosync)
-        self.sw_autosync.pack(side="left", padx=(0, 2))
+        self.sw_autosync = ctk.CTkSwitch(f_switches, text="", width=38, height=22, command=self.toggle_autosync)
+        self.sw_autosync.pack(side="left", padx=(0, 3))
         self.lbl_sw_sync = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
-        self.lbl_sw_sync.pack(side="left", padx=(0, 8))
+        self.lbl_sw_sync.pack(side="left", padx=(0, 10))
 
-        self.sw_autoprint = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autoprint)
-        self.sw_autoprint.pack(side="left", padx=(0, 2))
+        self.sw_autoprint = ctk.CTkSwitch(f_switches, text="", width=38, height=22, command=self.toggle_autoprint)
+        self.sw_autoprint.pack(side="left", padx=(0, 3))
         self.lbl_sw_print = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
         self.lbl_sw_print.pack(side="left")
 
         self.sw_autosync.select()
         self.sw_autoprint.select()
 
-        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_dash.pack(fill="x", pady=(0, 2))
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 6))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
-        dash_grid.pack(fill="x", padx=8, pady=3)
+        dash_grid.pack(fill="x", padx=12, pady=10)
 
         f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_kpi.pack(side="left", fill="both", expand=True)
 
-        self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
-        self.pill_c1.pack(side="left", padx=(0, 4), fill="both", expand=True)
-        self.lbl_kpi1_title = ctk.CTkLabel(self.pill_c1, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi1_title.pack(anchor="w", padx=6, pady=(1, 0))
-        self.lbl_cnt = ctk.CTkLabel(self.pill_c1, text="0", font=FONT_KPI_VAL, text_color="#FFFFFF")
-        self.lbl_cnt.pack(anchor="w", padx=6, pady=(0, 1))
+        self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
+        self.pill_c1.pack(side="left", padx=(0, 6), fill="both", expand=True)
+        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, corner_radius=2, fg_color="#38BDF8")
+        self.kpi1_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
+        f_kpi1_txt = ctk.CTkFrame(self.pill_c1, fg_color="transparent")
+        f_kpi1_txt.pack(side="left", fill="both", expand=True, pady=6)
+        self.lbl_kpi1_title = ctk.CTkLabel(f_kpi1_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi1_title.pack(anchor="w")
+        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", font=(FONT_FAMILY, 18, "bold"), text_color="#FFFFFF")
+        self.lbl_cnt.pack(anchor="w")
 
-        self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
-        self.pill_c2.pack(side="left", padx=(0, 4), fill="both", expand=True)
-        self.lbl_kpi2_title = ctk.CTkLabel(self.pill_c2, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi2_title.pack(anchor="w", padx=6, pady=(1, 0))
-        self.lbl_sum = ctk.CTkLabel(self.pill_c2, text="0.00 EGP", font=FONT_KPI_VAL, text_color="#00FF66")
-        self.lbl_sum.pack(anchor="w", padx=6, pady=(0, 1))
+        self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
+        self.pill_c2.pack(side="left", padx=(0, 8), fill="both", expand=True)
+        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, corner_radius=2, fg_color="#34D399")
+        self.kpi2_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
+        f_kpi2_txt = ctk.CTkFrame(self.pill_c2, fg_color="transparent")
+        f_kpi2_txt.pack(side="left", fill="both", expand=True, pady=6)
+        self.lbl_kpi2_title = ctk.CTkLabel(f_kpi2_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi2_title.pack(anchor="w")
+        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", font=(FONT_FAMILY, 18, "bold"), text_color="#00FF66")
+        self.lbl_sum.pack(anchor="w")
 
         f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_pos.pack(side="right", fill="both")
 
         self.lbl_pos_title = ctk.CTkLabel(f_pos, font=FONT_SECTION_LBL)
-        self.lbl_pos_title.pack(anchor="w", pady=(0, 1))
+        self.lbl_pos_title.pack(anchor="w", pady=(0, 3))
 
         f_pos_in = ctk.CTkFrame(f_pos, fg_color="transparent")
         f_pos_in.pack(fill="x")
 
         vcmd = (self.register(self.validate_numeric_input), '%P')
-        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=105, height=25,
+        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=116, height=30,
                                   justify="center", font=FONT_ENTRY, text_color="#FFFFFF",
                                   validate="key", validatecommand=vcmd)
-        self.e_pos.pack(side="left", padx=(0, 3))
+        self.e_pos.pack(side="left", padx=(0, 5))
         self.e_pos.bind("<Return>", lambda e: self.check_pos())
         attach_context_menu(self.e_pos)
 
-        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=50, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
+        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=62, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
         self.btn_pos_check.pack(side="left")
 
         self.lbl_diff = ctk.CTkLabel(f_pos, text="", font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_diff.pack(anchor="w", pady=(1, 0))
+        self.lbl_diff.pack(anchor="w", pady=(3, 0))
 
-        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_actions.pack(fill="x", pady=(0, 2))
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 6))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=10, pady=(4, 2))
+        self.btn_run = ctk.CTkButton(self.card_actions, font=(FONT_FAMILY, 13, "bold"), height=38, corner_radius=10,
+                                     text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=12, pady=(10, 6))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_prog.pack(fill="x", padx=10, pady=(0, 2))
+        f_prog.pack(fill="x", padx=12, pady=(0, 2))
 
-        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=6, progress_color="#00FF66", fg_color="#064E3B")
+        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, corner_radius=4, progress_color="#00FF66", fg_color="#064E3B")
         self.progress_bar.set(0)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=34)
+        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=36)
         self.lbl_progress_pct.pack(side="right")
 
         self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
-        self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 0))
+        self.lbl_current_file.pack(anchor="w", padx=14, pady=(0, 4))
 
         f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_act.pack(fill="x", padx=10, pady=(0, 4))
+        f_act.pack(fill="x", padx=12, pady=(0, 10))
 
-        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=27, width=72, command=self.open_manual)
-        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 1))
+        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#059669", hover_color="#047857", height=32, corner_radius=9, width=82, command=self.open_manual)
+        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
-        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=27, width=72, command=self.reopen_summary_modal)
-        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#4F46E5", hover_color="#4338CA", height=32, corner_radius=9, width=82, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=3)
 
-        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=27, width=60, command=self.open_cash_counter)
-        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#059669", hover_color="#047857", height=32, corner_radius=9, width=72, command=self.open_cash_counter)
+        self.btn_cash.pack(side="left", fill="x", expand=True, padx=3)
 
-        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=27, width=68, command=self.open_downloads_archiver_dialog)
-        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4F46E5", hover_color="#4338CA", text_color="#FFFFFF", height=32, corner_radius=9, width=78, command=self.open_downloads_archiver_dialog)
+        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=3)
 
         self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
-                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
+                                       hover_color="#2A1C22", border_width=1.5, border_color="#EF4444", height=32, corner_radius=9, width=62,
                                        command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
+        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(3, 0))
         self._install_tooltips()
 
     def _on_global_escape(self, e=None):
@@ -4359,7 +4455,13 @@ class CustomTkinterApp(ctk.CTk):
         self.configure(fg_color=t["bg"])
         self.header.configure(fg_color=t["sub_card"])
         self.lbl_logo.configure(text_color=t["accent"])
-        self.header_line.configure(fg_color=t["accent"])
+        self.header_line.configure(fg_color=t["primary"])
+        try:
+            self.kpi1_bar.configure(fg_color=t["primary"])
+            self.kpi2_bar.configure(fg_color=t["success"])
+            self.btn_reset.configure(text_color=t["danger"], border_color=t["danger"],
+                                     hover_color=("#2A1B22" if t["mode"] == "Dark" else "#FEE2E2"))
+        except Exception as _e: _log_silent("apply_theme#bars", _e)
         self.card_top.configure(fg_color=t["card"], border_color=t["border"])
         self.card_dash.configure(fg_color=t["card"], border_color=t["border"])
         self.card_actions.configure(fg_color=t["card"], border_color=t["border"])
@@ -4393,7 +4495,7 @@ class CustomTkinterApp(ctk.CTk):
         self.update_toggle_appearance()
 
     def _apply_button_roles(self, t):
-        """تلوين كل الأزرار بحسب دورها من الثيم الحالي (تغيير الثيم بيغيّرها كلها)."""
+        """تلوين كل الأزرار بحسب دورها من الثيم الحالي بنمط عصري مسطح (بدون إطار ذهبي)."""
         for role, attrs in BUTTON_ROLES.items():
             col, hov = t.get(role), t.get(role + "_hover")
             if not col:
@@ -4403,17 +4505,12 @@ class CustomTkinterApp(ctk.CTk):
                 if b is None:
                     continue
                 try:
-                    if role == "danger_btn":
-                        b.configure(fg_color=col, hover_color=hov, border_width=0)
+                    if role == "secondary":
+                        b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["border"])
                     else:
-                        b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["accent"])
+                        b.configure(fg_color=col, hover_color=hov, border_width=0)
                 except Exception as e:
                     log_exception("apply_button_role:" + a, e)
-        for a in ("btn_run", "btn_pos_check"):
-            b = getattr(self, a, None)
-            if b is not None:
-                try: b.configure(border_width=1, border_color=t["accent"])
-                except Exception as e: log_exception("apply_button_border:" + a, e)
 
     def update_toggle_appearance(self):
         t = THEMES[self.current_theme_name]
@@ -4865,11 +4962,6 @@ class CustomTkinterApp(ctk.CTk):
             refresh_state()
         except Exception as e: log_exception("open_archive_dialog", e)
 
-    def open_archive_directory(self):
-        p = self.get_clean_path()
-        archive_root = ensure_archive_root(p)
-        if os.path.exists(archive_root): os.startfile(archive_root)
-
     def _generate_day_summary_pdf(self, day_folder_path, date_str, records_list):
         if not REPORTLAB_AVAILABLE or not records_list: return
         pdf_path = os.path.join(day_folder_path, f"Samary_{date_str}.pdf")
@@ -4951,39 +5043,6 @@ class CustomTkinterApp(ctk.CTk):
             c.save()
         except Exception as e:
             log_exception("generate_day_summary_pdf", e)
-
-    def _process_archive_worker(self, archive_all, win, p_bar, p_lbl, s_lbl, folder_path, auto=False):
-        def prog(i, n, fname):
-            pct = int((i / n) * 100) if n else 100
-            self.run_on_main(lambda p=pct, f=fname: [
-                p_bar.set(p / 100.0), p_lbl.configure(text=f"{p}%"), s_lbl.configure(text=f"Processing: {f}")])
-
-        moved_count = 0
-        try:
-            def stage(i, n, name):
-                self.run_on_main(lambda i=i, n=n, nm=name: [
-                    p_bar.set(i / max(1, n)), p_lbl.configure(text=f"{int(i / max(1, n) * 100)}%"),
-                    s_lbl.configure(text=T2(f"جاري تحديث ملخص وإكسيل يوم {nm}  ({i}/{n})", f"Updating summary & Excel for day {nm}  ({i}/{n})"))])
-            moved_count = self._run_archive_sweep(folder_path, prog, stage) or 0
-            if auto: self._mark_archive_done_today()
-            self._start_archive_maintenance(folder_path)
-        except Exception as e:
-            log_exception("archive_worker", e)
-
-        def _complete():
-            if auto:
-                p_bar.set(1.0)
-                p_lbl.configure(text="100%")
-                s_lbl.configure(text=f"✓ Archive complete — {moved_count} file(s) archived.")
-                try: win.after(1500, win.destroy)
-                except Exception as _e: _log_silent("_complete#1", _e)
-                return
-            try: win.destroy()
-            except Exception as _e: _log_silent("_complete#2", _e)
-            play_sound_matched()
-            messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nSummary PDFs updated for all affected days.")
-
-        self.run_on_main(_complete)
 
     def start_thread(self):
         L = LANGUAGES[self.current_lang]
@@ -5413,11 +5472,6 @@ class CustomTkinterApp(ctk.CTk):
         def exit_fullscreen(event=None):
             if fs["on"]: toggle_fullscreen()
             else: close_toplevel_gracefully(win)      # Esc تاني (أو أول مرة لو مش fullscreen) = يقفل السجل
-        def minimize_win():
-            try:
-                if fs["on"]: toggle_fullscreen()
-                win.iconify()
-            except Exception as _e: _log_silent("minimize_win#1", _e)
         win.bind("<F11>", toggle_fullscreen)
         win.bind("<Escape>", exit_fullscreen)
 
@@ -5476,7 +5530,9 @@ class CustomTkinterApp(ctk.CTk):
                 tree.tag_configure(kind, background=bg, foreground=fg)
             vsb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview)
             vsb.pack(side="right", fill="y", padx=2, pady=2)
-            tree.configure(yscrollcommand=vsb.set)
+            hsb = ttk.Scrollbar(fr, orient="horizontal", command=tree.xview)
+            hsb.pack(side="bottom", fill="x", padx=2, pady=2)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
             tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
             return tree
 
@@ -5555,7 +5611,7 @@ class CustomTkinterApp(ctk.CTk):
             day_tree.delete(*day_tree.get_children())
             for s in items:
                 y, m, d = s["day"].split("-")
-                tag = "dup" if s["dup"] else ("missing" if s["missing"] else "")
+                tag = "dup" if s["dup"] else ("missing" if s["missing"] else ("odd" if len(day_tree.get_children()) % 2 else ""))
                 day_tree.insert("", "end", iid=s["day"], tags=(tag,) if tag else (),
                                 values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}"))
             if keep and day_tree.exists(keep):
@@ -5811,7 +5867,7 @@ class CustomTkinterApp(ctk.CTk):
                     if q not in full_s: continue
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], f"{r['amount']:.2f}", r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ("odd" if shown % 2 else "")
                 tx_tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
             tx_count.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
@@ -5899,52 +5955,128 @@ class CustomTkinterApp(ctk.CTk):
                 day_menu.tk_popup(ev.x_root, ev.y_root)
         day_tree.bind("<Button-3>", _dpop)
 
-        # ================= تبويب البحث العام =================
-        f2 = ctk.CTkFrame(tab_search, fg_color="transparent")
-        f2.pack(fill="x", pady=(2, 2))
-        s_entry = ctk.CTkEntry(f2, placeholder_text=T2("اسم المؤمن له / رقم اللوحة / المبلغ...", "Insured name / plate / amount..."),
-                               width=380, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        s_entry.pack(side="left", padx=(0, 8))
-        attach_context_menu(s_entry)
-        inc_void = ctk.CTkCheckBox(f2, text=T2("إظهار الملغي", "Include void"), font=FONT_SECTION_LBL, text_color=t["text"])
-        inc_void.select()
-        inc_void.pack(side="left", padx=6)
-        s_count = ctk.CTkLabel(f2, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
-        s_count.pack(side="right", padx=8)
+        # ================= تبويب البحث العام المتقدم (FTS5 + فلاتر) =================
+        f2_card = ctk.CTkFrame(tab_search, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        f2_card.pack(fill="x", pady=(2, 4))
 
-        s_cols = ("date", "unit", "plate", "insured", "amount", "time", "status", "file")
+        f2 = ctk.CTkFrame(f2_card, fg_color="transparent")
+        f2.pack(fill="x", padx=10, pady=(8, 4))
+        s_entry = ctk.CTkEntry(
+            f2, placeholder_text=T2("اسم / لوحة / شاسيه / موتور / مبلغ أو نطاق (500-1000)...",
+                                    "Name / plate / chassis / motor / amount or range (500-1000)..."),
+            width=400, height=32, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"]
+        )
+        s_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        attach_context_menu(s_entry)
+
+        ALL_S_ST = T2("كل الحالات", "All statuses")
+        s_status_map = {
+            ALL_S_ST: "all",
+            T2("سليم", "OK"): "ok",
+            T2("يدوي", "Manual"): "manual",
+            T2("ملغي", "Void"): "void",
+        }
+        cb_s_status = ctk.CTkComboBox(f2, values=list(s_status_map.keys()), width=125, height=32, font=FONT_ENTRY,
+                                      state="readonly", command=lambda v: do_search())
+        cb_s_status.set(ALL_S_ST)
+        style_combo(cb_s_status, t)
+        cb_s_status.pack(side="left", padx=(0, 6))
+
+        def clear_search_filters():
+            s_entry.delete(0, "end")
+            e_s_from.delete(0, "end")
+            e_s_to.delete(0, "end")
+            cb_s_unit.set(ALL_U)
+            cb_s_status.set(ALL_S_ST)
+            inc_void.select()
+            do_search()
+
+        ctk.CTkButton(f2, text=T2("✖ مسح", "✖ Clear"), width=74, height=32, corner_radius=8, font=FONT_BTN_SUB,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=clear_search_filters).pack(side="left")
+
+        f2b = ctk.CTkFrame(f2_card, fg_color="transparent")
+        f2b.pack(fill="x", padx=10, pady=(0, 8))
+
+        ALL_U = T2("كل الوحدات", "All units")
+        _u_vals = [ALL_U] + archive_units_list(cutoff_iso)
+        cb_s_unit = SafeArabicComboBox(f2b, values=_u_vals, width=185, height=28, font=FONT_ENTRY,
+                                       state="readonly", command=lambda v: do_search())
+        cb_s_unit.set(ALL_U)
+        style_combo(cb_s_unit, t)
+        cb_s_unit.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        e_s_from = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
+                                text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_s_from.pack(side="left", padx=(0, 8))
+        attach_context_menu(e_s_from)
+
+        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        e_s_to = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
+                              text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_s_to.pack(side="left", padx=(0, 10))
+        attach_context_menu(e_s_to)
+
+        inc_void = ctk.CTkCheckBox(f2b, text=T2("إظهار الملغي", "Include void"), font=FONT_SECTION_LBL, text_color=t["text"])
+        inc_void.select()
+        inc_void.pack(side="left", padx=(0, 8))
+
+        s_count = ctk.CTkLabel(f2b, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        s_count.pack(side="right", padx=4)
+
+        s_cols = ("date", "unit", "plate", "insured", "amount", "chassis", "time", "status", "file")
         s_hdr = {"date": T2("يوم الأرشيف", "Archive day"), "unit": T2("الوحدة", "Unit"), "plate": T2("اللوحة", "Plate"),
-                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"), "time": T2("الوقت", "Time"),
+                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"),
+                 "chassis": T2("الشاسيه", "Chassis"), "time": T2("الوقت", "Time"),
                  "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
         s_tree = make_tree(tab_search, s_cols, s_hdr,
-                           {"date": 105, "unit": 140, "plate": 100, "insured": 180, "amount": 90, "time": 120, "status": 80, "file": 170})
+                           {"date": 98, "unit": 135, "plate": 100, "insured": 175, "amount": 88,
+                            "chassis": 130, "time": 118, "status": 76, "file": 165})
         s_paths = {}
         s_days = {}
 
         def do_search(*_):
             q = s_entry.get().strip()
+            d_from = parse_flex_date(e_s_from.get())
+            d_to = parse_flex_date(e_s_to.get())
+            min_d = d_from.isoformat() if d_from else ""
+            if cutoff_iso and (not min_d or min_d < cutoff_iso):
+                min_d = cutoff_iso
+            max_d = d_to.isoformat() if d_to else ""
+            u_sel = cb_s_unit.get()
+            u_filt = "" if (not u_sel or u_sel == ALL_U) else u_sel
+            st_filt = s_status_map.get(cb_s_status.get(), "all")
+
             s_tree.delete(*s_tree.get_children())
             s_paths.clear()
             s_days.clear()
-            if not q:
+            has_user_filter = bool(d_from or d_to or u_filt or st_filt != "all")
+            if not q and not has_user_filter:
                 s_count.configure(text="")
                 return
-            try: rows = archive_search(q, include_void=bool(inc_void.get()), min_day=cutoff_iso)
+            try:
+                rows = archive_search(
+                    q, include_void=bool(inc_void.get()), min_day=min_d, max_day=max_d,
+                    unit_filter=u_filt, status_filter=st_filt
+                )
             except Exception as e:
                 log_exception("archive_search", e)
                 rows = []
             tot = 0.0
-            for i, (path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void) in enumerate(rows):
+            for i, row in enumerate(rows):
+                path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = row[:10]
+                ch = row[10] if len(row) > 10 else "-"
                 y, m, d = day.split("-")
                 if is_void: status, tag = T2("ملغي", "Void"), "void"
                 elif is_manual: status, tag = T2("يدوي", "Manual"), "manual"
-                else: status, tag = T2("سليم", "OK"), ""
+                else: status, tag = T2("سليم", "OK"), ("odd" if i % 2 else "")
                 if not is_void: tot += amount
                 iid = str(i)
                 s_paths[iid] = path
                 s_days[iid] = day
                 s_tree.insert("", "end", iid=iid, tags=(tag,) if tag else (),
-                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", rtime, status, fname))
+                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", ch, rtime, status, fname))
             s_count.configure(text=T2(f"النتائج: {len(rows):,}  |  الإجمالي (بدون الملغي): {tot:,.2f}",
                                       f"Results: {len(rows):,}  |  Total (excl. void): {tot:,.2f}"))
 
@@ -5952,9 +6084,13 @@ class CustomTkinterApp(ctk.CTk):
             if st["debounce"]:
                 try: win.after_cancel(st["debounce"])
                 except Exception as _e: _log_silent("_debounced#1", _e)
-            st["debounce"] = win.after(300, do_search)
+            st["debounce"] = win.after(220, do_search)
         s_entry.bind("<KeyRelease>", _debounced)
         s_entry.bind("<Return>", do_search)
+        e_s_from.bind("<KeyRelease>", _debounced)
+        e_s_from.bind("<Return>", do_search)
+        e_s_to.bind("<KeyRelease>", _debounced)
+        e_s_to.bind("<Return>", do_search)
         inc_void.configure(command=do_search)
 
         def open_result(event=None, folder_only=False):
@@ -6234,7 +6370,7 @@ class CustomTkinterApp(ctk.CTk):
 
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ("odd" if shown % 2 else "")
                 tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
                 if id(r) in counted:
