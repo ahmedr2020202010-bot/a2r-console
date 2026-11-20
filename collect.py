@@ -2185,13 +2185,29 @@ def sup_register_fail():
 def sup_register_success():
     _SUP_STATE["fails"] = 0
     _SUP_STATE["locks"] = 0
-EMPLOYEE_PASSWORDS = [
-    "ahmedramadan", "a2r", "ahmed.r",
-    "1531", "20262", "2026", "16061993", "1558", "1964",
-    "2212", "1672", "30881999", "1990", "27121996", "1012",
-    "160388", "505022", "20272", "0100elkok", "12345", "8110"
-]
-EMPLOYEE_HASHES = {hashlib.sha256(p.encode('utf-8')).hexdigest() for p in EMPLOYEE_PASSWORDS}
+EMPLOYEE_HASHES = {
+    "05c8bd5d4dcdb18b690e160fd7a5c5190ee9ce7eb565d88f8e7b1f81b5f25bf6",
+    "06ff8a72d6c750f6190e3be9beee93480751e63429b79a4a9a3409d537cf4710",
+    "158a323a7ba44870f23d96f1516dd70aa48e9a72db4ebb026b0a89e212a208ab",
+    "165940940a02a187e4463ff467090930038c5af8fc26107bf301e714f599a1da",
+    "1c6bf6cd5656b79a9cd667582d2b31a6bcdd071acd1f1fdc0bb653df031fe409",
+    "2759755265efab6b9a509e4c2662aead97747c0b5ad16694dd72fef521b5d1aa",
+    "38aaaa2726ae59363be8267ddf3c887e125abf3872a221c3048c931b73563e4e",
+    "5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5",
+    "65ec295e41007d643b557a13a2d8fda976f887ab352ee51debba9417914e686e",
+    "67a375e4ddcdb509545a752ea82be28b546ded87431078fe6fc1ead202f5815c",
+    "922da9fd247cabfaa88ac472af4e4910cab8b5a5cd1f243ce15a9cd80b844384",
+    "9a54ca89652e118aef6d89047338e990240c40ec810f3f5dd00f191acd7feff2",
+    "9b59026d8817985b390666d0fe1695b63d9be2e7a60e3c07274193642eda3247",
+    "a4f1a218260b2efd0b86780410a4e0ec643bd33dcadc9ae2c6d8e2282ae01115",
+    "a7be8e1fe282a37cd666e0632b17d933fa13f21addf4798fc0455bc166e2488c",
+    "ad5055ce5b414306010f3e844346b669fbf99b47b5f9f3a4e589c86a216fdcaf",
+    "aeba47c17ca09557808c333b49af210a0209aff6b4334fa7192aaed69c5f36dd",
+    "aff4d166083896b1584b9b3ed2b89cce8c9abe10fe384342d1ed2e73114c819e",
+    "ec9b8e7a0da6fa1d24ebb7546db2f67ca2320b110c93ede3c5c5d3ef13ebe1ab",
+    "ed823ec32c5d4e9ca9dd968bb0fe9366b7d904ce0cae615308ddd5b89f0e6a3a",
+    "f1294f35f19846cd012506eadcc13ecda95eb7ddc6c661bc1b9402c4b00eb703",
+}
 
 COMPANY_WORDS_RE = re.compile(r"مجمع|التأمين|التامين|الإلزامي|الالزامي|^للمركبات$|^المركبات$")
 TIME_RE = re.compile(
