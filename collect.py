@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v68-lite"
+APP_VERSION = "v69-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -698,15 +698,15 @@ BUTTON_ROLES = {
 TAG_COLORS = {
     "Dark": {
         "odd": ("#22293A", "#F5F6FA"),
-        "dup": ("#5B2430", "#FECACA"), "wrong": ("#5A3A1C", "#FED7AA"),
-        "missing": ("#524718", "#FEF08A"), "manual": ("#24406B", "#BFDBFE"),
-        "void": ("#2E3444", "#9AA3B5")
+        "dup": ("#6B1D2B", "#FECACA"), "wrong": ("#633A16", "#FED7AA"),
+        "missing": ("#5A4B14", "#FEF08A"), "manual": ("#1E3A68", "#BFDBFE"),
+        "void": ("#4A1D6B", "#F5D0FE")
     },
     "Light": {
         "odd": ("#F1F5F9", "#18181B"),
         "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
         "missing": ("#FFEB9C", "#7F6000"), "manual": ("#DDEBF7", "#1F3864"),
-        "void": ("#E5E7EB", "#4B5563")
+        "void": ("#E9D5FF", "#581C87")
     },
 }
 
@@ -795,7 +795,7 @@ LANGUAGES = {
         "open_pdf_btn": "Open Selected File", "confirm_reset": "Are you sure you want to clear current operations and reset dashboard?",
         "btn_void_sel": "❌ Void Selected", "btn_restore_sel": "↩️ Restore Selected",
         "records_stats": "Shown: {shown} | Net Total: {net:,.2f} EGP | Grand System Sum: {total:,.2f} EGP",
-        "legend_text": "🟥 Duplicate   ⬛ Voided (Deducted)",
+        "legend_text": "🟥 Duplicate   🟪 Voided (Deducted)",
         "menu_open_file": "Open Receipt File", "menu_void_tx": "❌ Void this Transaction", "menu_restore_tx": "↩️ Restore this Transaction",
         "void_confirm_title": "Confirm Void", "void_confirm_msg": "Are you sure you want to void record #{idx} with amount {amt:.2f} EGP?",
         "void_reason_title": "Void Reason", "void_reason_prompt": "Enter void reason (optional):",
@@ -852,7 +852,7 @@ LANGUAGES = {
         "open_pdf_btn": "فتح الملف المحدد", "confirm_reset": "هل أنت متأكد من رغبتك في تصفير الشاشة والبيانات الحالية؟",
         "btn_void_sel": "❌ إلغاء المحددة", "btn_restore_sel": "↩️ استرجاع الملغية",
         "records_stats": "المعروض: {shown} | الصافي: {net:,.2f} ج.م | الإجمالي العام: {total:,.2f} ج.م",
-        "legend_text": "🟥 مكرر   ⬛ ملغي (مخصوم)",
+        "legend_text": "🟥 مكرر   🟪 ملغي (مخصوم)",
         "menu_open_file": "فتح ملف المعاملة", "menu_void_tx": "❌ إلغاء هذه المعاملة (تسجيل في قاعدة البيانات)", "menu_restore_tx": "↩️ استرجاع هذه المعاملة كمعاملة سليمة",
         "void_confirm_title": "تأكيد الإلغاء", "void_confirm_msg": "هل أنت متأكد من إلغاء المعاملة رقم {idx} بمبلغ {amt:.2f} ج.م وخصمها من الإجمالي؟",
         "void_reason_title": "سبب الإلغاء", "void_reason_prompt": "اكتب سبب الإلغاء (اختياري):",
@@ -1087,8 +1087,26 @@ def _focus_target(widget):
     except Exception as _e:
         _log_silent("focus_target", _e)
 
-def bring_window_to_front(win, focus_widget=None, delay=80):
-    """يرفع النافذة الفرعية أمام البرنامج بشكل مضمون ويوجه مؤشر الكتابة فورًا للخانة المطلوبة."""
+def _win32_raise(win):
+    """رفع فعلي للنافذة على مستوى ويندوز (Win32) لضمان ظهورها أمام التطبيق الرئيسي دائمًا."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = win.winfo_id()
+        parent_hwnd = user32.GetParent(hwnd)
+        target_hwnd = parent_hwnd if parent_hwnd else hwnd
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+        user32.SetWindowPos(target_hwnd, -1, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(target_hwnd)
+        user32.SetForegroundWindow(target_hwnd)
+        user32.SetWindowPos(target_hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+    except Exception as _e:
+        _log_silent("win32_raise", _e)
+
+def bring_window_to_front(win, focus_widget=None, delay=10):
+    """يظهر النافذة دفعة واحدة بدون تقطيع ويرفعها أمام البرنامج بشكل مضمون مع توجيه مؤشر الكتابة."""
     def _raise():
         try:
             if not win.winfo_exists():
@@ -1097,6 +1115,7 @@ def bring_window_to_front(win, focus_widget=None, delay=80):
             win.deiconify()
             win.lift()
             win.attributes("-topmost", True)
+            _win32_raise(win)
             win.focus_force()
             if focus_widget is not None:
                 _focus_target(focus_widget)
@@ -1106,15 +1125,20 @@ def bring_window_to_front(win, focus_widget=None, delay=80):
                         return
                     win.attributes("-topmost", False)
                     win.lift()
+                    _win32_raise(win)
                     if focus_widget is not None:
                         _focus_target(focus_widget)
                 except Exception as _e:
                     _log_silent("bring_window_to_front#rel", _e)
-            win.after(220, _release)
+            # 280ms: بعد انتهاء مؤقت CustomTkinter الداخلي (200ms) عشان النافذة متتنزلش ورا التطبيق
+            win.after(280, _release)
         except Exception as _e:
             _log_silent("bring_window_to_front", _e)
     try:
-        win.after(delay, _raise)
+        if delay <= 0:
+            _raise()
+        else:
+            win.after(delay, _raise)
     except Exception as _e:
         _log_silent("bring_window_to_front#sched", _e)
 
@@ -1153,8 +1177,8 @@ def fit_and_center(win, parent, width, min_height=180, focus_widget=None):
 LOG_WIN_W, LOG_WIN_H = 880, 510
 LOG_WIN_MIN_W, LOG_WIN_MIN_H = 740, 410
 
-def center_window_on_screen(win, width, height):
-    """يوسّط النافذة في نص الشاشة مع مراعاة نسبة تكبير ويندوز ويرفعها أمام البرنامج."""
+def center_window_on_screen(win, width, height, show=True):
+    """يوسّط النافذة في نص الشاشة مع مراعاة نسبة تكبير ويندوز."""
     win.update_idletasks()
     set_window_icon_safe(win)
     sc = _win_scale(win)
@@ -1165,7 +1189,8 @@ def center_window_on_screen(win, width, height):
     x = max(0, (sw - pw_phys) // 2)
     y = max(0, (sh - ph_phys) // 2 - 16)
     win.geometry(f"{w}x{h}+{x}+{y}")
-    bring_window_to_front(win)
+    if show:
+        bring_window_to_front(win)
 
 # ── تلميحات الأزرار + Esc لكل النوافذ + النوافذ بتفتكر حجمها ومكانها ─────────────────
 class _Tooltip:
@@ -3744,6 +3769,7 @@ def make_print_copy(src_pdf):
 class ElevateLoginGate(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
         super().__init__(parent)
+        self.withdraw()
         self.parent = parent
         self.on_success = on_success
         self.title("A2R Authorization")
@@ -3829,6 +3855,7 @@ class CustomTkinterApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+        self.withdraw()   # إخفاء مؤقت أثناء بناء العناصر حتى تفتح النافذة كاملة وسلسة في إطار واحد بدون تقطيع
         self.title(f"A2R Operations Console - {APP_OWNER}")
         self.resizable(False, False)
         
@@ -4081,6 +4108,7 @@ class CustomTkinterApp(ctk.CTk):
         self._cancel_auto_minimize()
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
@@ -4568,6 +4596,9 @@ class CustomTkinterApp(ctk.CTk):
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
+        if show:
+            try: self.withdraw()
+            except Exception as _e: _log_silent("switch_to_mini#w", _e)
         self.body_full.pack_forget()
         self.b_bar.pack_forget()
         self.btn_back_to_mini.pack_forget()
@@ -4599,6 +4630,8 @@ class CustomTkinterApp(ctk.CTk):
 
     def switch_to_full_view(self):
         self.is_mini_mode = False
+        try: self.withdraw()
+        except Exception as _e: _log_silent("switch_to_full#w", _e)
         self.body_mini.pack_forget()
         
         self.btn_back_to_mini.pack(side="right", padx=(6, 0))
@@ -5007,7 +5040,8 @@ class CustomTkinterApp(ctk.CTk):
 
     def apply_theme(self, name):
         t = THEMES[name]
-        ctk.set_appearance_mode(t["mode"])
+        if ctk.get_appearance_mode().lower() != t["mode"].lower():
+            ctk.set_appearance_mode(t["mode"])
         self.configure(fg_color=t["bg"])
         self.header.configure(fg_color=t["sub_card"])
         self.lbl_logo.configure(text_color=t["accent"])
@@ -5425,6 +5459,7 @@ class CustomTkinterApp(ctk.CTk):
             _has_hub = getattr(self, "btn_arch_full", None) is not None
             _show_hist = not (getattr(self, "is_supervisor", False) and _has_hub)
             win = ctk.CTkToplevel(self)
+            win.withdraw()
             self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
@@ -5897,19 +5932,18 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         self._arch_win, self._arch_win_admin = win, is_admin
         win.title(T2("📚 سجل الأرشيف", "📚 Archive History"))
         win.resizable(True, True)
-        set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H, show=False)
         remember_window_geometry(win, "archive_history")
         try: win.transient("")
         except Exception as _e: _log_silent("open_archive_history#transient", _e)
         _sc = _win_scale(win)
         win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        bring_window_to_front(win)
 
         ALL = T2("الكل", "All")
         st = {"stats": [], "debounce": None, "iso": None, "recs": [], "recs_iso": None,
@@ -6453,8 +6487,8 @@ class CustomTkinterApp(ctk.CTk):
                 row_menu.tk_popup(ev.x_root, ev.y_root)
         tx_tree.bind("<Button-3>", _tx_pop)
 
-        ctk.CTkLabel(right, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
-                                    "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+        ctk.CTkLabel(right, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   🟪 ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                    "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   🟪 Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=8, pady=(0, 2))
 
         def refresh_tx(*_):
@@ -6470,7 +6504,7 @@ class CustomTkinterApp(ctk.CTk):
                     if q not in full_s: continue
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], f"{r['amount']:.2f}", r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ("odd" if shown % 2 else "")
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
                 tx_tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
             tx_count.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
@@ -6723,7 +6757,7 @@ class CustomTkinterApp(ctk.CTk):
 
         # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين ارفع النافذة للأمام وحدّث في الخلفية
         load_days()                       # اعرض الفهرس الموجود فورًا
-        bring_window_to_front(win, focus_widget=day_q, delay=120)
+        bring_window_to_front(win, focus_widget=day_q, delay=10)
         run_maintenance(light=True)       # فهرسة بس؛ النسخ الاحتياطي والإكسيلات بزرار "تحديث + نسخ" أو في الخلفية
 
     def open_records_viewer(self):
@@ -6736,20 +6770,19 @@ class CustomTkinterApp(ctk.CTk):
         """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         day_txt = ""
         if day_iso:
             yy, mm, dd_ = day_iso.split("-")
             day_txt = f"{dd_}-{mm}-{yy}"
         win.title(tr("records_viewer_title") + (f" — {day_txt}" if day_txt else ""))
         win.resizable(True, True)
-        set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H, show=False)
         remember_window_geometry(win, "records_viewer")
         _sc = _win_scale(win)
         win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        bring_window_to_front(win)
 
         if not live:
             hdr = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
@@ -6889,8 +6922,8 @@ class CustomTkinterApp(ctk.CTk):
             _b(T2("📄 ملخص اليوم", "📄 Day summary"), "quiet", open_day_summary, 125)
             _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", export_day_excel, 125)
 
-        ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
-                                  "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+        ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   🟪 ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                  "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   🟪 Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
 
         tree_frame = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
@@ -6976,7 +7009,7 @@ class CustomTkinterApp(ctk.CTk):
 
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ("odd" if shown % 2 else "")
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
                 tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
                 if id(r) in counted:
@@ -6993,7 +7026,7 @@ class CustomTkinterApp(ctk.CTk):
         search_entry.bind("<KeyRelease>", refresh)
         amt_entry.bind("<KeyRelease>", refresh)
         refresh()
-        bring_window_to_front(win, focus_widget=search_entry, delay=100)
+        bring_window_to_front(win, focus_widget=search_entry, delay=10)
 
     def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
         old = getattr(self, "_summary_win", None)
@@ -7004,6 +7037,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         modal = ctk.CTkToplevel(self)
+        modal.withdraw()
         self._summary_win = modal
         modal.title(tr("summary_title"))
         modal.resizable(False, False)
@@ -7114,6 +7148,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
@@ -7231,6 +7266,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
@@ -7482,6 +7518,7 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        win.withdraw()
         self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
