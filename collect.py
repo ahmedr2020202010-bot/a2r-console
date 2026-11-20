@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v64-lite"
+APP_VERSION = "v65-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -277,9 +277,36 @@ def save_print_paper(w, h, name=""):
 def print_paper_label():
     return f"{_fmt_mm(_PRINT_PAPER_MM[0])}x{_fmt_mm(_PRINT_PAPER_MM[1])}"
 
-def print_settings_arg():
-    name = _PRINT_PAPER_NAME or f"{_fmt_mm(_PRINT_PAPER_MM[0])} x {_fmt_mm(_PRINT_PAPER_MM[1])} mm"
-    return f"paper={name},shrink"
+def print_settings_arg(scaled=True):
+    """إعدادات الطباعة لـ SumatraPDF:
+    نرسل paper= فقط لو في اسم ورق حقيقي من درايفر الطابعة (الأسماء الوهمية بيتجاهلها SumatraPDF).
+    ولو الصفحة اتظبط مقاسها بـ pypdf بنستخدم noscale عشان الدرايفر ميرجعش يصغّرها."""
+    mode = "noscale" if scaled else "shrink"
+    if _PRINT_PAPER_NAME:
+        return f"paper={_PRINT_PAPER_NAME},{mode}"
+    return mode
+
+def open_default_printer_preferences():
+    """يفتح نافذة إعدادات الطابعة الافتراضية (Printing Preferences) للمستخدم العادي بدون أدمن."""
+    if sys.platform != "win32":
+        return False
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$n = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName; "
+        "if ($n) { Write-Output $n }"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
+        prn = r.stdout.decode("utf-8", "replace").strip()
+        if prn:
+            subprocess.Popen(["rundll32", "printui.dll,PrintUIEntry", "/e", "/n", prn])
+            return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences", e)
+    return False
 
 def list_printer_papers():
     """مقاسات الورق اللي درايفر الطابعة الافتراضية بيدعمها: (اسم الطابعة, [(اسم الورق, عرض مم, طول مم)]).
@@ -573,7 +600,7 @@ for _n, _roles in _ROLE_BTN.items():
 BUTTON_ROLES = {
     "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
     "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
-    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_arch_full"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_full"],
     "warn_btn": ["btn_print_slip", "btn_fix_printer", "btn_mini_reprint"],
     "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
     "danger_btn": ["btn_elevate"],
@@ -3369,22 +3396,26 @@ def get_print_time_bottom(pdf_path):
 
 PRINT_TARGET_W_PT = 57 / 25.4 * 72   # عرض الطباعة المطلوب: 57 مم
 
-def scale_pdf_to_print_width(src_pdf, target_w=None):
-    """نسخة مؤقتة من الـ PDF مصغّرة لعرض 57 مم. الإيصالات بتتصمم بعرض 80 مم، وكان الحجم النهائي بيتحدد من
-    مقاس الورق المعرّف في كل جهاز (fit): 57x90 بيطلّع الحجم الصح، و80 مم بيطلّعه كبير. دلوقتي البرنامج هو اللي
-    بيحدد الحجم. بترجع None لو الصفحة أصلًا بعرض 57 مم أو أقل، أو لو pypdf مش متاح (وساعتها الطباعة زي ما كانت)."""
+def scale_pdf_to_print_width(src_pdf, target_w=None, target_h=None):
+    """ينشئ نسخة مؤقتة من الـ PDF بمقاس الورق المختار (عرض وطول) مع الحفاظ على التناسب.
+    يدعم التصغير والتكبير ليعكس أي تعديل في مقاس الطباعة فعليًا بدون الحاجة لصلاحيات أدمن."""
     if not PYPDF_AVAILABLE:
         return None
     if target_w is None:
-        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72   # عرض الورق المختار (بيتغيّر من زرار المقاس)
+        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72.0
+    if target_h is None:
+        target_h = _PRINT_PAPER_MM[1] / 25.4 * 72.0
     try:
         reader = PdfReader(src_pdf)
         if not reader.pages:
             return None
-        w = float(reader.pages[0].mediabox.width)
-        if w <= target_w + 2:
+        pw = float(reader.pages[0].mediabox.width)
+        ph = float(reader.pages[0].mediabox.height)
+        if pw <= 0 or ph <= 0:
             return None
-        f = target_w / w
+        f = min(target_w / pw, target_h / ph)
+        if abs(f - 1.0) < 0.01:
+            return None
         writer = PdfWriter()
         for pg in reader.pages:
             pg.scale_by(f)
@@ -3397,6 +3428,27 @@ def scale_pdf_to_print_width(src_pdf, target_w=None):
     except Exception as e:
         log_exception("scale_pdf_to_print_width", e)
         return None
+
+def create_test_print_pdf(filepath, w_mm, h_mm):
+    """إيصال اختبار صغير بإطار واضح ومقاس الورقة بالمم للتحقق الفوري من مقاس الطباعة."""
+    if not REPORTLAB_AVAILABLE:
+        return False
+    pt = 72.0 / 25.4
+    pw, ph = float(w_mm) * pt, float(h_mm) * pt
+    c = canvas.Canvas(filepath, pagesize=(pw, ph))
+    m = 4.0
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1.5)
+    c.rect(m, m, max(10, pw - 2 * m), max(10, ph - 2 * m))
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", max(8, min(13, pw * 0.08)))
+    c.drawCentredString(pw / 2, ph * 0.66, "A2R TEST PRINT")
+    c.setFont("Helvetica-Bold", max(8, min(14, pw * 0.09)))
+    c.drawCentredString(pw / 2, ph * 0.48, f"{_fmt_mm(w_mm)} x {_fmt_mm(h_mm)} mm")
+    c.setFont("Helvetica", max(6, min(9, pw * 0.055)))
+    c.drawCentredString(pw / 2, ph * 0.28, datetime.datetime.now().strftime("%d-%m-%Y  %H:%M"))
+    c.save()
+    return True
 
 def _make_print_copy_pypdf(src_pdf):
     """بديل آمن للقص باستخدام pypdf في حال كانت بنية ملف الـ PDF مضغوطة أو غير متوافقة مع التعديل المباشر."""
@@ -3684,6 +3736,12 @@ class CustomTkinterApp(ctk.CTk):
         else:
             self.switch_to_mini_view()
 
+        # تشغيل الأرشفة التلقائية الكاملة فور إقلاع الجهاز/التطبيق (حتى في وضع الميني أو بجوار الساعة)
+        self._refresh_mini_archive_label()
+        self._archive_tick_started = True
+        self.after(2500, self.auto_archive_on_login)
+        self.after(600000, self._archive_tick)
+
     def _init_tray_icon(self):
         try:
             menu = pystray.Menu(
@@ -3843,7 +3901,7 @@ class CustomTkinterApp(ctk.CTk):
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
-        center_window_relative(win, self, 360, 330)
+        center_window_relative(win, self, 380, 415)
         win.configure(fg_color=t["bg"])
         try: win.transient(self)
         except Exception as _e: _log_silent("fix_printer_paper_action#1", _e)
@@ -3872,6 +3930,13 @@ class CustomTkinterApp(ctk.CTk):
         _fill(*_PRINT_PAPER_MM)
         def _preset(a, b):
             sel["name"] = ""
+            # لو فيه مقاس مطابق جوه درايفر الطابعة نختاره تلقائيًا
+            for lab, (nm, pw, ph) in papers_map.items():
+                if abs(pw - a) <= 3 and abs(ph - b) <= 3:
+                    sel["name"] = nm
+                    try: cb_papers.set(lab)
+                    except Exception as _e: _log_silent("fp_preset#cb", _e)
+                    break
             _fill(a, b)
         for (pw, ph) in PRINT_PAPER_PRESETS_MM:
             ctk.CTkButton(f_pre, text=f"{_fmt_mm(pw)} × {_fmt_mm(ph)}", width=90, height=28, font=FONT_BTN_SUB,
@@ -3984,9 +4049,57 @@ class CustomTkinterApp(ctk.CTk):
                 self.run_on_main(_done)
             threading.Thread(target=_apply_printer, daemon=True).start()
 
-        btn_save = ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+        def _test_print():
+            try:
+                w = float(e_w.get().strip().replace(",", "."))
+                h = float(e_h.get().strip().replace(",", "."))
+            except Exception:
+                lbl_err.configure(text=T2("اكتب أرقام صحيحة للعرض والطول", "Enter valid numbers for width and height"))
+                return
+            if not (20 <= w <= 300 and 20 <= h <= 600):
+                lbl_err.configure(text=T2("المقاس خارج المدى المسموح", "Size out of range"))
+                return
+            save_print_paper(w, h, sel["name"])
+            self.btn_fix_printer.configure(text=self._paper_btn_text())
+            try: btn_test.configure(state="disabled", text=T2("⏳ جاري الطباعة...", "⏳ Printing..."))
+            except Exception as _e: _log_silent("fp_test#dis", _e)
+
+            def _bg():
+                ok = False
+                try:
+                    os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+                    tp = os.path.join(PRINT_TEMP_DIR, "a2r_test_size.pdf")
+                    if create_test_print_pdf(tp, w, h):
+                        ok = self.send_to_thermal_printer_57x90(tp, is_test=True)
+                except Exception as e:
+                    log_exception("test_print", e)
+                def _fin():
+                    try:
+                        if win.winfo_exists():
+                            btn_test.configure(state="normal", text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"))
+                            if ok:
+                                play_sound_matched()
+                                lbl_err.configure(text=T2("✓ تم إرسال ورقة الاختبار للطابعة", "✓ Test page sent to printer"), text_color=t["success"])
+                            else:
+                                lbl_err.configure(text=T2("تعذرت الطباعة — تأكد من الطابعة", "Print failed — check printer"), text_color=t["danger"])
+                    except Exception as _e: _log_silent("fp_test#fin", _e)
+                self.run_on_main(_fin)
+            threading.Thread(target=_bg, daemon=True).start()
+
+        f_fp_tools = ctk.CTkFrame(win, fg_color="transparent")
+        f_fp_tools.pack(fill="x", padx=16, pady=(8, 4))
+        btn_test = ctk.CTkButton(f_fp_tools, text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"), font=FONT_BTN_SUB,
+                                 height=32, corner_radius=9, fg_color=t["primary"], hover_color=t["primary_hover"],
+                                 text_color="#FFFFFF", command=_test_print)
+        btn_test.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkButton(f_fp_tools, text=T2("⚙️ إعدادات الدرايفر", "⚙️ Driver Settings"), font=FONT_BTN_SUB,
+                      height=32, corner_radius=9, fg_color=t["secondary"], hover_color=t["secondary_hover"],
+                      text_color="#FFFFFF", command=lambda: threading.Thread(target=open_default_printer_preferences, daemon=True).start()
+                      ).pack(side="right", fill="x", expand=True, padx=(4, 0))
+
+        btn_save = ctk.CTkButton(win, text=T2("حفظ وتطبيق", "Save & Apply"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
                                  fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF", command=_save)
-        btn_save.pack(fill="x", padx=16, pady=(8, 0))
+        btn_save.pack(fill="x", padx=16, pady=(4, 10))
         win.bind("<Return>", _save)
         win.bind("<Escape>", lambda e: _close())
         win.protocol("WM_DELETE_WINDOW", _close)
@@ -4194,11 +4307,30 @@ class CustomTkinterApp(ctk.CTk):
             _ARCHIVE_LOCK.release()
         return built
 
+    def _refresh_mini_archive_label(self):
+        lbl = getattr(self, "lbl_mini_archive", None)
+        if lbl is None:
+            return
+        try:
+            t = THEMES[self.current_theme_name]
+            if getattr(self, "_auto_archive_running", False):
+                lbl.configure(text=T2("⏳ الأرشفة التلقائية: جاري التحديث...", "⏳ Auto-Archive: Updating..."),
+                              text_color=t["warning"])
+            elif self._archive_done_today():
+                tm = self._archive_done_time()
+                suf = f" ({tm})" if tm else ""
+                lbl.configure(text=T2(f"● الأرشفة التلقائية: مكتملة اليوم ✓{suf}", f"● Auto-Archive: Completed today ✓{suf}"),
+                              text_color=t["success"])
+            else:
+                lbl.configure(text=T2("● الأرشفة التلقائية: جاهزة في الخلفية", "● Auto-Archive: Ready in background"),
+                              text_color=t["text_muted"])
+        except Exception as _e:
+            _log_silent("refresh_mini_archive_label", _e)
+
     def auto_archive_on_login(self):
-        """عند دخول الوضع الكامل (يوزر أو مشرف)، في الخلفية بدون أي نافذة:
-        - لو الأرشفة الكاملة لسه ماتعملتش النهارده: كنس كل الملفات القديمة للأرشيف + استكمال أي سمري/إكسيل ناقص لكل الأيام.
-        - لو اتعملت: يفحص بس الأيام اللي ناقصها سمري أو إكسيل ويبنيها (من غير كنس).
-        إشعار بجوار الساعة لما يخلص لو اتعمل شغل."""
+        """تعمل تلقائيًا فور تشغيل الجهاز/البرنامج (في الميني أو بجوار الساعة) وحتى في أول تشغيل للتطبيق:
+        - كنس كل ملفات الأيام السابقة للأرشيف + توليد إيصال السمري وإكسيل اليوم لكل يوم مؤرشف.
+        - استكمال أي سمري أو إكسيل ناقص لأيام مؤرشفة سابقًا + تحديث فهرس البحث FTS5 في الخلفية."""
         folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
         if not folder or not os.path.isdir(folder):
             return
@@ -4206,6 +4338,7 @@ class CustomTkinterApp(ctk.CTk):
             return
         done_today = self._archive_done_today()
         self._auto_archive_running = True
+        self._refresh_mini_archive_label()
 
         def work():
             swept, ok, filled = 0, False, 0
@@ -4215,13 +4348,16 @@ class CustomTkinterApp(ctk.CTk):
                     if r is not None:             # None = كنسة تانية شغالة، هنحاول تاني في الدورة الجاية
                         swept, ok = r, True
                 filled = self._archive_fill_missing(folder) or 0
-                if ok:
+                if ok or (not done_today and filled >= 0):
                     self._mark_archive_done_today()
+                    self._start_archive_maintenance(folder)
+                elif filled > 0:
                     self._start_archive_maintenance(folder)
             except Exception as e:
                 log_exception("auto_archive_on_login", e)
             finally:
                 self._auto_archive_running = False
+            self.run_on_main(self._refresh_mini_archive_label)
             if ok or filled:
                 self.run_on_main(lambda: self._notify_archive_done(swept, filled))
 
@@ -4253,12 +4389,12 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_back_to_mini.pack_forget()
         self.f_role_btn.pack_forget()
         
-        self.btn_elevate.pack(side="right", padx=(6, 0))
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+        self._refresh_mini_archive_label()
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 460, 232
-        self.minsize(460, 232)
+        width, height = 460, 244
+        self.minsize(460, 244)
         self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
         self.update_idletasks()
 
@@ -4274,7 +4410,6 @@ class CustomTkinterApp(ctk.CTk):
     def switch_to_full_view(self):
         self.is_mini_mode = False
         self.body_mini.pack_forget()
-        self.btn_elevate.pack_forget()
         
         self.btn_back_to_mini.pack(side="right", padx=(6, 0))
         self.f_role_btn.pack(side="right", padx=(6, 0))
@@ -4374,11 +4509,6 @@ class CustomTkinterApp(ctk.CTk):
         f_right = ctk.CTkFrame(self.header, fg_color="transparent")
         f_right.pack(side="right", padx=(0, 12), pady=6)
 
-        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=124, height=29, corner_radius=9,
-                                         font=(FONT_FAMILY, 10, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
-                                         border_width=0, command=self.request_full_console)
-        self.btn_elevate.pack(side="right", padx=(8, 0))
-
         self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=100, height=28, corner_radius=8,
                                               font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
                                               command=self.switch_to_mini_view)
@@ -4388,7 +4518,7 @@ class CustomTkinterApp(ctk.CTk):
         self.badge_role.pack()
 
         self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#38BDF8")
-        self.lbl_clock.pack(side="right", padx=(0, 6))
+        self.lbl_clock.pack(side="right", padx=(0, 2))
         self.update_live_clock()
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
@@ -4403,31 +4533,35 @@ class CustomTkinterApp(ctk.CTk):
                                           font=(FONT_FAMILY, 12, "bold"), text_color="#38BDF8")
         self.lbl_mini_title.pack(side="left")
 
-        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=78, height=26,
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=82, height=26,
                                              corner_radius=8, font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706",
                                              hover_color="#B45309", text_color="#FFFFFF", command=self.fix_printer_paper_action)
         self.btn_fix_printer.pack(side="right")
 
         self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"),
                                          font=(FONT_FAMILY, 10, "bold"), text_color="#10B981")
-        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 3))
+        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 2))
 
         self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0),
                                             font=(FONT_FAMILY, 10, "bold"), text_color="#94A3B8")
-        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 10))
+        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 2))
+
+        self.lbl_mini_archive = ctk.CTkLabel(self.card_mini_status, text="",
+                                             font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
+        self.lbl_mini_archive.pack(anchor="w", padx=14, pady=(0, 10))
 
         f_mini_btns = ctk.CTkFrame(self.body_mini, fg_color="transparent")
-        f_mini_btns.pack(fill="x", pady=(2, 6))
+        f_mini_btns.pack(fill="x", pady=(0, 6))
 
-        self.btn_mini_reprint = ctk.CTkButton(f_mini_btns, text=tr("mini_reprint_last"), height=40, corner_radius=10,
-                                              font=FONT_BTN_SUB, fg_color="#D97706", hover_color="#B45309",
+        self.btn_mini_reprint = ctk.CTkButton(f_mini_btns, text=tr("mini_reprint_last"), height=34, corner_radius=9,
+                                              font=(FONT_FAMILY, 11, "bold"), fg_color="#D97706", hover_color="#B45309",
                                               text_color="#FFFFFF", command=self.reprint_last_receipt)
-        self.btn_mini_reprint.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.btn_mini_reprint.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        self.btn_mini_archive = ctk.CTkButton(f_mini_btns, text=tr("clean_downloads"), height=40, corner_radius=10,
-                                              font=FONT_BTN_SUB, fg_color="#4F46E5", hover_color="#4338CA",
-                                              text_color="#FFFFFF", command=self.open_downloads_archiver_dialog)
-        self.btn_mini_archive.pack(side="right", fill="x", expand=True, padx=(4, 0))
+        self.btn_elevate = ctk.CTkButton(f_mini_btns, text=tr("btn_full_console"), height=34, corner_radius=9,
+                                         font=(FONT_FAMILY, 11, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
+                                         border_width=0, text_color="#FFFFFF", command=self.request_full_console)
+        self.btn_elevate.pack(side="right", fill="x", expand=True, padx=(5, 0))
 
         self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
@@ -4652,7 +4786,6 @@ class CustomTkinterApp(ctk.CTk):
             "btn_cash":             (lambda: T2("حاسبة الكاش (F4)", "Cash calculator (F4)")),
             "btn_summary_reopen":   (lambda: T2("إعادة فتح ملخص الفحص", "Reopen scan summary")),
             "btn_archive_downloads": (lambda: T2("أرشفة الجهاز", "Archive this device")),
-            "btn_mini_archive":     (lambda: T2("أرشفة الجهاز", "Archive this device")),
             "btn_mini_reprint":     (lambda: T2("إعادة طباعة آخر إيصال (في حالة نفاد الورق أو انحشاره)", "Reprint the last receipt (if paper ran out or jammed)")),
             "btn_reset":            (lambda: T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)")),
             "btn_view_rec":         (lambda: T2("عرض السجلات", "Records viewer")),
@@ -4720,6 +4853,7 @@ class CustomTkinterApp(ctk.CTk):
         self._apply_button_roles(t)
 
         self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
 
     def _apply_button_roles(self, t):
         """تلوين كل الأزرار بحسب دورها من الثيم الحالي بنمط عصري مسطح (بدون إطار ذهبي)."""
@@ -4793,7 +4927,6 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_summary_reopen.configure(text=L["summary_btn"])
         self.btn_cash.configure(text=L["cash_btn"])
         self.btn_archive_downloads.configure(text=L["clean_downloads"])
-        self.btn_mini_archive.configure(text=L["clean_downloads"])
         self.btn_mini_reprint.configure(text=L["mini_reprint_last"])
         self.btn_reset.configure(text=L["reset"])
         self.lbl_kpi1_title.configure(text=L["kpi1"])
@@ -4813,6 +4946,7 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_mini_counter.configure(text=tr("mini_printed_count", count=self.printed_count_today))
         self.btn_fix_printer.configure(text=self._paper_btn_text())
         self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
         if self.last_detailed_records:
             annotate_records(self.last_detailed_records)
 
@@ -5023,8 +5157,8 @@ class CustomTkinterApp(ctk.CTk):
         threading.Thread(target=_print_worker, daemon=True).start()
         threading.Thread(target=_routine, daemon=True).start()
 
-    def send_to_thermal_printer_57x90(self, pdf_file_path):
-        """يطبع إيصال على 57x90. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
+    def send_to_thermal_printer_57x90(self, pdf_file_path, is_test=False):
+        """يطبع إيصال على المقاس المختار. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
         temp_copy = None
         scaled_copy = None
         ok = False
@@ -5036,21 +5170,23 @@ class CustomTkinterApp(ctk.CTk):
 
                 target = pdf_file_path
                 clean_name = os.path.basename(pdf_file_path).lstrip("_")
-                if clean_name.lower().startswith("quote_receipt_"):
+                is_manual_pdf = bool(MANUAL_NAME_RE.match(clean_name))
+                if not is_test and clean_name.lower().startswith("quote_receipt_"):
                     temp_copy = make_print_copy(pdf_file_path)
                     if temp_copy:
                         target = temp_copy
 
-                if not MANUAL_NAME_RE.match(clean_name):      # الإيصال اليدوي بيطبع بعرض اللفة كامل
+                if not is_test and not is_manual_pdf:
                     scaled_copy = scale_pdf_to_print_width(target)
                 if scaled_copy:
                     target = scaled_copy
 
+                use_noscale = bool(is_test or is_manual_pdf or scaled_copy)
                 if os.path.exists(sumatra_path):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", print_settings_arg(),
+                        "-print-settings", print_settings_arg(scaled=use_noscale),
                         "-silent",
                         target
                     ]
