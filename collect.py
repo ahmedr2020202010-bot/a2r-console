@@ -727,81 +727,6 @@ FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
 FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
 FONT_ENTRY = (FONT_FAMILY, 11, "normal")
 
-# ============================================================================
-#  ستايل أزرار Google Chrome
-#  - الزرار الأساسي: أزرق جوجل مملوء (Pill) | باقي الأزرار: Outlined بحد رفيع ونص أزرق
-#  - الأزرار الخطرة: نص أحمر بنفس الشكل | الخط: Segoe UI Semibold (وزن 500 زي كروم)
-#  - بيتطبق تلقائياً على كل أزرار البرنامج (الرئيسية والنوافذ) بدون تعديل كل زرار لوحده.
-#  - عشان ترجع الشكل القديم: خلّي CHROME_BUTTON_STYLE = False
-# ============================================================================
-CHROME_BUTTON_STYLE = True
-
-# تصادم لونين (primary و warn_btn) في ثيم Cyber Amber كان هيلخبط تمييز الدور من اللون
-THEMES["Cyber Amber"].update(warn_btn="#C2410C", warn_btn_hover="#9A3412")
-
-_CHROME_PAL = {
-    "dark":  {"fill": "#8AB4F8", "fill_hover": "#AECBFA", "on_fill": "#202124",
-              "line": "#5F6368", "text": "#8AB4F8", "hover": "#33415C",
-              "dng_text": "#F28B82", "dng_hover": "#4A2C30"},
-    "light": {"fill": "#1A73E8", "fill_hover": "#1765CC", "on_fill": "#FFFFFF",
-              "line": "#DADCE0", "text": "#1A73E8", "hover": "#F6FAFE",
-              "dng_text": "#D93025", "dng_hover": "#FCE8E6"},
-}
-_CHROME_ACTIVE = {"t": None}      # الثيم الحالي (بيتحدّث من apply_theme)
-
-
-def _chrome_color_str(c, mode):
-    if isinstance(c, (tuple, list)) and c:
-        c = c[0] if mode == "light" else c[-1]
-    return str(c).strip().lower()
-
-
-def _chrome_style_kwargs(kw):
-    """بيحوّل ألوان الزرار (fg/hover/border/text) في kwargs لشكل كروم بحسب دور اللون في الثيم."""
-    fg = kw.get("fg_color")
-    if fg is None or fg == "transparent":
-        return
-    t = _CHROME_ACTIVE.get("t")
-    mode = (t["mode"] if t else ctk.get_appearance_mode()).lower()
-    mode = "dark" if mode == "dark" else "light"
-    p = _CHROME_PAL[mode]
-    c = _chrome_color_str(fg, mode)
-    if t and c in (t["primary"].lower(), t["primary_hover"].lower()):
-        kw.update(fg_color=p["fill"], hover_color=p["fill_hover"], border_width=0, text_color=p["on_fill"])
-    elif t and c in (t["danger_btn"].lower(), t["danger_btn_hover"].lower()):
-        kw.update(fg_color="transparent", hover_color=p["dng_hover"], border_width=1,
-                  border_color=p["line"], text_color=p["dng_text"])
-    else:
-        kw.update(fg_color="transparent", hover_color=p["hover"], border_width=1,
-                  border_color=p["line"], text_color=p["text"])
-
-
-if CHROME_BUTTON_STYLE:
-    _orig_btn_init = ctk.CTkButton.__init__
-    _orig_btn_cfg = ctk.CTkButton.configure
-
-    def _chrome_btn_init(self, *a, **kw):
-        try:
-            kw["corner_radius"] = int(kw.get("height", 28)) // 2          # شكل الحبة (Pill)
-            f = kw.get("font")
-            if isinstance(f, tuple) and len(f) >= 3 and f[0] == FONT_FAMILY and "bold" in str(f[2]):
-                kw["font"] = (FONT_FAMILY + " Semibold", f[1], "normal")
-            _chrome_style_kwargs(kw)
-        except Exception as _e:
-            _log_silent("chrome_btn_init", _e)
-        _orig_btn_init(self, *a, **kw)
-
-    def _chrome_btn_cfg(self, require_redraw=False, **kw):
-        try:
-            _chrome_style_kwargs(kw)
-        except Exception as _e:
-            _log_silent("chrome_btn_cfg", _e)
-        return _orig_btn_cfg(self, require_redraw=require_redraw, **kw)
-
-    ctk.CTkButton.__init__ = _chrome_btn_init
-    ctk.CTkButton.configure = _chrome_btn_cfg
-
-
 
 def theme_btn_colors(t, kind="quiet"):
     """primary = الإجراء المهم | quiet = باقي الأزرار | danger = خطر (مسح/إلغاء)"""
@@ -5780,7 +5705,6 @@ class CustomTkinterApp(ctk.CTk):
 
     def apply_theme(self, name):
         t = THEMES[name]
-        _CHROME_ACTIVE["t"] = t
         if ctk.get_appearance_mode().lower() != t["mode"].lower():
             ctk.set_appearance_mode(t["mode"])
         self.configure(fg_color=t["bg"])
