@@ -48,6 +48,7 @@ import tempfile
 import zlib
 import html
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -97,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v62-lite"
+APP_VERSION = "v63-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -217,6 +218,8 @@ def _fmt_mm(v):
     v = float(v)
     return str(int(v)) if v == int(v) else f"{v:g}"
 
+_CONFIG_LOCK = threading.Lock()
+
 def _read_app_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -224,6 +227,22 @@ def _read_app_config():
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+def _save_app_prefs(**updates):
+    """يحفظ تفضيلات الجهاز (اللغة، الثيم، الصوت، المزامنة/الطباعة التلقائية) في config.json.
+    مسار الفحص مش بيتحفظ عشان يرجع دايمًا لـ Downloads مع كل تشغيل."""
+    with _CONFIG_LOCK:
+        try:
+            d = _read_app_config()
+            d.update(updates)
+            tmp = CONFIG_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, CONFIG_FILE)
+            return True
+        except Exception as e:
+            log_exception("save_app_prefs", e)
+            return False
 
 def load_print_paper():
     global _PRINT_PAPER_MM
@@ -1186,16 +1205,13 @@ def extract_date_from_text(txt):
             except Exception as _e: _log_silent("extract_date_from_text#1", _e)
     return None
 
-# عرض لفة الورق الفعلي في الطابعة (مم) لإيصال المعاملة اليدوية وبون التصوير: 80 للفة 80 مم، 57 للفة 57 مم.
-# الإيصال الأساسي (quote_receipt) مش بيتأثر بالرقم ده.
-PRINT_ROLL_W_MM = 80
-
 def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
     if not REPORTLAB_AVAILABLE:
         raise Exception("ReportLab is not installed!")
     op_dt = op_dt or datetime.datetime.now()
-    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض اللفة
-    _k = (PRINT_ROLL_W_MM * 72 / 25.4) / PAGE_W if PRINT_ROLL_W_MM else 1.0
+    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض الورق المختار
+    roll_w_mm = _PRINT_PAPER_MM[0] if (_PRINT_PAPER_MM and _PRINT_PAPER_MM[0] > 0) else 57.0
+    _k = (roll_w_mm * 72 / 25.4) / PAGE_W
     c = canvas.Canvas(filepath, pagesize=(PAGE_W * _k, PAGE_H * _k))
     c.scale(_k, _k)
     font_name = "Helvetica-Bold"
@@ -1552,13 +1568,17 @@ def archive_index_update(folder_path, progress=None):
             if old and abs(old[0] - st.st_mtime) < 1 and old[1] == st.st_size: continue
             todo.append((p, day, st))
 
-        total = len(todo)
-        for i, (p, day, st) in enumerate(todo, 1):
-            rec = None
+        def _read_one(item):
+            p_, day_, st_ = item
             try:
-                if p.lower().endswith(".txt"): rec = read_txt_record(p, datetime.date.fromisoformat(day))
-                else: rec = read_pdf_record(p, manual_map)
-            except Exception as e: log_exception(f"archive_index:{os.path.basename(p)}", e)
+                if p_.lower().endswith(".txt"):
+                    return p_, day_, st_, read_txt_record(p_, datetime.date.fromisoformat(day_))
+                return p_, day_, st_, read_pdf_record(p_, manual_map)
+            except Exception as e:
+                log_exception(f"archive_index:{os.path.basename(p_)}", e)
+                return p_, day_, st_, None
+
+        def _store_one(p, day, st, rec):
             fname = os.path.basename(p)
             if rec:
                 ch = str(rec.get("chassis") or "-")
@@ -1577,10 +1597,26 @@ def archive_index_update(folder_path, progress=None):
                 if rec:
                     conn.execute("INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
                                  (p, _norm_fts_text(rec["unit"], rec["plate"], rec["insured"], fname, ch, mo)))
-            done_new += 1
-            if i % 40 == 0:
-                conn.commit()
-                if progress: progress(i, total)
+
+        total = len(todo)
+        if total > 3:
+            workers = min(4, max(2, os.cpu_count() or 2))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for i, fut in enumerate(as_completed([ex.submit(_read_one, it) for it in todo]), 1):
+                    p, day, st, rec = fut.result()
+                    _store_one(p, day, st, rec)
+                    done_new += 1
+                    if i % 40 == 0:
+                        conn.commit()
+                        if progress: progress(i, total)
+        else:
+            for i, it in enumerate(todo, 1):
+                p, day, st, rec = _read_one(it)
+                _store_one(p, day, st, rec)
+                done_new += 1
+                if i % 40 == 0:
+                    conn.commit()
+                    if progress: progress(i, total)
         conn.commit()
         if progress and total: progress(total, total)
 
@@ -2853,8 +2889,20 @@ def parse_receipt_variants(txt):
     return best
 
 
+def _text_parse_complete(f):
+    return (
+        _receipt_ok(f)
+        and f.get("plate", "-") != "-"
+        and f.get("unit", UNSPEC) != UNSPEC
+        and float(f.get("amount") or 0) > 0
+        and f.get("dt") is not None
+        and f.get("chassis", "-") != "-"
+    )
+
 def parse_receipt(path, txt):
     old = parse_receipt_text(txt)
+    if _text_parse_complete(old):
+        return old
     bb, bb_lines, dbg = None, [], {}
     try:
         bb, bb_lines, dbg = parse_receipt_bbox(path, txt)
@@ -3049,12 +3097,28 @@ def collect_records(folder_path, target_date, progress=None):
     records = []
     done = 0
 
-    for pdf in pdf_files:
-        done += 1
-        if progress: progress(done, total, os.path.basename(pdf))
-        rec = read_pdf_record(pdf, manual_map)
-        if rec and rec["actual_date"] == target_date:
-            records.append(refresh_void_flag(rec))
+    if len(pdf_files) > 3:
+        workers = min(4, max(2, os.cpu_count() or 2))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fut_map = {ex.submit(read_pdf_record, pdf, manual_map): pdf for pdf in pdf_files}
+            for fut in as_completed(fut_map):
+                pdf = fut_map[fut]
+                done += 1
+                if progress: progress(done, total, os.path.basename(pdf))
+                try:
+                    rec = fut.result()
+                except Exception as e:
+                    log_exception(f"collect_pdf:{os.path.basename(pdf)}", e)
+                    rec = None
+                if rec and rec["actual_date"] == target_date:
+                    records.append(refresh_void_flag(rec))
+    else:
+        for pdf in pdf_files:
+            done += 1
+            if progress: progress(done, total, os.path.basename(pdf))
+            rec = read_pdf_record(pdf, manual_map)
+            if rec and rec["actual_date"] == target_date:
+                records.append(refresh_void_flag(rec))
 
     for tfile in txt_files:
         done += 1
@@ -3482,14 +3546,19 @@ class CustomTkinterApp(ctk.CTk):
         self.minsize(440, 210)
         set_window_icon_safe(self)
 
-        global CURRENT_LANG
-        self.current_lang = "en"
-        CURRENT_LANG = "en"
-        self.current_theme_name = "Modern Dark"
+        global CURRENT_LANG, SOUND_MUTED
+        _cfg = _read_app_config()
+        _saved_lang = _cfg.get("lang")
+        self.current_lang = _saved_lang if _saved_lang in LANGUAGES else "en"
+        CURRENT_LANG = self.current_lang
+        _saved_theme = _cfg.get("theme")
+        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Modern Dark"
+        if "sound_muted" in _cfg:
+            SOUND_MUTED = bool(_cfg.get("sound_muted"))
 
         self.is_mini_mode = True
-        self.auto_sync_enabled = True
-        self.auto_print_enabled = True
+        self.auto_sync_enabled = bool(_cfg.get("auto_sync", True))
+        self.auto_print_enabled = bool(_cfg.get("auto_print", True))
 
         self.is_supervisor = False
         self.last_generated_file = None
@@ -4158,6 +4227,7 @@ class CustomTkinterApp(ctk.CTk):
         global SOUND_MUTED
         SOUND_MUTED = not SOUND_MUTED
         self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
+        _save_app_prefs(sound_muted=SOUND_MUTED)
 
     def setup_ui(self):
         self.header = ctk.CTkFrame(self, corner_radius=0, height=44)
@@ -4181,7 +4251,7 @@ class CustomTkinterApp(ctk.CTk):
                                       font=(FONT_FAMILY, 10, "bold"), command=self.toggle_language)
         self.btn_lang.pack(side="left", padx=(0, 5))
 
-        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=70, height=28, corner_radius=8,
+        self.btn_mute = ctk.CTkButton(f_left, text=("🔇 Muted" if SOUND_MUTED else "🔊 Sound"), width=70, height=28, corner_radius=8,
                                       font=(FONT_FAMILY, 9, "bold"), fg_color="#334155", hover_color="#475569",
                                       command=self.toggle_mute)
         self.btn_mute.pack(side="left")
@@ -4340,8 +4410,10 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_sw_print = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
         self.lbl_sw_print.pack(side="left")
 
-        self.sw_autosync.select()
-        self.sw_autoprint.select()
+        if self.auto_sync_enabled: self.sw_autosync.select()
+        else: self.sw_autosync.deselect()
+        if self.auto_print_enabled: self.sw_autoprint.select()
+        else: self.sw_autoprint.deselect()
 
         self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
         self.card_dash.pack(fill="x", pady=(0, 6))
@@ -4478,6 +4550,7 @@ class CustomTkinterApp(ctk.CTk):
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
         self.apply_theme(selected_theme)
+        _save_app_prefs(theme=selected_theme)
 
     def apply_theme(self, name):
         t = THEMES[name]
@@ -4561,10 +4634,12 @@ class CustomTkinterApp(ctk.CTk):
     def toggle_autosync(self):
         self.auto_sync_enabled = bool(self.sw_autosync.get())
         self.update_toggle_appearance()
+        _save_app_prefs(auto_sync=self.auto_sync_enabled)
 
     def toggle_autoprint(self):
         self.auto_print_enabled = bool(self.sw_autoprint.get())
         self.update_toggle_appearance()
+        _save_app_prefs(auto_print=self.auto_print_enabled)
         if self.auto_print_enabled:
             p = self.get_clean_path()
             if os.path.exists(p):
@@ -4578,6 +4653,7 @@ class CustomTkinterApp(ctk.CTk):
         self.current_lang = "ar" if self.current_lang == "en" else "en"
         CURRENT_LANG = self.current_lang
         self.apply_language(self.current_lang)
+        _save_app_prefs(lang=self.current_lang)
 
     def apply_language(self, lang):
         L = LANGUAGES[lang]
