@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v65-lite"
+APP_VERSION = "v66-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -980,33 +980,72 @@ def install_clipboard_shortcuts(root):
         return "break"
     root.bind_all("<Control-KeyPress>", handler)
 
+def _win_scale(win):
+    try:
+        sc = float(win._get_window_scaling())
+        return sc if sc > 0 else 1.0
+    except Exception:
+        return 1.0
+
+def bring_window_to_front(win):
+    """يرفع النافذة الفرعية أمام البرنامج فور رسمها (يمنع فتح نافذة السجل أو الأرشيف خلف البرنامج)."""
+    def _raise():
+        try:
+            if not win.winfo_exists():
+                return
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+            win.focus_force()
+            win.after(140, lambda: win.attributes("-topmost", False) if win.winfo_exists() else None)
+        except Exception as _e:
+            _log_silent("bring_window_to_front", _e)
+    try:
+        win.after(40, _raise)
+    except Exception as _e:
+        _log_silent("bring_window_to_front#sched", _e)
+
 def center_window_relative(win, parent, width, height):
     win.update_idletasks()
     set_window_icon_safe(win)
+    sc = _win_scale(win)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(int(width), int((sw - 40) / sc))
+    h = min(int(height), int((sh - 80) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
     try: parent_hidden = (parent.state() == "withdrawn")
     except Exception: parent_hidden = False
     if parent_hidden:
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{width}x{height}+{(sw - width) // 2}+{(sh - height) // 2}")
+        x = max(0, (sw - pw_phys) // 2)
+        y = max(0, (sh - ph_phys) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        bring_window_to_front(win)
         return
     px, py = parent.winfo_rootx(), parent.winfo_rooty()
     pw, ph = parent.winfo_width(), parent.winfo_height()
-    x = px + (pw - width) // 2
-    y = py + (ph - height) // 2
-    win.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+    x = max(0, min(px + (pw - pw_phys) // 2, sw - pw_phys - 10))
+    y = max(0, min(py + (ph - ph_phys) // 2, sh - ph_phys - 40))
+    win.geometry(f"{w}x{h}+{x}+{y}")
     win.transient(parent)
+    bring_window_to_front(win)
 
-# حجم موحد لنافذتي 🗂️ سجل الأرشيف و🔍 عرض السجلات: صغيرة في نص الشاشة، والمستخدم يكبّرها لما يحب
-LOG_WIN_W, LOG_WIN_H = 1000, 600
-LOG_WIN_MIN_W, LOG_WIN_MIN_H = 900, 460
+# حجم موحد ومتناسق لنافذتي 📚 سجل الأرشيف و🔍 عرض السجلات (يحترم نسبة تكبير شاشة ويندوز)
+LOG_WIN_W, LOG_WIN_H = 880, 510
+LOG_WIN_MIN_W, LOG_WIN_MIN_H = 740, 410
 
 def center_window_on_screen(win, width, height):
-    """يوسّط النافذة في نص الشاشة (مش نسبةً للنافذة الرئيسية) من غير transient، فتفضل قابلة للتكبير/التصغير."""
+    """يوسّط النافذة في نص الشاشة مع مراعاة نسبة تكبير ويندوز ويرفعها أمام البرنامج."""
     win.update_idletasks()
     set_window_icon_safe(win)
+    sc = _win_scale(win)
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    w, h = min(width, sw - 40), min(height, sh - 110)
-    win.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+    w = min(int(width), int((sw - 48) / sc))
+    h = min(int(height), int((sh - 100) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
+    x = max(0, (sw - pw_phys) // 2)
+    y = max(0, (sh - ph_phys) // 2 - 16)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    bring_window_to_front(win)
 
 # ── تلميحات الأزرار + Esc لكل النوافذ + النوافذ بتفتكر حجمها ومكانها ─────────────────
 class _Tooltip:
@@ -3901,7 +3940,7 @@ class CustomTkinterApp(ctk.CTk):
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
-        center_window_relative(win, self, 380, 415)
+        center_window_relative(win, self, 365, 395)
         win.configure(fg_color=t["bg"])
         try: win.transient(self)
         except Exception as _e: _log_silent("fix_printer_paper_action#1", _e)
@@ -4392,10 +4431,13 @@ class CustomTkinterApp(ctk.CTk):
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
         self._refresh_mini_archive_label()
 
+        sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 460, 244
-        self.minsize(460, 244)
-        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        width, height = 440, 228
+        self.minsize(width, height)
+        x = max(0, (sw - int(width * sc)) // 2)
+        y = max(0, (sh - int(height * sc)) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.update_idletasks()
 
         if not show:
@@ -4416,11 +4458,17 @@ class CustomTkinterApp(ctk.CTk):
         self.b_bar.pack(fill="x", side="bottom")
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
+        sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.update_idletasks()
-        width, height = max(640, self.winfo_reqwidth()), max(520, self.winfo_reqheight())
+        req_w = int(self.winfo_reqwidth() / sc)
+        req_h = int(self.winfo_reqheight() / sc)
+        width = min(max(600, req_w), int((sw - 40) / sc))
+        height = min(max(370, req_h), int((sh - 80) / sc))
         self.minsize(width, height)
-        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        x = max(0, (sw - int(width * sc)) // 2)
+        y = max(0, (sh - int(height * sc)) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.update_idletasks()
 
         self.deiconify()
@@ -4676,31 +4724,31 @@ class CustomTkinterApp(ctk.CTk):
         self.card_dash.pack(fill="x", pady=(0, 6))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
-        dash_grid.pack(fill="x", padx=12, pady=10)
+        dash_grid.pack(fill="x", padx=10, pady=7)
 
         f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_kpi.pack(side="left", fill="both", expand=True)
 
         self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
         self.pill_c1.pack(side="left", padx=(0, 6), fill="both", expand=True)
-        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, corner_radius=2, fg_color="#38BDF8")
+        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, height=34, corner_radius=2, fg_color="#38BDF8")
         self.kpi1_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
         f_kpi1_txt = ctk.CTkFrame(self.pill_c1, fg_color="transparent")
         f_kpi1_txt.pack(side="left", fill="both", expand=True, pady=6)
         self.lbl_kpi1_title = ctk.CTkLabel(f_kpi1_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
         self.lbl_kpi1_title.pack(anchor="w")
-        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", font=(FONT_FAMILY, 18, "bold"), text_color="#FFFFFF")
+        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", font=(FONT_FAMILY, 16, "bold"), text_color="#FFFFFF")
         self.lbl_cnt.pack(anchor="w")
 
         self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
         self.pill_c2.pack(side="left", padx=(0, 8), fill="both", expand=True)
-        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, corner_radius=2, fg_color="#34D399")
+        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, height=34, corner_radius=2, fg_color="#34D399")
         self.kpi2_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
         f_kpi2_txt = ctk.CTkFrame(self.pill_c2, fg_color="transparent")
         f_kpi2_txt.pack(side="left", fill="both", expand=True, pady=6)
         self.lbl_kpi2_title = ctk.CTkLabel(f_kpi2_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
         self.lbl_kpi2_title.pack(anchor="w")
-        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", font=(FONT_FAMILY, 18, "bold"), text_color="#00FF66")
+        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", font=(FONT_FAMILY, 16, "bold"), text_color="#00FF66")
         self.lbl_sum.pack(anchor="w")
 
         f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
@@ -5710,12 +5758,12 @@ class CustomTkinterApp(ctk.CTk):
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
         center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
         remember_window_geometry(win, "archive_history")
-        try: win.transient("")   # center_window_relative بتخليها transient = ويندوز بيشيل أزرار التصغير/التكبير وبتختفي من شريط المهام
+        try: win.transient("")
         except Exception as _e: _log_silent("open_archive_history#transient", _e)
-        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
+        _sc = _win_scale(win)
+        win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("open_archive_history#1", _e)
+        bring_window_to_front(win)
 
         ALL = T2("الكل", "All")
         st = {"stats": [], "debounce": None, "iso": None, "recs": [], "recs_iso": None,
@@ -6062,11 +6110,11 @@ class CustomTkinterApp(ctk.CTk):
         def mk_card(key, title, color):
             f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkFrame(f, width=4, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=8)
+            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
             inner = ctk.CTkFrame(f, fg_color="transparent")
-            inner.pack(side="left", fill="both", expand=True, pady=6)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w")
-            lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            inner.pack(side="left", fill="both", expand=True, pady=4)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
         mk_card("total", T2("إجمالي اليوم (الصافي)", "Day total (net)"), t["success"])
@@ -6552,10 +6600,10 @@ class CustomTkinterApp(ctk.CTk):
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
         center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
         remember_window_geometry(win, "records_viewer")
-        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
+        _sc = _win_scale(win)
+        win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("_records_window#1", _e)
+        bring_window_to_front(win)
 
         if not live:
             hdr = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
@@ -6571,11 +6619,11 @@ class CustomTkinterApp(ctk.CTk):
         def mk_card(key, title, color):
             f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkFrame(f, width=4, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=8)
+            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
             inner = ctk.CTkFrame(f, fg_color="transparent")
-            inner.pack(side="left", fill="both", expand=True, pady=6)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w")
-            lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
+            inner.pack(side="left", fill="both", expand=True, pady=4)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
 
@@ -6813,7 +6861,6 @@ class CustomTkinterApp(ctk.CTk):
         modal.title(tr("summary_title"))
         modal.resizable(False, False)
         set_window_icon_safe(modal)
-        center_window_relative(modal, self, 456, 465)
         modal.configure(fg_color=t["bg"])
 
         hdr = ctk.CTkFrame(modal, corner_radius=0, height=44, fg_color=t["sub_card"])
@@ -6876,7 +6923,7 @@ class CustomTkinterApp(ctk.CTk):
 
         tot_box = ctk.CTkFrame(card_box, corner_radius=10, fg_color=t["input"], border_width=1, border_color=t["border"])
         tot_box.pack(fill="x", padx=14, pady=(10, 12))
-        ctk.CTkFrame(tot_box, width=4, corner_radius=2, fg_color=t["success"]).pack(side="left", fill="y", padx=(6, 8), pady=6)
+        ctk.CTkFrame(tot_box, width=4, height=28, corner_radius=2, fg_color=t["success"]).pack(side="left", fill="y", padx=(6, 8), pady=6)
         ctk.CTkLabel(tot_box, text=tr("total_amt_lbl"), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"]).pack(side="left", pady=8)
         ctk.CTkLabel(tot_box, text=f"{total_sum:,.2f} {tr('currency')}", font=(FONT_FAMILY, 17, "bold"),
                      text_color=t["success"]).pack(side="right", padx=12, pady=8)
@@ -6896,6 +6943,11 @@ class CustomTkinterApp(ctk.CTk):
             ctk.CTkButton(b_bar, text=tr("open_excel"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
                           fg_color=t["success_btn"], hover_color=t["success_btn_hover"], text_color="#FFFFFF",
                           command=lambda: [modal.destroy(), self.open_excel()]).pack(side="right")
+
+        modal.update_idletasks()
+        _sc = _win_scale(modal)
+        _rh = max(340, int(modal.winfo_reqheight() / _sc) + 8)
+        center_window_relative(modal, self, 420, _rh)
 
     def reopen_summary_modal(self):
         if not self.last_summary_info:
@@ -6918,7 +6970,7 @@ class CustomTkinterApp(ctk.CTk):
         self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 400, 390)
+        center_window_relative(win, self, 375, 365)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
@@ -7036,7 +7088,7 @@ class CustomTkinterApp(ctk.CTk):
         self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 370, 310)
+        center_window_relative(win, self, 355, 290)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["warn_btn"]).pack(fill="x")
@@ -7288,7 +7340,7 @@ class CustomTkinterApp(ctk.CTk):
         self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 440, 575)
+        center_window_relative(win, self, 410, 520)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
