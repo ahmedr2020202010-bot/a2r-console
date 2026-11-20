@@ -98,7 +98,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v66-lite"
+APP_VERSION = "v67-lite"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -286,33 +286,102 @@ def print_settings_arg(scaled=True):
         return f"paper={_PRINT_PAPER_NAME},{mode}"
     return mode
 
+def get_default_printer_name():
+    """يجلب اسم الطابعة الافتراضية مباشرة من Win32 API أو الريجستري (فوري بدون PowerShell أو أدمن)."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+        sz = wintypes.DWORD(0)
+        winspool.GetDefaultPrinterW(None, ctypes.byref(sz))
+        if sz.value > 0:
+            buf = ctypes.create_unicode_buffer(sz.value)
+            if winspool.GetDefaultPrinterW(buf, ctypes.byref(sz)):
+                if buf.value.strip():
+                    return buf.value.strip()
+    except Exception as e:
+        _log_silent("get_default_printer_win32", e)
+    if WINREG_AVAILABLE:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\Windows")
+            val, _ = winreg.QueryValueEx(key, "Device")
+            winreg.CloseKey(key)
+            if val:
+                return str(val).split(",")[0].strip()
+        except Exception as e:
+            _log_silent("get_default_printer_reg", e)
+    return ""
+
 def open_default_printer_preferences():
-    """يفتح نافذة إعدادات الطابعة الافتراضية (Printing Preferences) للمستخدم العادي بدون أدمن."""
+    """يفتح نافذة إعدادات الطابعة الافتراضية (Printing Preferences) مباشرة بدون أدمن، مع بديل لوحة الطابعات."""
     if sys.platform != "win32":
         return False
-    ps_cmd = (
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-        "Add-Type -AssemblyName System.Drawing; "
-        "$n = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName; "
-        "if ($n) { Write-Output $n }"
-    )
+    prn = get_default_printer_name()
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    rundll = os.path.join(sys32, "rundll32.exe")
+    if not os.path.exists(rundll):
+        rundll = "rundll32.exe"
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
-        prn = r.stdout.decode("utf-8", "replace").strip()
         if prn:
-            subprocess.Popen(["rundll32", "printui.dll,PrintUIEntry", "/e", "/n", prn])
+            subprocess.Popen([rundll, "printui.dll,PrintUIEntry", "/e", "/n", prn])
             return True
     except Exception as e:
-        log_exception("open_default_printer_preferences", e)
+        log_exception("open_default_printer_preferences#ui", e)
+    try:
+        subprocess.Popen(["control", "printers"])
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ctrl", e)
+    try:
+        os.startfile("ms-settings:printers")
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ms", e)
     return False
 
 def list_printer_papers():
     """مقاسات الورق اللي درايفر الطابعة الافتراضية بيدعمها: (اسم الطابعة, [(اسم الورق, عرض مم, طول مم)]).
-    بتقرا من .NET PrinterSettings فمش محتاجة أدمن. بترجّع ("", []) لو فشلت."""
+    يستخدم Win32 DeviceCapabilitiesW مباشرة (فوري بدون PowerShell أو أدمن)، مع PowerShell كبديل احتياطي."""
     if sys.platform != "win32":
         return "", []
+    prn = get_default_printer_name()
+    if prn:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+            winspool.DeviceCapabilitiesW.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.WORD, ctypes.c_void_p, ctypes.c_void_p
+            ]
+            winspool.DeviceCapabilitiesW.restype = wintypes.DWORD
+            DC_PAPERSIZE = 3
+            DC_PAPERNAMES = 16
+            n_names = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, None, None)
+            n_sizes = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, None, None)
+            if 0 < n_names < 10000 and 0 < n_sizes < 10000:
+                cnt = min(n_names, n_sizes)
+                name_buf = ctypes.create_unicode_buffer(n_names * 64)
+                size_buf = (_POINT * n_sizes)()
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, ctypes.byref(name_buf), None)
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, ctypes.byref(size_buf), None)
+                out = []
+                for i in range(cnt):
+                    raw_nm = name_buf[i * 64:(i + 1) * 64]
+                    nm = raw_nm.split("\x00", 1)[0].strip()
+                    w = round(size_buf[i].x / 10.0, 1)
+                    h = round(size_buf[i].y / 10.0, 1)
+                    if nm and w > 0 and h > 0:
+                        out.append((nm, w, h))
+                if out:
+                    return prn, out
+        except Exception as e:
+            log_exception("list_printer_papers_win32", e)
+
+    # بديل احتياطي عبر PowerShell لو Win32 مرجعش مقاسات
     ps_cmd = (
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
         "Add-Type -AssemblyName System.Drawing; "
@@ -332,14 +401,14 @@ def list_printer_papers():
         out = []
         for it in papers:
             nm = str(it.get("n") or "").strip()
-            w = float(it.get("w")) / 100.0 * 25.4   # PaperSize بالـ 1/100 بوصة
+            w = float(it.get("w")) / 100.0 * 25.4
             h = float(it.get("h")) / 100.0 * 25.4
             if nm and w > 0 and h > 0:
                 out.append((nm, round(w, 1), round(h, 1)))
-        return str(d.get("printer") or ""), out
+        return str(d.get("printer") or prn or ""), out
     except Exception as e:
         log_exception("list_printer_papers", e)
-        return "", []
+        return prn, []
 def set_default_printer_paper(w_mm, h_mm):
     """بتضبط مقاس الورق في إعدادات الطابعة الافتراضية لليوزر الحالي (UserPrintTicket): بدون أدمن.
     بترجّع dict فيه: ok, printer, w, h (المقاس الفعلي اللي الدرايفر قبله بالمم) أو err. بتتنفذ في thread مش في الواجهة."""
@@ -555,6 +624,20 @@ THEMES = {
         "border": "#2C1B4D", "input": "#110920", "text": "#FFFFFF",
         "text_muted": "#A8A29E", "primary": "#7C3AED", "primary_hover": "#6D28D9",
         "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#C084FC"
+    },
+    "Luxury Gold": {
+        "mode": "Dark",
+        "bg": "#110F0A", "card": "#1D1911", "sub_card": "#16130C",
+        "border": "#52431E", "input": "#14110B", "text": "#FFFBEB",
+        "text_muted": "#D4B872", "primary": "#B8860B", "primary_hover": "#9A6F08",
+        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#F5C542"
+    },
+    "Metallic Silver": {
+        "mode": "Dark",
+        "bg": "#16191F", "card": "#232832", "sub_card": "#1C2028",
+        "border": "#5C6778", "input": "#1A1E26", "text": "#F8FAFC",
+        "text_muted": "#CBD5E1", "primary": "#4B5563", "primary_hover": "#374151",
+        "success": "#34D399", "danger": "#F87171", "warning": "#FBBF24", "accent": "#E2E8F0"
     }
 }
 THEME_KEYS = list(THEMES.keys())
@@ -590,6 +673,12 @@ _ROLE_BTN = {
     "Royal Purple": {
         "secondary": ("#3B2A5A", "#4C3A73"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#1D4ED8", "#1E40AF"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Luxury Gold": {
+        "secondary": ("#3A311D", "#4E4226"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#7C5A10", "#63460B"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#B91C1C", "#991B1B")},
+    "Metallic Silver": {
+        "secondary": ("#3F4756", "#525C6E"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#475569", "#334155"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
 }
 for _n, _roles in _ROLE_BTN.items():
     for _k, (_c, _h) in _roles.items():
@@ -987,25 +1076,49 @@ def _win_scale(win):
     except Exception:
         return 1.0
 
-def bring_window_to_front(win):
-    """يرفع النافذة الفرعية أمام البرنامج فور رسمها (يمنع فتح نافذة السجل أو الأرشيف خلف البرنامج)."""
+def _focus_target(widget):
+    if widget is None:
+        return
+    try:
+        t = _entry_widget(widget)
+        if t is not None and t.winfo_exists():
+            t.focus_force()
+            t.focus_set()
+    except Exception as _e:
+        _log_silent("focus_target", _e)
+
+def bring_window_to_front(win, focus_widget=None, delay=80):
+    """يرفع النافذة الفرعية أمام البرنامج بشكل مضمون ويوجه مؤشر الكتابة فورًا للخانة المطلوبة."""
     def _raise():
         try:
             if not win.winfo_exists():
                 return
+            win.update_idletasks()
             win.deiconify()
             win.lift()
             win.attributes("-topmost", True)
             win.focus_force()
-            win.after(140, lambda: win.attributes("-topmost", False) if win.winfo_exists() else None)
+            if focus_widget is not None:
+                _focus_target(focus_widget)
+            def _release():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    win.attributes("-topmost", False)
+                    win.lift()
+                    if focus_widget is not None:
+                        _focus_target(focus_widget)
+                except Exception as _e:
+                    _log_silent("bring_window_to_front#rel", _e)
+            win.after(220, _release)
         except Exception as _e:
             _log_silent("bring_window_to_front", _e)
     try:
-        win.after(40, _raise)
+        win.after(delay, _raise)
     except Exception as _e:
         _log_silent("bring_window_to_front#sched", _e)
 
-def center_window_relative(win, parent, width, height):
+def center_window_relative(win, parent, width, height, focus_widget=None):
     win.update_idletasks()
     set_window_icon_safe(win)
     sc = _win_scale(win)
@@ -1019,7 +1132,7 @@ def center_window_relative(win, parent, width, height):
         x = max(0, (sw - pw_phys) // 2)
         y = max(0, (sh - ph_phys) // 2)
         win.geometry(f"{w}x{h}+{x}+{y}")
-        bring_window_to_front(win)
+        bring_window_to_front(win, focus_widget=focus_widget)
         return
     px, py = parent.winfo_rootx(), parent.winfo_rooty()
     pw, ph = parent.winfo_width(), parent.winfo_height()
@@ -1027,7 +1140,14 @@ def center_window_relative(win, parent, width, height):
     y = max(0, min(py + (ph - ph_phys) // 2, sh - ph_phys - 40))
     win.geometry(f"{w}x{h}+{x}+{y}")
     win.transient(parent)
-    bring_window_to_front(win)
+    bring_window_to_front(win, focus_widget=focus_widget)
+
+def fit_and_center(win, parent, width, min_height=180, focus_widget=None):
+    """يحسب الارتفاع الفعلي للنافذة بعد رسم كل العناصر حتى لا يُقص أي زر أو تذييل، ثم يوسّطها ويرفعها للأمام."""
+    win.update_idletasks()
+    sc = _win_scale(win)
+    req_h = max(int(min_height), int(win.winfo_reqheight() / sc) + 10)
+    center_window_relative(win, parent, width, req_h, focus_widget=focus_widget)
 
 # حجم موحد ومتناسق لنافذتي 📚 سجل الأرشيف و🔍 عرض السجلات (يحترم نسبة تكبير شاشة ويندوز)
 LOG_WIN_W, LOG_WIN_H = 880, 510
@@ -3605,7 +3725,6 @@ class ElevateLoginGate(ctk.CTkToplevel):
         self.title("A2R Authorization")
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 380, 238)
 
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
@@ -3613,13 +3732,13 @@ class ElevateLoginGate(ctk.CTkToplevel):
         ctk.CTkFrame(self, height=3, corner_radius=0, fg_color=t["danger_btn"]).pack(fill="x")
 
         card = ctk.CTkFrame(self, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
-        card.pack(fill="both", expand=True, padx=16, pady=(12, 8))
+        card.pack(fill="x", padx=14, pady=(10, 6))
 
-        ctk.CTkLabel(card, text="A2R OPERATIONS", font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(12, 2))
-        ctk.CTkLabel(card, text=tr("login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+        ctk.CTkLabel(card, text="A2R OPERATIONS", height=24, font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
+        ctk.CTkLabel(card, text=tr("login_prompt"), height=18, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
 
         f_entry = ctk.CTkFrame(card, fg_color="transparent")
-        f_entry.pack(fill="x", padx=18, pady=4)
+        f_entry.pack(fill="x", padx=16, pady=2)
 
         self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", height=34, font=(FONT_FAMILY, 13, "bold"),
                                   text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -3632,19 +3751,19 @@ class ElevateLoginGate(ctk.CTkToplevel):
                                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF")
         self.btn_eye.pack(side="right")
 
-        self.lbl_err = ctk.CTkLabel(card, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_err = ctk.CTkLabel(card, text="", height=16, text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
         self.lbl_err.pack(pady=(2, 0))
 
-        btn_enter = ctk.CTkButton(card, text=tr("btn_full_console"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+        btn_enter = ctk.CTkButton(card, text=tr("btn_full_console"), font=FONT_BTN_MAIN, height=34, corner_radius=10,
                                   fg_color=t["danger_btn"], hover_color=t["danger_btn_hover"], text_color="#FFFFFF",
                                   command=self.check_pwd)
-        btn_enter.pack(fill="x", padx=18, pady=(6, 12))
+        btn_enter.pack(fill="x", padx=16, pady=(4, 12))
 
-        ctk.CTkLabel(self, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+        ctk.CTkLabel(self, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=18,
                      font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+        fit_and_center(self, parent, 365, min_height=225, focus_widget=self.e_pwd)
         try: self.grab_set()
         except Exception as _e: _log_silent("ElevateLoginGate#grab", _e)
-        self.after(150, self.e_pwd.focus_set)
 
     def toggle_eye(self):
         if self.pwd_visible:
@@ -3704,8 +3823,9 @@ class CustomTkinterApp(ctk.CTk):
             SOUND_MUTED = bool(_cfg.get("sound_muted"))
 
         self.is_mini_mode = True
-        self.auto_sync_enabled = bool(_cfg.get("auto_sync", True))
-        self.auto_print_enabled = bool(_cfg.get("auto_print", True))
+        # المزامنة والطباعة الفورية تعملان دائمًا مع كل تشغيل للجهاز/البرنامج
+        self.auto_sync_enabled = True
+        self.auto_print_enabled = True
 
         self.is_supervisor = False
         self.last_generated_file = None
@@ -3940,7 +4060,6 @@ class CustomTkinterApp(ctk.CTk):
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
-        center_window_relative(win, self, 365, 395)
         win.configure(fg_color=t["bg"])
         try: win.transient(self)
         except Exception as _e: _log_silent("fix_printer_paper_action#1", _e)
@@ -4142,8 +4261,7 @@ class CustomTkinterApp(ctk.CTk):
         win.bind("<Return>", _save)
         win.bind("<Escape>", lambda e: _close())
         win.protocol("WM_DELETE_WINDOW", _close)
-        try: e_w.focus_set()
-        except Exception as _e: _log_silent("fix_printer_paper_action#3", _e)
+        fit_and_center(win, self, 365, min_height=340, focus_widget=e_w)
 
     def reprint_receipt_record(self, rec):
         fpath = rec.get("path", "")
@@ -4433,7 +4551,10 @@ class CustomTkinterApp(ctk.CTk):
 
         sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 440, 228
+        self.update_idletasks()
+        width = 425
+        req_h = int(self.winfo_reqheight() / sc)
+        height = max(210, req_h + 6)
         self.minsize(width, height)
         x = max(0, (sw - int(width * sc)) // 2)
         y = max(0, (sh - int(height * sc)) // 2)
@@ -4464,7 +4585,7 @@ class CustomTkinterApp(ctk.CTk):
         req_w = int(self.winfo_reqwidth() / sc)
         req_h = int(self.winfo_reqheight() / sc)
         width = min(max(600, req_w), int((sw - 40) / sc))
-        height = min(max(370, req_h), int((sh - 80) / sc))
+        height = min(max(330, req_h), int((sh - 80) / sc))
         self.minsize(width, height)
         x = max(0, (sw - int(width * sc)) // 2)
         y = max(0, (sh - int(height * sc)) // 2)
@@ -4537,32 +4658,32 @@ class CustomTkinterApp(ctk.CTk):
         f_left = ctk.CTkFrame(self.header, fg_color="transparent")
         f_left.pack(side="left", padx=(12, 0), pady=6)
 
-        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=(FONT_FAMILY, 19, "bold"))
+        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=(FONT_FAMILY, 22, "bold"))
         self.lbl_logo.pack(side="left", padx=(0, 8))
 
-        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=116, height=28, state="readonly",
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=116, height=27, state="readonly",
                                         font=FONT_REGULAR_BOLD, command=self.on_theme_select)
         self.cb_theme.set(self.current_theme_name)
-        self.cb_theme.pack(side="left", padx=(0, 5))
+        self.cb_theme.pack(side="left", padx=(0, 4))
 
-        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=66, height=28, corner_radius=8,
+        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=62, height=27, corner_radius=8,
                                       font=(FONT_FAMILY, 10, "bold"), command=self.toggle_language)
-        self.btn_lang.pack(side="left", padx=(0, 5))
+        self.btn_lang.pack(side="left", padx=(0, 4))
 
-        self.btn_mute = ctk.CTkButton(f_left, text=("🔇 Muted" if SOUND_MUTED else "🔊 Sound"), width=70, height=28, corner_radius=8,
+        self.btn_mute = ctk.CTkButton(f_left, text=("🔇 Muted" if SOUND_MUTED else "🔊 Sound"), width=66, height=27, corner_radius=8,
                                       font=(FONT_FAMILY, 9, "bold"), fg_color="#334155", hover_color="#475569",
                                       command=self.toggle_mute)
         self.btn_mute.pack(side="left")
 
         f_right = ctk.CTkFrame(self.header, fg_color="transparent")
-        f_right.pack(side="right", padx=(0, 12), pady=6)
+        f_right.pack(side="right", padx=(0, 10), pady=6)
 
-        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=100, height=28, corner_radius=8,
+        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=96, height=27, corner_radius=8,
                                               font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
                                               command=self.switch_to_mini_view)
 
         self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=8, border_width=1.2, fg_color="#121E2E")
-        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", font=(FONT_FAMILY, 9, "bold"), padx=9, pady=2)
+        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", height=20, font=(FONT_FAMILY, 9, "bold"), padx=8, pady=1)
         self.badge_role.pack()
 
         self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#38BDF8")
@@ -4571,35 +4692,35 @@ class CustomTkinterApp(ctk.CTk):
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=14, border_width=1)
-        self.card_mini_status.pack(fill="x", pady=(6, 8))
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=12, border_width=1)
+        self.card_mini_status.pack(fill="x", pady=(4, 6))
 
         f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
-        f_mini_title_row.pack(fill="x", padx=14, pady=(10, 4))
+        f_mini_title_row.pack(fill="x", padx=12, pady=(7, 3))
 
-        self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"),
+        self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"), height=20,
                                           font=(FONT_FAMILY, 12, "bold"), text_color="#38BDF8")
         self.lbl_mini_title.pack(side="left")
 
-        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=82, height=26,
-                                             corner_radius=8, font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706",
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=78, height=24,
+                                             corner_radius=7, font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706",
                                              hover_color="#B45309", text_color="#FFFFFF", command=self.fix_printer_paper_action)
         self.btn_fix_printer.pack(side="right")
 
-        self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"),
+        self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"), height=18,
                                          font=(FONT_FAMILY, 10, "bold"), text_color="#10B981")
-        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 2))
+        self.lbl_mini_desc.pack(anchor="w", padx=12, pady=(0, 1))
 
-        self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0),
+        self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0), height=18,
                                             font=(FONT_FAMILY, 10, "bold"), text_color="#94A3B8")
-        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 2))
+        self.lbl_mini_counter.pack(anchor="w", padx=12, pady=(0, 1))
 
-        self.lbl_mini_archive = ctk.CTkLabel(self.card_mini_status, text="",
+        self.lbl_mini_archive = ctk.CTkLabel(self.card_mini_status, text="", height=18,
                                              font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
-        self.lbl_mini_archive.pack(anchor="w", padx=14, pady=(0, 10))
+        self.lbl_mini_archive.pack(anchor="w", padx=12, pady=(0, 7))
 
         f_mini_btns = ctk.CTkFrame(self.body_mini, fg_color="transparent")
-        f_mini_btns.pack(fill="x", pady=(0, 6))
+        f_mini_btns.pack(fill="x", pady=(0, 5))
 
         self.btn_mini_reprint = ctk.CTkButton(f_mini_btns, text=tr("mini_reprint_last"), height=34, corner_radius=9,
                                               font=(FONT_FAMILY, 11, "bold"), fg_color="#D97706", hover_color="#B45309",
@@ -4611,13 +4732,13 @@ class CustomTkinterApp(ctk.CTk):
                                          border_width=0, text_color="#FFFFFF", command=self.request_full_console)
         self.btn_elevate.pack(side="right", fill="x", expand=True, padx=(5, 0))
 
-        self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+        self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=16,
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
-        self.lbl_mini_foot.pack(anchor="center", pady=(0, 2))
+        self.lbl_mini_foot.pack(anchor="center", pady=(0, 3))
 
-        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=56)
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=50)
         self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(6, 2))
+        self.btn_center_box.pack(anchor="center", pady=(4, 1))
 
         self.btn_view_rec = ctk.CTkButton(
             self.btn_center_box, width=122, height=30, corner_radius=9, font=(FONT_FAMILY, 10, "bold"),
@@ -4644,43 +4765,43 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#334155", hover_color="#475569", width=102,
                                         height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
 
-        self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+        self.lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=16,
                                 font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        self.lbl_foot.pack(anchor="center", pady=(0, 3))
+        self.lbl_foot.pack(anchor="center", pady=(0, 2))
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
-        self.card_top.pack(fill="x", pady=(6, 6))
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_top.pack(fill="x", pady=(4, 4))
 
-        self.lbl_folder = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_folder.pack(anchor="w", padx=12, pady=(8, 2))
+        self.lbl_folder = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
+        self.lbl_folder.pack(anchor="w", padx=12, pady=(6, 2))
 
         f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_dir.pack(fill="x", padx=12, pady=(0, 4))
+        f_dir.pack(fill="x", padx=12, pady=(0, 3))
 
-        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=32, text_color="#FFFFFF")
+        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=30, text_color="#FFFFFF")
         self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
         attach_context_menu(self.e_path)
 
         self.btn_browse = ctk.CTkButton(
-            f_dir, width=76, height=32, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            f_dir, width=74, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
             fg_color="#2563EB", hover_color="#1D4ED8", command=self.browse_folder
         )
         self.btn_browse.pack(side="left", padx=(0, 4))
 
         self.btn_open_f = ctk.CTkButton(
-            f_dir, width=66, height=32, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            f_dir, width=64, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
             fg_color="#059669", hover_color="#047857", command=self.open_current_folder
         )
         self.btn_open_f.pack(side="left")
 
-        self.lbl_d = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_d.pack(anchor="w", padx=12, pady=(4, 2))
+        self.lbl_d = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
+        self.lbl_d.pack(anchor="w", padx=12, pady=(2, 2))
 
         f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_date.pack(fill="x", padx=12, pady=(0, 8))
+        f_date.pack(fill="x", padx=12, pady=(0, 6))
 
         today = datetime.date.today()
         self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=56, height=30, font=FONT_REGULAR_BOLD)
@@ -4720,82 +4841,82 @@ class CustomTkinterApp(ctk.CTk):
         if self.auto_print_enabled: self.sw_autoprint.select()
         else: self.sw_autoprint.deselect()
 
-        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
-        self.card_dash.pack(fill="x", pady=(0, 6))
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 4))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
-        dash_grid.pack(fill="x", padx=10, pady=7)
+        dash_grid.pack(fill="x", padx=10, pady=6)
 
         f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_kpi.pack(side="left", fill="both", expand=True)
 
         self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
         self.pill_c1.pack(side="left", padx=(0, 6), fill="both", expand=True)
-        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, height=34, corner_radius=2, fg_color="#38BDF8")
-        self.kpi1_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
+        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, height=28, corner_radius=2, fg_color="#38BDF8")
+        self.kpi1_bar.pack(side="left", fill="y", padx=(6, 6), pady=6)
         f_kpi1_txt = ctk.CTkFrame(self.pill_c1, fg_color="transparent")
-        f_kpi1_txt.pack(side="left", fill="both", expand=True, pady=6)
-        self.lbl_kpi1_title = ctk.CTkLabel(f_kpi1_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        f_kpi1_txt.pack(side="left", fill="both", expand=True, pady=4)
+        self.lbl_kpi1_title = ctk.CTkLabel(f_kpi1_txt, height=16, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
         self.lbl_kpi1_title.pack(anchor="w")
-        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", font=(FONT_FAMILY, 16, "bold"), text_color="#FFFFFF")
+        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", height=22, font=(FONT_FAMILY, 16, "bold"), text_color="#FFFFFF")
         self.lbl_cnt.pack(anchor="w")
 
         self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
         self.pill_c2.pack(side="left", padx=(0, 8), fill="both", expand=True)
-        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, height=34, corner_radius=2, fg_color="#34D399")
-        self.kpi2_bar.pack(side="left", fill="y", padx=(6, 6), pady=8)
+        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, height=28, corner_radius=2, fg_color="#34D399")
+        self.kpi2_bar.pack(side="left", fill="y", padx=(6, 6), pady=6)
         f_kpi2_txt = ctk.CTkFrame(self.pill_c2, fg_color="transparent")
-        f_kpi2_txt.pack(side="left", fill="both", expand=True, pady=6)
-        self.lbl_kpi2_title = ctk.CTkLabel(f_kpi2_txt, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        f_kpi2_txt.pack(side="left", fill="both", expand=True, pady=4)
+        self.lbl_kpi2_title = ctk.CTkLabel(f_kpi2_txt, height=16, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
         self.lbl_kpi2_title.pack(anchor="w")
-        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", font=(FONT_FAMILY, 16, "bold"), text_color="#00FF66")
+        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", height=22, font=(FONT_FAMILY, 16, "bold"), text_color="#00FF66")
         self.lbl_sum.pack(anchor="w")
 
         f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
-        f_pos.pack(side="right", fill="both")
+        f_pos.pack(side="right", fill="y")
 
-        self.lbl_pos_title = ctk.CTkLabel(f_pos, font=FONT_SECTION_LBL)
-        self.lbl_pos_title.pack(anchor="w", pady=(0, 3))
+        self.lbl_pos_title = ctk.CTkLabel(f_pos, height=16, font=FONT_SECTION_LBL)
+        self.lbl_pos_title.pack(anchor="w", pady=(0, 2))
 
         f_pos_in = ctk.CTkFrame(f_pos, fg_color="transparent")
         f_pos_in.pack(fill="x")
 
         vcmd = (self.register(self.validate_numeric_input), '%P')
-        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=116, height=30,
+        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=116, height=28,
                                   justify="center", font=FONT_ENTRY, text_color="#FFFFFF",
                                   validate="key", validatecommand=vcmd)
         self.e_pos.pack(side="left", padx=(0, 5))
         self.e_pos.bind("<Return>", lambda e: self.check_pos())
         attach_context_menu(self.e_pos)
 
-        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=62, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
+        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=62, height=28, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
         self.btn_pos_check.pack(side="left")
 
-        self.lbl_diff = ctk.CTkLabel(f_pos, text="", font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_diff.pack(anchor="w", pady=(3, 0))
+        self.lbl_diff = ctk.CTkLabel(f_pos, text="", height=15, font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_diff.pack(anchor="w", pady=(2, 0))
 
-        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=14, border_width=1)
-        self.card_actions.pack(fill="x", pady=(0, 6))
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 4))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=(FONT_FAMILY, 13, "bold"), height=38, corner_radius=10,
+        self.btn_run = ctk.CTkButton(self.card_actions, font=(FONT_FAMILY, 13, "bold"), height=36, corner_radius=10,
                                      text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=12, pady=(10, 6))
+        self.btn_run.pack(fill="x", padx=10, pady=(7, 5))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_prog.pack(fill="x", padx=12, pady=(0, 2))
+        f_prog.pack(fill="x", padx=10, pady=(0, 1))
 
-        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=8, corner_radius=4, progress_color="#00FF66", fg_color="#064E3B")
+        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=7, corner_radius=4, progress_color="#00FF66", fg_color="#064E3B")
         self.progress_bar.set(0)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=36)
+        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", height=16, font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=36)
         self.lbl_progress_pct.pack(side="right")
 
-        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
-        self.lbl_current_file.pack(anchor="w", padx=14, pady=(0, 4))
+        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", height=16, font=(FONT_FAMILY, 9), text_color="#8FA3B8")
+        self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 3))
 
         f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_act.pack(fill="x", padx=12, pady=(0, 10))
+        f_act.pack(fill="x", padx=10, pady=(0, 7))
 
         self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#059669", hover_color="#047857", height=32, corner_radius=9, width=82, command=self.open_manual)
         self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 3))
@@ -4940,12 +5061,10 @@ class CustomTkinterApp(ctk.CTk):
     def toggle_autosync(self):
         self.auto_sync_enabled = bool(self.sw_autosync.get())
         self.update_toggle_appearance()
-        _save_app_prefs(auto_sync=self.auto_sync_enabled)
 
     def toggle_autoprint(self):
         self.auto_print_enabled = bool(self.sw_autoprint.get())
         self.update_toggle_appearance()
-        _save_app_prefs(auto_print=self.auto_print_enabled)
         if self.auto_print_enabled:
             p = self.get_clean_path()
             if os.path.exists(p):
@@ -5282,7 +5401,6 @@ class CustomTkinterApp(ctk.CTk):
             self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
-            center_window_relative(win, self, 450, 385 if _show_hist else 330)
             win.configure(fg_color=t["bg"])
 
             ctk.CTkLabel(win, text=T2("📦 أرشفة الجهاز", "📦 Device Archive"),
@@ -5414,6 +5532,7 @@ class CustomTkinterApp(ctk.CTk):
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
+            fit_and_center(win, self, 430, min_height=280)
         except Exception as e: log_exception("open_archive_dialog", e)
 
     def _generate_day_summary_pdf(self, day_folder_path, date_str, records_list):
@@ -6575,10 +6694,10 @@ class CustomTkinterApp(ctk.CTk):
                 smenu.tk_popup(ev.x_root, ev.y_root)
         s_tree.bind("<Button-3>", _spop)
 
-        # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين حدّث في الخلفية
+        # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين ارفع النافذة للأمام وحدّث في الخلفية
         load_days()                       # اعرض الفهرس الموجود فورًا
+        bring_window_to_front(win, focus_widget=day_q, delay=120)
         run_maintenance(light=True)       # فهرسة بس؛ النسخ الاحتياطي والإكسيلات بزرار "تحديث + نسخ" أو في الخلفية
-        win.after(150, lambda: day_q.focus_set())
 
     def open_records_viewer(self):
         if not self.last_detailed_records:
@@ -6847,6 +6966,7 @@ class CustomTkinterApp(ctk.CTk):
         search_entry.bind("<KeyRelease>", refresh)
         amt_entry.bind("<KeyRelease>", refresh)
         refresh()
+        bring_window_to_front(win, focus_widget=search_entry, delay=100)
 
     def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
         old = getattr(self, "_summary_win", None)
@@ -6970,7 +7090,6 @@ class CustomTkinterApp(ctk.CTk):
         self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 375, 365)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
@@ -7074,7 +7193,7 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=82, height=38, corner_radius=10,
                       fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
                       command=win.destroy).pack(side="right")
-        win.after(100, lambda: e_a.focus_set())
+        fit_and_center(win, self, 370, min_height=320, focus_widget=e_a)
 
     def print_slip(self):
         old = getattr(self, "_slip_win", None)
@@ -7088,7 +7207,6 @@ class CustomTkinterApp(ctk.CTk):
         self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 355, 290)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["warn_btn"]).pack(fill="x")
@@ -7166,7 +7284,7 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=80, height=36, corner_radius=10,
                       fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
                       command=win.destroy).pack(side="right")
-        win.after(100, lambda: cb_employee.focus_set())
+        fit_and_center(win, self, 355, min_height=260, focus_widget=cb_employee)
 
     def ask_summary_unit(self, parent=None):
         """نافذة صغيرة: اختيار الوحدة (إجباري) قبل عمل إيصال السمري. بترجّع (اسم الوحدة، رقم الترمنل) أو None لو اتقفلت."""
@@ -7340,7 +7458,6 @@ class CustomTkinterApp(ctk.CTk):
         self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 410, 520)
         win.configure(fg_color=t["bg"])
 
         ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
@@ -7464,7 +7581,7 @@ class CustomTkinterApp(ctk.CTk):
                       fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
                       command=clear_cash).pack(side="right")
         win.bind("<Return>", apply_and_close)
-        e_manual_cash.focus_set()
+        fit_and_center(win, self, 405, min_height=470, focus_widget=e_manual_cash)
 
 if __name__ == "__main__":
     app = CustomTkinterApp()
