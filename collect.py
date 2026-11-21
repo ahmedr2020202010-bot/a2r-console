@@ -106,7 +106,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v89-lite2"
+APP_VERSION = "v90-lite2"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -256,6 +256,8 @@ def load_print_paper():
     global _PRINT_PAPER_MM
     try:
         v = _read_app_config().get("print_paper_mm")
+        if not v:
+            return   # لسه مفيش مقاس محفوظ: استخدم الافتراضي من غير ضوضاء في السجل
         w, h = float(v[0]), float(v[1])
         if 20 <= w <= 300 and 20 <= h <= 600:
             _PRINT_PAPER_MM = (w, h)
@@ -4275,8 +4277,8 @@ def scale_pdf_to_print_width(src_pdf, target_w=None, target_h=None):
             return None
         writer = PdfWriter()
         for pg in reader.pages:
+            pg = writer.add_page(pg)   # لازم الصفحة تتسجل في الـ writer الأول قبل التعديل (pypdf 7 بيرفض scale على صفحة يتيمة)
             pg.scale_by(f)
-            writer.add_page(pg)
         os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
         dst = os.path.join(PRINT_TEMP_DIR, "s_" + os.path.basename(src_pdf))
         with open(dst, "wb") as fh:
