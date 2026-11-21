@@ -106,7 +106,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v90-lite2"
+APP_VERSION = "v90-lite3"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -591,14 +591,14 @@ THEMES = {
         "bg": "#202020", "card": "#2B2B2B", "sub_card": "#272727",
         "border": "#454545", "input": "#232323", "text": "#FFFFFF",
         "text_muted": "#9E9E9E", "primary": "#0078D4", "primary_hover": "#1B86D9",
-        "success": "#6CCB5F", "danger": "#C42B1C", "warning": "#FFB900", "accent": "#60CDFF"
+        "success": "#6CCB5F", "danger": "#F1707B", "warning": "#FFB900", "accent": "#60CDFF"
     },
     "Windows Light": {
         "mode": "Light",
         "bg": "#F3F3F3", "card": "#FFFFFF", "sub_card": "#FAFAFA",
         "border": "#DDDDDD", "input": "#FFFFFF", "text": "#1B1B1B",
         "text_muted": "#616161", "primary": "#0078D4", "primary_hover": "#106EBE",
-        "success": "#107C10", "danger": "#C42B1C", "warning": "#CA5010", "accent": "#005A9E"
+        "success": "#107C10", "danger": "#C42B1C", "warning": "#B44A0C", "accent": "#005A9E"
     },
     "Modern Dark": {
         "mode": "Dark",
@@ -611,50 +611,50 @@ THEMES = {
         "mode": "Light",
         "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
         "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
-        "text_muted": "#71717A", "primary": "#2563EB", "primary_hover": "#1D4ED8",
-        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#A16207"
+        "text_muted": "#52525B", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#15803D", "danger": "#B91C1C", "warning": "#B45309", "accent": "#854D0E"
     },
     "Aero Dark": {
         "mode": "Dark",
         "bg": "#080E17", "card": "#121E2E", "sub_card": "#0F1926",
         "border": "#1E2E42", "input": "#0A131F", "text": "#FFFFFF",
         "text_muted": "#8FA3B8", "primary": "#0284C7", "primary_hover": "#0369A1",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#38BDF8"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#38BDF8"
     },
     "Light Modern": {
         "mode": "Light",
         "bg": "#F1F5F9", "card": "#FFFFFF", "sub_card": "#E2E8F0",
         "border": "#CBD5E1", "input": "#F8FAFC", "text": "#0F172A",
-        "text_muted": "#64748B", "primary": "#0284C7", "primary_hover": "#0369A1",
-        "success": "#059669", "danger": "#DC2626", "warning": "#D97706", "accent": "#0284C7"
+        "text_muted": "#475569", "primary": "#0284C7", "primary_hover": "#0369A1",
+        "success": "#047857", "danger": "#B91C1C", "warning": "#B45309", "accent": "#0369A1"
     },
     "Cyber Amber": {
         "mode": "Dark",
         "bg": "#0B0B0D", "card": "#17171C", "sub_card": "#111114",
         "border": "#282832", "input": "#0E0E12", "text": "#FFFFFF",
         "text_muted": "#9CA3AF", "primary": "#D97706", "primary_hover": "#B45309",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#FBBF24"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#FBBF24"
     },
     "Emerald Glass": {
         "mode": "Dark",
         "bg": "#04120D", "card": "#0A291E", "sub_card": "#061F17",
         "border": "#123829", "input": "#051811", "text": "#FFFFFF",
         "text_muted": "#86EFAC", "primary": "#059669", "primary_hover": "#047857",
-        "success": "#10B981", "danger": "#F43F5E", "warning": "#F59E0B", "accent": "#34D399"
+        "success": "#10B981", "danger": "#FB7185", "warning": "#F59E0B", "accent": "#34D399"
     },
     "Royal Purple": {
         "mode": "Dark",
         "bg": "#0E0717", "card": "#1E1033", "sub_card": "#170C28",
         "border": "#2C1B4D", "input": "#110920", "text": "#FFFFFF",
         "text_muted": "#A8A29E", "primary": "#7C3AED", "primary_hover": "#6D28D9",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#C084FC"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#C084FC"
     },
     "Luxury Gold": {
         "mode": "Dark",
         "bg": "#110F0A", "card": "#1D1911", "sub_card": "#16130C",
         "border": "#52431E", "input": "#14110B", "text": "#FFFBEB",
-        "text_muted": "#D4B872", "primary": "#B8860B", "primary_hover": "#9A6F08",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#F5C542"
+        "text_muted": "#D4B872", "primary": "#9A6F08", "primary_hover": "#7A5806",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#F5C542"
     },
     "Metallic Silver": {
         "mode": "Dark",
@@ -757,11 +757,11 @@ TAG_COLORS = {
 FONT_FAMILY = "Segoe UI"
 FONT_TITLE_LOGO = (FONT_FAMILY, 18, "bold")
 FONT_SECTION_LBL = (FONT_FAMILY, 10, "bold")
-FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "normal")
+FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "bold")
 FONT_KPI_VAL = (FONT_FAMILY, 16, "bold")
 FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
 FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
-FONT_ENTRY = (FONT_FAMILY, 11, "normal")
+FONT_ENTRY = (FONT_FAMILY, 11, "bold")
 
 
 def theme_btn_colors(t, kind="quiet"):
@@ -813,7 +813,7 @@ def apply_tree_style(t, rowheight=30):
     try: style.layout("A2R.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
     except Exception as _e: _log_silent("apply_tree_style#2", _e)
     style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
-                    font=(FONT_FAMILY, 10, "normal"), rowheight=rowheight, borderwidth=0, relief="flat")
+                    font=(FONT_FAMILY, 10, "bold"), rowheight=rowheight, borderwidth=0, relief="flat")
     style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
                     font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0, padding=(6, 6))
     style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
@@ -4882,7 +4882,7 @@ class CustomTkinterApp(ctk.CTk):
         lbl_err.pack(anchor="w", padx=16, pady=(6, 0))
         ctk.CTkLabel(win, text=T2("المقاس بيتحفظ لليوزر الحالي وبيتطبّق على أي طباعة جاية.",
                                   "Saved for the current user and used for every next print."),
-                     font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=300, justify="left").pack(anchor="w", padx=16)
+                     font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=300, justify="left").pack(anchor="w", padx=16)
 
         def _close():
             try: win.destroy()
@@ -5099,13 +5099,13 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_arch_full.pack_forget()
         self.btn_chrome.pack_forget()
         if is_supervisor:
-            self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
-            self.f_role_btn.configure(border_color="#EF4444")
+            self.badge_role.configure(text="● ADMIN", text_color="#DC2626")
+            self.f_role_btn.configure(border_color="#DC2626")
             self.btn_arch_full.pack(side="left", padx=2)
             self.btn_excel.pack(side="left", padx=2)   # زر الإكسيل حصري للمشرف — كان مضروب pack_forget من غير ما يترجع
         else:
-            self.badge_role.configure(text="● USER", text_color="#10B981")
-            self.f_role_btn.configure(border_color="#10B981")
+            self.badge_role.configure(text="● USER", text_color="#059669")
+            self.f_role_btn.configure(border_color="#059669")
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
@@ -5794,11 +5794,11 @@ class CustomTkinterApp(ctk.CTk):
         self.card_mini_status.configure(fg_color=t["card"], border_color=t["border"])
         self.b_bar.configure(fg_color=t["sub_card"])
 
-        self.lbl_folder.configure(text_color=t["text_muted"])
-        self.lbl_d.configure(text_color=t["text_muted"])
-        self.lbl_kpi1_title.configure(text_color=t["text_muted"])
-        self.lbl_kpi2_title.configure(text_color=t["text_muted"])
-        self.lbl_pos_title.configure(text_color=t["text_muted"])
+        self.lbl_folder.configure(text_color=t["accent"])
+        self.lbl_d.configure(text_color=t["accent"])
+        self.lbl_kpi1_title.configure(text_color=t["accent"])
+        self.lbl_kpi2_title.configure(text_color=t["accent"])
+        self.lbl_pos_title.configure(text_color=t["accent"])
         self.lbl_sum.configure(text_color=t["success"])
         try:
             self.lbl_cnt.configure(text_color=t["text"])
@@ -5808,6 +5808,10 @@ class CustomTkinterApp(ctk.CTk):
             self.lbl_progress_pct.configure(text_color=t["text"])
             self.lbl_current_file.configure(text_color=t["text_muted"])
             self.lbl_foot.configure(text_color=t["text_muted"])
+            self.lbl_mini_desc.configure(text_color=t["success"])
+            self.lbl_mini_counter.configure(text_color=t["text_muted"])
+            self.lbl_mini_archive.configure(text_color=t["text_muted"])
+            self.lbl_mini_foot.configure(text_color=t["text_muted"])
             for _cap, _ar, _en in getattr(self, "_bar_captions", []):
                 _cap.configure(text_color=t["text_muted"])
             self.lbl_status_count.configure(text_color=t["accent"])
@@ -6219,7 +6223,7 @@ class CustomTkinterApp(ctk.CTk):
                          font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(pady=(12, 2))
             ctk.CTkLabel(win, text=T2("بتنقل إيصالات الأيام السابقة للأرشيف وتعمل إكسيل وملخص (عدد المعاملات والإجمالي) لكل يوم",
                                       "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
-                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
+                         font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=8, border_width=1, border_color=t["border"])
             card.pack(fill="x", padx=16, pady=(0, 6))
@@ -6238,7 +6242,7 @@ class CustomTkinterApp(ctk.CTk):
             p_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
             p_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
             p_lbl.grid(row=0, column=1)
-            s_lbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410)
+            s_lbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410)
             s_lbl.pack(pady=(0, 4))
 
             st = {"busy": False}
@@ -6340,7 +6344,7 @@ class CustomTkinterApp(ctk.CTk):
                                        "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
                                     T2("📚 سجل الأرشيف متاح من زر سجل الأرشيف في الشريط السفلي",
                                        "📚 Archive history is available from the Archive History button below")),
-                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
+                         font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
             fit_and_center(win, self, 430, min_height=280)
@@ -6903,7 +6907,7 @@ class CustomTkinterApp(ctk.CTk):
                                       command=lambda: run_rearchive(None, ask=False, silent=True))
             rb["btn"].pack(side="right", padx=4, pady=6)
             ctk.CTkLabel(bar, text=T2(f"📅 عرض آخر {USER_DAYS} أيام", f"📅 Last {USER_DAYS} days"),
-                         font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(side="left", padx=8)
+                         font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(side="left", padx=8)
 
         # ---------- ستايل الجداول ----------
         apply_tree_style(t, 28)
@@ -6971,7 +6975,7 @@ class CustomTkinterApp(ctk.CTk):
         sum_lbl = ctk.CTkLabel(left, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], justify="left")
         sum_lbl.pack(anchor="w", padx=8, pady=(2, 0))
         ctk.CTkLabel(left, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص", "🟥 has duplicates   🟨 has incomplete"),
-                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8, pady=(0, 2))
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w", padx=8, pady=(0, 2))
 
         sort_state = {"col": "date", "rev": True}
         def sort_days(col):
@@ -7047,7 +7051,7 @@ class CustomTkinterApp(ctk.CTk):
             ctk.CTkFrame(f, width=3, height=26, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(6, 4), pady=4)
             inner = ctk.CTkFrame(f, fg_color="transparent")
             inner.pack(side="left", fill="both", expand=True, pady=2)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w")
             lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
@@ -7396,13 +7400,13 @@ class CustomTkinterApp(ctk.CTk):
         style_combo(cb_s_unit, t)
         cb_s_unit.pack(side="left", padx=(0, 8))
 
-        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(0, 3))
         e_s_from = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
                                 text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_s_from.pack(side="left", padx=(0, 8))
         attach_context_menu(e_s_from)
 
-        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(0, 3))
         e_s_to = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
                               text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_s_to.pack(side="left", padx=(0, 10))
@@ -7564,7 +7568,7 @@ class CustomTkinterApp(ctk.CTk):
             ctk.CTkFrame(f, width=3, height=26, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(6, 4), pady=4)
             inner = ctk.CTkFrame(f, fg_color="transparent")
             inner.pack(side="left", fill="both", expand=True, pady=2)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w")
             lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
@@ -7816,7 +7820,7 @@ class CustomTkinterApp(ctk.CTk):
 
         row_u = ctk.CTkFrame(card_box, fg_color="transparent")
         row_u.pack(fill="x", padx=14, pady=(10, 6))
-        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left")
+        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
 
         # قايمة الوحدات = الوحدات اللي في إيصالات اليوم نفسها (الأكتر أولًا)، والاختيار إجباري (قراءة فقط، مفيش كتابة حرة).
         # لو مفيش ولا وحدة اتقرت من الإيصالات (إيصالات يدوية بس مثلًا) بنرجع لقايمة الوحدات الكاملة عشان المستخدم ميتعلقش.
@@ -7861,7 +7865,7 @@ class CustomTkinterApp(ctk.CTk):
         for lbl_t, val_t, val_c, val_sz in details:
             row = ctk.CTkFrame(card_box, fg_color="transparent")
             row.pack(fill="x", padx=14, pady=3)
-            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"]).pack(side="left")
+            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
             ctk.CTkLabel(row, text=val_t, font=(FONT_FAMILY, val_sz, "bold"), text_color=val_c).pack(side="right")
 
         tot_box = ctk.CTkFrame(card_box, corner_radius=10, fg_color=t["input"], border_width=1, border_color=t["border"])
@@ -7925,17 +7929,17 @@ class CustomTkinterApp(ctk.CTk):
         e_a.pack(fill="x", padx=14)
         attach_context_menu(e_a)
 
-        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         e_name = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
         e_name.pack(fill="x", padx=14)
         attach_context_menu(e_name)
 
-        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         e_p = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
         e_p.pack(fill="x", padx=14)
         attach_context_menu(e_p)
 
-        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_u, t)
         cb_u.set("")
@@ -8038,14 +8042,14 @@ class CustomTkinterApp(ctk.CTk):
         card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
         card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
-        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(12, 2))
         cb_employee = SafeArabicComboBox(card, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_employee, t)
         cb_employee.set("")
         cb_employee.pack(fill="x", padx=14)
         attach_context_menu(cb_employee)
 
-        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_u, t)
         cb_u.set("")
@@ -8369,7 +8373,7 @@ class CustomTkinterApp(ctk.CTk):
             r = ctk.CTkFrame(frame_box, fg_color="transparent")
             r.pack(fill="x", padx=12, pady=(8 if idx_d == 0 else 2, 8 if idx_d == len(denoms) - 1 else 2))
             ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=95, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
-            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"])
+            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text"])
             lbl_s.pack(side="right", padx=(6, 0))
             sub_lbls[d] = lbl_s
             e = ctk.CTkEntry(r, width=90, height=28, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
