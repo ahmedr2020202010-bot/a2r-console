@@ -19,6 +19,14 @@ if sys.platform == "win32":
         _kernel32 = ctypes.windll.kernel32
         _user32 = ctypes.windll.user32
         MUTEX_NAME = "Local\\A2R_Insurance_Console_Mutex_v41_App"
+        _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        _kernel32.CreateMutexW.restype = wintypes.HANDLE
+        _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        _user32.FindWindowW.restype = wintypes.HWND
+        _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        _user32.ShowWindow.restype = wintypes.BOOL
+        _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        _user32.SetForegroundWindow.restype = wintypes.BOOL
         _SINGLE_INSTANCE_MUTEX = _kernel32.CreateMutexW(None, wintypes.BOOL(False), MUTEX_NAME)
         if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
             hwnd = _user32.FindWindowW(None, "A2R Operations Console - Ahmed Ramadan")
@@ -48,6 +56,7 @@ import tempfile
 import zlib
 import html
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -97,7 +106,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v60"
+APP_VERSION = "v88-lite2"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -121,4116 +130,14 @@ def _log_silent(ctx, e):
 
 
 
-# ===== v51: أدوات المشرف (التقفيل + إيصالات الدفع) — مدمجة جوه collect.py =====
-import types as _a2r_types
-
-def _a2r_embed(_name, _src):
-    _mod = _a2r_types.ModuleType(_name)
-    try:
-        _mod.__file__ = os.path.abspath(__file__)
-    except Exception:
-        _mod.__file__ = os.path.abspath(sys.argv[0])
-    sys.modules[_name] = _mod
-    try:
-        exec(compile(_src, "<" + _name + ">", "exec"), _mod.__dict__)
-    except Exception:
-        sys.modules.pop(_name, None)
-        raise
-    return _mod
-
-_A2R_POS_ENGINE_SRC = r'''# -*- coding: utf-8 -*-
-"""
-A2R POS Engine  (v4.50)
-محرك قراءة وتحليل إيصالات ماكينات الدفع (التقفيل + إيصالات الدفع) لنسخة الويندوز.
-- مفيش واتساب نهائياً: كل المصادر بتتحدد من المستخدم (مجلد أو ملفات صور/PDF) في كل مرة.
-- الـ OCR: Tesseract (tesseract.exe) + تحسين صورة (OpenCV لو متاح) + قراءتين على الأقل ومطابقة المجاميع.
-- PDF -> صور: pdftoppm.exe (من نفس حزمة poppler اللي فيها pdftotext.exe) أو pypdfium2 كبديل.
-"""
-import os
-import sys
-import re
-import io
-import json
-import math
-import shutil
-import hashlib
-import zipfile
-import tempfile
-import datetime
-import subprocess
-from collections import Counter
-import threading
-from concurrent.futures import ThreadPoolExecutor
-
-from PIL import Image, ImageOps
-
-try:
-    import numpy as np
-except Exception:  # pragma: no cover
-    np = None
-try:
-    import cv2
-except Exception:  # pragma: no cover
-    cv2 = None
-
-ENGINE_VERSION = "60"
-
-if getattr(sys, "frozen", False):
-    BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
-    BASE_DIR = BUNDLE_DIR
-
-IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
-_NOWIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-
-class OcrUnavailable(Exception):
-    pass
-
-
-# ───────────────────────── جداول الماكينات والوحدات ─────────────────────────
-class TerminalInfo:
-    __slots__ = ("order", "row", "unit")
-
-    def __init__(self, order, row, unit):
-        self.order, self.row, self.unit = order, row, unit
-
-
-TERMINALS = {
-    "50335710": TerminalInfo(1, 2, "أبيس"),
-    "50335993": TerminalInfo(2, 2, "أبيس"),
-    "50335987": TerminalInfo(3, 2, "أبيس"),
-    "50325716": TerminalInfo(4, 3, "برج العرب"),
-    "50335998": TerminalInfo(5, 3, "برج العرب"),
-    "50335994": TerminalInfo(6, 3, "برج العرب"),
-    "50335711": TerminalInfo(7, 3, "برج العرب"),
-    "50382298": TerminalInfo(8, 4, "المنتزه"),
-    "50382315": TerminalInfo(9, 4, "المنتزه"),
-    "50383712": TerminalInfo(10, 4, "المنتزه"),
-    "50382306": TerminalInfo(11, 5, "محرم بك"),
-    "50382316": TerminalInfo(12, 5, "محرم بك"),
-    "50382308": TerminalInfo(13, 6, "العجمي"),
-    "50383706": TerminalInfo(14, 6, "العجمي"),
-    "50382300": TerminalInfo(15, 7, "القباري"),
-    "50383702": TerminalInfo(16, 8, "مصطفى كامل"),
-    "50382312": TerminalInfo(17, 9, "مديرية الأمن"),
-    "50383699": TerminalInfo(18, 10, "ميناء الإسكندرية"),
-    "50383700": TerminalInfo(19, 11, "خدمات مصر"),
-}
-NUM_TO_TID = {t.order: k for k, t in TERMINALS.items()}
-TID_FIX = {
-    "50336994": "50335994", "50336711": "50335711", "50336998": "50335998",
-    "50302316": "50382316", "50382318": "50382315", "50330987": "50335987",
-    "60382308": "50382308",
-}
-MERCHANT_CODE_MAP = {"22": 2, "23": 3, "24": 4, "25": 5, "26": 6,
-                     "27": 7, "28": 8, "29": 9, "30": 10, "31": 11}
-NAME_HINTS = [
-    (["ABYSS", "ABIS"], 2), (["BURJ", "BORG"], 3), (["MONTZAH", "TOSUN"], 4),
-    (["MUHRAM", "MOHARAM"], 5), (["AJAMI", "AGAMI"], 6), (["KABBARY", "KABARY"], 7),
-    (["MUSTAFA", "KAMEL"], 8), (["MODRYT", "MODERYT"], 9),
-    (["ALEXANDRIA PORT", "ESMAT"], 10), (["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
-]
-ROW_NAMES = {2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك", 6: "العجمي",
-             7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن", 10: "ميناء الإسكندرية",
-             11: "خدمات مصر"}
-
-
-def round2(v):
-    return round(float(v) + 1e-9, 2)
-
-
-def terminal_label(tid):
-    t = TERMINALS.get(tid)
-    return f"{t.order} - {t.unit} ({tid})" if t else (tid or "غير محدد")
-
-
-def unit_label(tid, fallback=None):
-    """اسم الوحدة مع رقمها لو الوحدة ليها أكتر من ماكينة (أبيس 1، أبيس 2، برج العرب 3 ...)."""
-    t = TERMINALS.get(tid)
-    if not t:
-        return fallback or "غير محدد"
-    same = sorted([x for x in TERMINALS.values() if x.row == t.row], key=lambda x: x.order)
-    if len(same) > 1:
-        return "%s %d" % (t.unit, [x.order for x in same].index(t.order) + 1)
-    return t.unit
-
-
-# ───────────────────────── أدوات خارجية (Tesseract / pdftoppm) ─────────────────────────
-_TESS = None
-_PPM = None
-
-
-def _candidates(name, subs):
-    out = []
-    for base in (BUNDLE_DIR, BASE_DIR):
-        for s in subs:
-            out.append(os.path.join(base, s, name) if s else os.path.join(base, name))
-    return out
-
-
-def find_tesseract():
-    global _TESS
-    if _TESS and os.path.exists(_TESS):
-        return _TESS
-    exe = "tesseract.exe" if sys.platform == "win32" else "tesseract"
-    cands = _candidates(exe, ["tesseract", "Tesseract-OCR", ""])
-    cands += [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-              r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]
-    for c in cands:
-        if os.path.exists(c):
-            _TESS = c
-            break
-    else:
-        _TESS = shutil.which("tesseract")
-    if _TESS:
-        td = os.path.join(os.path.dirname(_TESS), "tessdata")
-        if os.path.exists(os.path.join(td, "eng.traineddata")):
-            os.environ["TESSDATA_PREFIX"] = td
-    return _TESS
-
-
-def find_pdftoppm():
-    global _PPM
-    if _PPM and os.path.exists(_PPM):
-        return _PPM
-    exe = "pdftoppm.exe" if sys.platform == "win32" else "pdftoppm"
-    for c in _candidates(exe, ["", "poppler", "poppler/bin"]):
-        if os.path.exists(c):
-            _PPM = c
-            return c
-    _PPM = shutil.which("pdftoppm")
-    return _PPM
-
-
-def ocr_ready():
-    """(ok, message)"""
-    if not find_tesseract():
-        return False, ("tesseract.exe مش موجود. حطّ فولدر tesseract (جواه tesseract.exe و tessdata\\eng.traineddata) "
-                       "جنب البرنامج أو ضمّه في الـ exe.")
-    return True, ""
-
-
-def _tess_env():
-    env = os.environ.copy()
-    env["OMP_THREAD_LIMIT"] = "1"
-    return env
-
-
-# ───────────────────────── OCR ─────────────────────────
-class OcrLine:
-    __slots__ = ("text", "left", "right", "top", "bottom")
-
-    def __init__(self, text, left, right, top, bottom):
-        self.text, self.left, self.right, self.top, self.bottom = text, left, right, top, bottom
-
-    @property
-    def cy(self):
-        return (self.top + self.bottom) / 2.0
-
-    @property
-    def h(self):
-        return self.bottom - self.top
-
-
-def tess_lines(img, psm=6):
-    """يقرا صورة PIL (رمادي) ويرجّع سطور مع أماكنها (من TSV)."""
-    exe = find_tesseract()
-    if not exe:
-        raise OcrUnavailable("Tesseract not found")
-    fd, tmp = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    try:
-        img.save(tmp)
-        r = subprocess.run([exe, tmp, "stdout", "--psm", str(psm), "-l", "eng", "tsv"],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
-                           creationflags=_NOWIN, env=_tess_env())
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    out = r.stdout.decode("utf-8", "ignore")
-    groups = {}
-    order = []
-    for ln in out.splitlines()[1:]:
-        p = ln.split("\t", 11)
-        if len(p) < 12 or p[0] != "5":
-            continue
-        t = p[11].strip()
-        if not t:
-            continue
-        key = (p[2], p[3], p[4])
-        l, tp, w, h = int(p[6]), int(p[7]), int(p[8]), int(p[9])
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append((t, l, tp, l + w, tp + h))
-    lines = []
-    for k in order:
-        ws = groups[k]
-        lines.append(OcrLine(" ".join(w[0] for w in ws), min(w[1] for w in ws), max(w[3] for w in ws),
-                             min(w[2] for w in ws), max(w[4] for w in ws)))
-    return lines
-
-
-def rows_text(lines):
-    ls = sorted(lines, key=lambda l: l.cy)
-    rows = []
-    for l in ls:
-        if rows:
-            last = rows[-1]
-            cy = sum(e.cy for e in last) / len(last)
-            h = sum(e.h for e in last) / len(last)
-            if abs(l.cy - cy) < h * 0.6:
-                last.append(l)
-                continue
-        rows.append([l])
-    return "\n".join("  ".join(e.text for e in sorted(r, key=lambda e: e.left)) for r in rows) + "\n"
-
-
-def reading_text(lines):
-    return "\n".join(l.text for l in lines)
-
-
-# ───────────────────────── تحسين الصور ─────────────────────────
-def load_image(path):
-    im = Image.open(path)
-    im.load()
-    return ImageOps.exif_transpose(im).convert("RGB")
-
-
-def prep_raw(pil):
-    g = pil.convert("L")
-    w = g.width
-    if w < 1400:
-        s = 1400.0 / w
-        g = g.resize((int(g.width * s), int(g.height * s)), Image.LANCZOS)
-    elif w > 2600:
-        s = 2200.0 / w
-        g = g.resize((int(g.width * s), int(g.height * s)), Image.LANCZOS)
-    return g
-
-
-def _paper_crop_cv(bgr):
-    h, w = bgr.shape[:2]
-    s = 1000.0 / max(h, w)
-    sm = cv2.resize(bgr, None, fx=s, fy=s) if s < 1 else bgr.copy()
-    s = sm.shape[0] / float(h)
-    g = cv2.GaussianBlur(cv2.cvtColor(sm, cv2.COLOR_BGR2GRAY), (7, 7), 0)
-    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
-    cs, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cs:
-        return bgr
-    c = max(cs, key=cv2.contourArea)
-    if cv2.contourArea(c) < 0.08 * sm.shape[0] * sm.shape[1]:
-        return bgr
-    box = (cv2.boxPoints(cv2.minAreaRect(c)) / s).tolist()
-    box.sort(key=lambda p: p[1])
-    top = sorted(box[:2])
-    bot = sorted(box[2:])
-    tl, tr, bl, br = top[0], top[1], bot[0], bot[1]
-    W = int(max(np.hypot(*(np.array(tr) - tl)), np.hypot(*(np.array(br) - bl))))
-    H = int(max(np.hypot(*(np.array(bl) - tl)), np.hypot(*(np.array(br) - tr))))
-    if W < 100 or H < 100:
-        return bgr
-    # الباتش ورقة طويلة: لو القص طلع عريض نسيب الصورة زي ما هي (يعني فيه أكتر من إيصال)
-    if H < W * 1.6:
-        return bgr
-    M = cv2.getPerspectiveTransform(np.float32([tl, tr, bl, br]),
-                                    np.float32([[0, 0], [W, 0], [0, H], [W, H]]))
-    return cv2.warpPerspective(bgr, M, (W, H))
-
-
-def scan_receipt(pil):
-    """(نسخة ملونة مقصوصة للـ PDF، نسخة رمادية محسّنة للـ OCR)."""
-    if cv2 is None or np is None:
-        g = ImageOps.autocontrast(pil.convert("L"), cutoff=1)
-        return pil, prep_raw(Image.merge("RGB", (g, g, g)))
-    bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-    try:
-        crop = _paper_crop_cv(bgr)
-    except Exception:
-        crop = bgr
-    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    small = cv2.resize(g, None, fx=0.25, fy=0.25)
-    k = max(3, (min(small.shape) // 8) | 1)
-    bg = cv2.resize(cv2.medianBlur(small, min(k, 31) | 1), (g.shape[1], g.shape[0]))
-    norm = cv2.divide(g, bg, scale=255)
-    if norm.shape[1] < 1600:
-        norm = cv2.resize(norm, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
-    elif norm.shape[1] > 2800:
-        norm = cv2.resize(norm, None, fx=2200.0 / norm.shape[1], fy=2200.0 / norm.shape[1])
-    color = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-    return color, Image.fromarray(norm)
-
-
-# ───────────────────────── PDF -> صور ─────────────────────────
-def pdf_page_count(pdf):
-    try:
-        from pypdf import PdfReader
-        return len(PdfReader(pdf).pages)
-    except Exception:
-        pass
-    try:
-        data = open(pdf, "rb").read()
-        n = len(re.findall(rb"/Type\s*/Page(?![A-Za-z])", data))
-        return n if n > 0 else None
-    except Exception:
-        return None
-
-
-def pdf_to_images(pdf, outdir, dpi=200, first=None, last=None, max_side=3400):
-    """يرجّع لستة مسارات PNG لصفحات الـ PDF. pdftoppm أولاً، وpypdfium2 بديل."""
-    os.makedirs(outdir, exist_ok=True)
-    base = hashlib.md5((os.path.abspath(pdf) + str(os.path.getsize(pdf))).encode()).hexdigest()[:10]
-    prefix = os.path.join(outdir, base)
-    ppm = find_pdftoppm()
-    files = []
-    if ppm:
-        cmd = [ppm, "-r", str(dpi), "-png"]
-        if first:
-            cmd += ["-f", str(first)]
-        if last:
-            cmd += ["-l", str(last)]
-        cmd += [pdf, prefix]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NOWIN, timeout=600)
-        files = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
-                        if f.startswith(base + "-") and f.endswith(".png")])
-    if not files:
-        try:
-            import pypdfium2 as pdfium
-            doc = pdfium.PdfDocument(pdf)
-            n = len(doc)
-            a = (first or 1) - 1
-            b = min(n, last or n)
-            for i in range(a, b):
-                im = doc[i].render(scale=dpi / 72.0).to_pil().convert("RGB")
-                p = f"{prefix}-{i + 1:03d}.png"
-                im.save(p)
-                files.append(p)
-        except Exception:
-            raise OcrUnavailable("مش قادر أحوّل PDF لصور: حطّ pdftoppm.exe جنب pdftotext.exe (أو pip install pypdfium2)")
-    # تصغير الصفحات العملاقة (PDF ممسوح كبير) عشان الذاكرة
-    for p in files:
-        try:
-            with Image.open(p) as im:
-                s = max(im.size)
-                if s > max_side:
-                    r = max_side / float(s)
-                    im2 = im.convert("RGB").resize((int(im.width * r), int(im.height * r)), Image.LANCZOS)
-                    im2.save(p)
-        except Exception:
-            pass
-    return files
-
-
-# ───────────────────────── المبالغ والباتش (منقول من نسخة الموبايل) ─────────────────────────
-_MARKERS = [re.compile(p, re.I) for p in (
-    r"TERMINAL", r"GRAND|TOTALS?", r"NATIONAL\s*BANK|\bNBE\b", r"BATCH", r"MERCHANT",
-    r"SUCCESSF|CLOSED", r"\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ", r"THANK\s*YOU", r"NET\s*AMOUNT", r"\bSALE\b")]
-
-
-def receipt_score(text):
-    return sum(1 for r in _MARKERS if r.search(text))
-
-
-_AMOUNT_RE = re.compile(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)")
-_BRAND_RE = re.compile(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", re.I)
-_TAIL_RE = re.compile(r"THANK\s*YOU|Hotline|App\s*Version", re.I)
-
-
-def amounts_in(raw):
-    text = re.sub(r"\bB(\d{2,3}[.,]\d{2})\b", lambda m: "8" + m.group(1), raw)
-    out = []
-    for m in _AMOUNT_RE.finditer(text):
-        try:
-            v = float(m.group(1).replace(",", "") + "." + m.group(2))
-        except ValueError:
-            continue
-        if 0.5 <= v <= 5000000:
-            out.append(round2(v))
-    return out
-
-
-def most_common(vals):
-    if not vals:
-        return None
-    c = Counter(vals)
-    best = None
-    for v in vals:
-        if best is None or c[v] > c[best]:
-            best = v
-    return best, c[best]
-
-
-class Parsed:
-    def __init__(self, grand, bsum, bvals):
-        self.grand, self.bsum, self.bvals = grand, bsum, bvals
-
-
-def parse_receipt(txt):
-    t = _TAIL_RE.split(txt)[0]
-    gm = re.search(r"GRAND|TOTALS", t, re.I)
-    pre = t[:gm.start()] if gm else t
-    post = t[gm.start():] if gm else ""
-    bms = list(_BRAND_RE.finditer(pre))
-    sections = []
-    if bms:
-        for i, m in enumerate(bms):
-            end = bms[i + 1].start() if i + 1 < len(bms) else len(pre)
-            sections.append(pre[m.end():end])
-    else:
-        sm = re.search(r"SUCCESSFULL?Y|CLOSED", pre, re.I)
-        if sm:
-            pre = pre[sm.end():]
-        sections.append(pre)
-    bvals = []
-    for sec in sections:
-        mc = most_common(amounts_in(sec))
-        if mc:
-            bvals.append(mc[0])
-    grand = amounts_in(post)
-    bsum = round2(sum(bvals)) if bvals else None
-    return Parsed(grand, bsum, bvals)
-
-
-def decide(results):
-    for r in results:
-        b = r.bsum
-        if b and b > 0 and any(abs(g - b) < 0.005 for g in r.grand):
-            return b, True
-    for r in results:
-        b = r.bsum
-        if b and b > 0 and len(r.bvals) >= 2:
-            for g in r.grand:
-                sa, sb = "%.2f" % g, "%.2f" % b
-                if len(sa) == len(sb) and sum(1 for x, y in zip(sa, sb) if x != y) == 1:
-                    return b, True
-    for r in results:
-        c = most_common(r.grand)
-        if c and c[1] >= 2 and r.bsum is None:
-            return c[0], False
-    pool = []
-    for r in results:
-        pool.extend(r.grand)
-        if r.bsum and r.bsum > 0:
-            pool.append(r.bsum)
-    c = most_common(pool)
-    if c:
-        return c[0], False
-    return 0.0, False
-
-
-def classify_receipt(text):
-    up = text.upper()
-    pay = [r"R{1,2}N\W{0,3}\d{9,}", r"\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}", r"APPROVED", r"AUTH\W{0,3}\d{6}",
-           r"I\s*AUTHORI[SZ]E", r"MERCHANT\s*COPY", r"CLESS|CHIP\s*ONLINE"]
-    batch = [r"BATCH\s*CLOS", r"SUCCESSF", r"GRAND\s*TOTAL", r"TOTAL\s*NET", r"THANK\s*YOU", r"NBE\s*NETWORK", r"HOTLINE"]
-    p = sum(1 for r in pay if re.search(r, up))
-    b = sum(1 for r in batch if re.search(r, up))
-    if p >= 2 and b < 2:
-        return "payment"
-    if b >= 1:
-        return "batch"
-    return "other"
-
-
-def sum_closure(texts):
-    cnt = {}
-    for t in texts:
-        tt = _TAIL_RE.split(t)[0]
-        local = Counter(amounts_in(tt))
-        for k, v in local.items():
-            if v > cnt.get(k, 0):
-                cnt[k] = v
-    c = sorted(k for k, v in cnt.items() if v >= 2)
-    if len(c) < 3 or len(c) > 14:
-        return None
-    for gi in range(len(c) - 1, 1, -1):
-        g = c[gi]
-        others = c[:gi]
-        n = len(others)
-        for mask in range(1, 1 << n):
-            bits, s = 0, 0.0
-            for i in range(n):
-                if mask & (1 << i):
-                    bits += 1
-                    s += others[i]
-            if bits >= 2 and abs(s - g) < 0.005:
-                return g
-    return None
-
-
-class PieceResult:
-    def __init__(self, texts, val, ok):
-        self.texts, self.val, self.ok = texts, val, ok
-
-
-def ocr_piece(lines):
-    texts = [rows_text(lines), reading_text(lines)]
-    sc = sum_closure(texts)
-    if sc is not None:
-        return PieceResult(texts, sc, True)
-    v, ok = decide([parse_receipt(t) for t in texts])
-    return PieceResult(texts, v, ok)
-
-
-def batch_no(texts):
-    reg = re.compile(r"BATCH\s*NO\D{0,6}(\d{4,7})", re.I)
-    allv = [m.group(1) for t in texts for m in reg.finditer(t)]
-    mc = most_common(allv)
-    return mc[0] if mc else None
-
-
-def split_columns(lines):
-    if len(lines) < 8:
-        return [lines]
-    minl = min(l.left for l in lines)
-    maxr = max(l.right for l in lines)
-    w = maxr - minl
-    if w <= 0:
-        return [lines]
-    srt = sorted(lines, key=lambda l: l.left)
-    for tol in (0.03, 0.02, 0.01):
-        groups, cur_right = [], -1e9
-        for l in srt:
-            if not groups or l.left - cur_right > w * tol:
-                groups.append([l])
-                cur_right = l.right
-            else:
-                groups[-1].append(l)
-                cur_right = max(cur_right, l.right)
-        big = [g for g in groups
-               if (max(e.right for e in g) - min(e.left for e in g)) >= w * 0.12 and len(g) >= 6]
-        if 2 <= len(big) <= 4 and all(receipt_score(reading_text(g)) >= 3 for g in big):
-            return big
-    return [lines]
-
-
-# ───────────────────────── الماكينة / الوحدة / التاريخ ─────────────────────────
-def _tid_labeled(t):
-    m = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", t, re.I)
-    if not m:
-        return None
-    raw = re.sub(r"\D", "", m.group(1).replace("/", "7"))
-    if len(raw) < 8:
-        return None
-    d = raw[-8:]
-    d = TID_FIX.get(d, d)
-    return d if d in TERMINALS else None
-
-
-def _tid_loose(t):
-    for tid in TERMINALS:
-        if tid in t:
-            return tid
-    for m in re.finditer(r"\b(503\d{5})\b", t):
-        c = TID_FIX.get(m.group(1), m.group(1))
-        if c in TERMINALS:
-            return c
-    return None
-
-
-def find_terminal_in(texts):
-    for t in texts:
-        r = _tid_labeled(t)
-        if r:
-            return r
-    for t in texts:
-        r = _tid_loose(t)
-        if r:
-            return r
-    return None
-
-
-def find_terminal_fuzzy_in(texts, target_row):
-    pool = [k for k, v in TERMINALS.items() if target_row is None or v.row == target_row]
-    dist = {}
-    for t in texts:
-        for run in re.finditer(r"\d[\d /]{6,14}\d", t):
-            digits = re.sub(r"\D", "", run.group(0).replace("/", "7"))
-            for i in range(0, len(digits) - 7):
-                cand = digits[i:i + 8]
-                if not (cand.startswith("50") or cand.startswith("60")):
-                    continue
-                for tid in pool:
-                    d = sum(1 for a, b in zip(cand, tid) if a != b)
-                    if d < dist.get(tid, 99):
-                        dist[tid] = d
-    if not dist:
-        return None
-    best = min(dist.values())
-    winners = [k for k, v in dist.items() if v == best]
-    if best <= 1 and len(winners) == 1:
-        return winners[0]
-    return None
-
-
-def find_unit_extra_in(texts):
-    for t in texts:
-        m = re.search(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", t, re.I)
-        cands = []
-        if m:
-            cands.append(re.sub(r"\D", "", m.group(1).replace("/", "7")))
-        cands.append(re.sub(r"\D", "", t))
-        for d in cands:
-            mm = re.search(r"11470?(2[2-9]|3[01])084", d)
-            if mm and mm.group(1) in MERCHANT_CODE_MAP:
-                return MERCHANT_CODE_MAP[mm.group(1)]
-    for t in texts:
-        up = t.upper()
-        for words, row in NAME_HINTS:
-            if any(w in up for w in words):
-                return row
-    return None
-
-
-def find_date_in(texts):
-    """التاريخ من سطر DATE: تصويت منفصل على الشهر واليوم بين كل القراءات
-    (القراءة الغلط في رقم بتتعوّض بقراءة تانية)، وأي شهر/يوم مش منطقي بيتجاهل."""
-    reg = re.compile(r"DATE\s*:?\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})", re.I)
-    months, days = [], []
-    for t in texts:
-        for m in reg.finditer(t):
-            mo, d = int(m.group(2)), int(m.group(3))
-            if 1 <= mo <= 12:
-                months.append(mo)
-            if 1 <= d <= 31:
-                days.append(d)
-    mm, dd = most_common(months), most_common(days)
-    return "%d.%d" % (dd[0], mm[0]) if mm and dd else None
-
-
-class Analysis:
-    def __init__(self, tid, how, row, unit, val, ok, batches, date):
-        self.tid, self.how, self.row, self.unit = tid, how, row, unit
-        self.val, self.ok, self.batches, self.date = val, ok, batches, date
-        self.texts = []
-        self.txn = None     # عدد معاملات الباتش (من إيصال الإقفال)
-
-
-def analyze_lines(all_lines):
-    pieces = split_columns(all_lines)
-    multi = len(pieces) > 1
-    all_texts, batches, seen = [], [], set()
-    txns = []
-    all_ok = True
-    for pc in pieces:
-        r = ocr_piece(pc)
-        all_texts.extend(r.texts)
-        if r.val <= 0:
-            all_ok = False
-            continue
-        b = batch_no(r.texts)
-        key = (b, r.val)
-        if b is not None and key in seen:
-            continue
-        seen.add(key)
-        batches.append(r.val)
-        txns.append(batch_txn_of(r.texts))
-        all_ok = all_ok and r.ok
-    total = round2(sum(batches))
-    ok = all_ok and bool(batches)
-    if multi and not ok:
-        r = ocr_piece(all_lines)
-        all_texts.extend(r.texts)
-        if r.val > 0 and (r.ok or not batches):
-            total, ok, batches = r.val, r.ok, [r.val]
-            txns = [batch_txn_of(r.texts)]
-    date = find_date_in(all_texts)
-    tid = find_terminal_in(all_texts)
-    how = "terminal"
-    row = unit = None
-    if tid is None:
-        u0 = find_unit_extra_in(all_texts)
-        tid = find_terminal_fuzzy_in(all_texts, u0)
-        how = "fuzzy"
-    if tid is not None:
-        info = TERMINALS[tid]
-        row, unit = info.row, info.unit
-    else:
-        how = "none"
-        u = find_unit_extra_in(all_texts)
-        if u is not None:
-            row, unit, how = u, ROW_NAMES.get(u), "name/merchant"
-    a = Analysis(tid, how, row, unit, total, ok, batches, date)
-    a.texts = all_texts
-    a.txn = sum(txns) if (txns and all(t is not None for t in txns)) else None
-    return a
-
-
-def merge_second_read(a, b):
-    """بيدمج القراءة التانية في الأولى. يرجّع قيمة تانية متعارضة (للمراجعة) أو None."""
-    if a.tid is None and b.tid is not None:
-        a.tid, a.row, a.unit, a.how = b.tid, b.row, b.unit, b.how
-    elif a.row is None and b.row is not None:
-        a.row, a.unit, a.how = b.row, b.unit, b.how
-    if a.date is None:
-        a.date = b.date
-    if a.txn is None:
-        a.txn = b.txn
-    if b.val <= 0:
-        return None
-    if a.val <= 0:
-        a.val, a.ok, a.batches = b.val, b.ok, list(b.batches)
-        a.txn = b.txn if b.txn is not None else a.txn
-        return None
-    if abs(a.val - b.val) < 0.005:
-        a.ok = a.ok or b.ok
-        return None
-    if (not a.ok) and b.ok:
-        a.val, a.ok, a.batches = b.val, True, list(b.batches)
-        a.txn = b.txn if b.txn is not None else a.txn
-        return None
-    if a.ok and not b.ok:
-        return None
-    a.ok = False
-    return b.val
-
-
-def _looks_receipt(text):
-    return receipt_score(text) >= 2 or find_terminal_in([text]) is not None
-
-
-def analyze_image(pil, want_color_crop=False):
-    """يحلل صورة واحدة. يرجّع dict: kind = batch | payment | other، و
-    analysis, alt, image (الصورة بعد تصحيح الاتجاه)."""
-    base = pil.convert("RGB")
-    cur = base
-    lines = tess_lines(prep_raw(cur), 6)
-    text = reading_text(lines)
-    is_r = _looks_receipt(text)
-    if is_r and classify_receipt(text) == "payment":
-        return {"kind": "payment", "image": cur}
-    if not is_r:
-        for deg in (90, 270, 180):
-            rot = base.rotate(deg, expand=True)
-            ln2 = tess_lines(prep_raw(rot), 6)
-            t2 = reading_text(ln2)
-            if _looks_receipt(t2):
-                if classify_receipt(t2) == "payment":
-                    return {"kind": "payment", "image": rot}
-                cur, lines, text, is_r = rot, ln2, t2, True
-                break
-    if not is_r:
-        return {"kind": "other", "image": cur}
-    a = analyze_lines(lines)
-    all_texts = list(a.texts)
-    alt = None
-    color, enh = scan_receipt(cur)
-    for psm in (6, 4):
-        if psm == 4 and a.ok and a.tid and a.row and a.val > 0:
-            break
-        ln2 = tess_lines(enh, psm)
-        a2 = analyze_lines(ln2)
-        r = merge_second_read(a, a2)
-        if r is not None:
-            alt = r
-        all_texts.extend(a2.texts)
-    # التاريخ: تصويت بين كل القراءات (كل قراءة ممكن تغلط في رقم مختلف)
-    d = find_date_in(all_texts)
-    if d:
-        a.date = d
-    return {"kind": "batch", "analysis": a, "alt": alt, "image": cur, "crop": color}
-
-
-# ───────────────────────── عدّ إيصالات الدفع داخل PDF ─────────────────────────
-_RRN1 = re.compile(r"R{1,2}N\W{0,3}([0-9OoDQlI|iSsBZzgb ]{9,16})", re.I)
-_RRN2 = re.compile(r"(?<!\d)(63[\d ]{7,10})(?!\d)")
-_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "l": "1", "I": "1", "|": "1", "i": "1",
-                      "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "g": "9", "b": "6"})
-_DATE_RE = re.compile(r"(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})")
-
-_COUNT_PATS = {
-    "ec": r"\bEC\b|MUSTAFA|KAMEL|MOGAMAA|KHADMAT|ELKWAT",
-    "alex": r"ALEX\s*0?2F",
-    "bank": r"NATIONAL|EGYPT",
-    "sale": r"(MASTER|VISA|MEZZA|MEEZA)\s*-?\s*SALE",
-    "auth": r"AUTHORI|DEBIT\s+THE|ABOVE\s+AMOUNT",
-    "rrn": r"R{1,2}N\W{0,3}\d{6,}",
-    "amount": r"AMOUNT\W{0,3}\d",
-    "star": r"\d{4,6}\W{0,3}\*{4,}",
-    "card": r"CLESS|CHIP\s*ONLINE",
-}
-
-
-def day_key(text):
-    for m in _DATE_RE.finditer(text):
-        mo, d = int(m.group(2)), int(m.group(3))
-        if 1 <= mo <= 12 and 1 <= d <= 31:
-            return "%d.%d" % (d, mo)
-    return None
-
-
-def rrn_of(line):
-    m = _RRN1.search(line)
-    s = m.group(1).translate(_FIX) if m else None
-    if s is None:
-        m2 = _RRN2.search(line)
-        s = m2.group(1) if m2 else None
-    if not s:
-        return None
-    d = re.sub(r"\D", "", s)
-    if len(d) < 9:
-        return None
-    d = d[:12]
-    return d if (len(d) == 12 and d.startswith("63")) else "P"
-
-
-def _dedupe(pts, tol):
-    out = []
-    for l, r, cy in sorted(pts, key=lambda p: p[2]):
-        for o in out:
-            if o[0] < r and l < o[1] and abs(o[2] - cy) < tol:
-                break
-        else:
-            out.append([l, r, cy])
-    return out
-
-
-def _ocr_tiles(img_path, cols=5, rows=3, threads=None):
-    """يقسّم الصفحة لبلاط (5 أعمدة × 3 صفوف بتداخل) ويقراه بالتوازي. يرجّع (w, h, [(text,l,r,cy)])."""
-    im = Image.open(img_path).convert("L")
-    w, h = im.size
-    cw, rh = w / float(cols), h / float(rows)
-    jobs = []
-    for i in range(cols):
-        for j in range(rows):
-            x0 = max(0, int(i * cw - cw * 0.12))
-            x1 = min(w, int((i + 1) * cw + cw * 0.12))
-            y0 = max(0, int(j * rh - rh * 0.08))
-            y1 = min(h, int((j + 1) * rh + rh * 0.08))
-            jobs.append((x0, y0, im.crop((x0, y0, x1, y1))))
-
-    def run(job):
-        x0, y0, tile = job
-        return [(l.text, x0 + l.left, x0 + l.right, y0 + l.cy) for l in tess_lines(tile, 6)]
-
-    n = threads or max(1, min(8, os.cpu_count() or 2))
-    out = []
-    with ThreadPoolExecutor(max_workers=n) as ex:
-        for part in ex.map(run, jobs):
-            out.extend(part)
-    return w, h, out
-
-
-def count_page(w, h, L):
-    """عدد الإيصالات في الصفحة = مجموع (أعلى عدد علامات من أي نوع) في كل عمود."""
-    per = {}
-    for k, pt in _COUNT_PATS.items():
-        pts = [(l, r, cy) for t, l, r, cy in L if re.search(pt, t.upper())]
-        per[k] = _dedupe(pts, h * 0.012)
-    total = 0
-    for ci in range(5):
-        lo, hi = ci * w / 5.0, (ci + 1) * w / 5.0
-        total += max((len([a for a in v if lo <= (a[0] + a[1]) / 2.0 < hi]) for v in per.values()), default=0)
-    # RRN كامل (نقاط ارتكاز) بالتسلسل
-    rr = {}
-    for t, l, r, cy in L:
-        a = rrn_of(t)
-        if a and a != "P":
-            rr[a] = day_key(t)
-    return total, rr
-
-
-def tid_votes(text):
-    v = {}
-    lab = _tid_labeled(text)
-    if lab:
-        v[lab] = v.get(lab, 0) + 3
-    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
-        c0 = m.group(1)
-        c = TID_FIX.get(c0, c0)
-        if c in TERMINALS:
-            v[c] = v.get(c, 0) + 1
-    if not v:
-        f = find_terminal_fuzzy_in([text], None)
-        if f:
-            v[f] = 0.5
-    return v
-
-
-def machine_new_name(info, day, month):
-    same = sorted([t for t in TERMINALS.values() if t.row == info.row], key=lambda t: t.order)
-    unit = re.sub(r"\s+", ".", info.unit.strip())
-    k = [t.order for t in same].index(info.order) + 1
-    parts = [str(info.order), unit]
-    if len(same) > 1:
-        parts.append(str(k))
-    parts += ["يوم", str(day), str(month)]
-    return ".".join(parts)
-
-
-# ───────────────────────── إيصالات الدفع: نفس طريقة تطبيق الموبايل ─────────────────────────
-# الفكرة (منقولة من التطبيق):
-#  1) كل صفحة بتتقرا مرة واحدة (الصورة الأصلية جوه الـ PDF الممسوح من غير تحويل) على شرائح مضبوطة.
-#  2) العدد = عدّ بالهيكل (لوجو + TERMINAL + RRN + AMOUNT + APPROVED) في كل عمود.
-#  3) أوراق التعريف الصغيرة (اسم + TID + تاريخ) بتتجاهل، وإيصالات الإقفال/الملخص مش بتتعد.
-#  4) مراجعة بتسلسل أرقام RRN + تاريخ كل إيصال + مقارنة بعدد معاملات الباتش من التقفيل.
-
-CLOSING_TXN = {}   # رقم الماكينة -> عدد معاملات الباتش (من إيصالات الإقفال في التقفيل)
-
-
-def publish_closing_txn(items):
-    """بيحفظ عدد معاملات الباتش لكل ماكينة (من التقفيل) علشان إيصالات الدفع تقارنه بالعدد الفعلي."""
-    sums, bad = {}, set()
-    for it in items:
-        if getattr(it, "skip", False):
-            continue
-        n = getattr(it, "order", None) or (TERMINALS[it.tid].order if getattr(it, "tid", None) in TERMINALS else None)
-        if n is None:
-            continue
-        t = getattr(it, "txn", None)
-        if t is None:
-            bad.add(n)
-            continue
-        sums[n] = sums.get(n, 0) + t
-    for n in bad:
-        sums.pop(n, None)
-    CLOSING_TXN.clear()
-    CLOSING_TXN.update(sums)
-    return sums
-
-
-def _txn_num(s):
-    t = s.strip().replace("O", "0").replace("o", "0")
-    t = re.sub(r"[Il|]", "1", t)
-    try:
-        return int(t)
-    except ValueError:
-        return None
-
-
-def batch_txn_of(texts):
-    """عدد معاملات الباتش من إيصال الإقفال: GRAND TOTALS / Sale (010) (ولو مجموع الكروت بيتطابق معاه)."""
-    grand_re = re.compile(r"GRAND|TOTALS", re.I)
-    paren = re.compile(r"\(\s*([0-9OoIl|]{1,5})\s*\)")
-    tot_re = re.compile(r"TOTAL(?!\s*NET)[^()\n]{0,12}\(\s*([0-9OoIl|]{1,5})\s*\)", re.I)
-    grands, sums = [], []
-    for raw in texts:
-        gm = grand_re.search(raw)
-        if gm:
-            m = paren.search(raw[gm.start():])
-            v = _txn_num(m.group(1)) if m else None
-            if v is not None and 0 < v < 100000:
-                grands.append(v)
-        pre = raw[:gm.start()] if gm else raw
-        s, n = 0, 0
-        for m in tot_re.finditer(pre):
-            v = _txn_num(m.group(1))
-            if v is not None:
-                s += v
-                n += 1
-        if n > 0 and s > 0:
-            sums.append(s)
-    g = most_common(grands)[0] if grands else None
-    s = most_common(sums)[0] if sums else None
-    if g is not None and s is not None and g != s:
-        return None          # القراءتين متعارضتين: الأفضل تتكتب بإيدك
-    return g if g is not None else s
-
-
-# ───────────── قراءة الصفحة (RapidOCR أولاً، Tesseract بديل) ─────────────
-_RAPID = {"eng": None, "tried": False}
-_RAPID_LOCK = threading.Lock()
-_TILE_MAX = 1900     # RapidOCR بيصغّر أي صورة أكبر من ~2000 بكسل، فالصفحة بتتقسم بلاطات أصغر من كده
-
-
-def _rapid():
-    if not _RAPID["tried"]:
-        _RAPID["tried"] = True
-        try:
-            from rapidocr_onnxruntime import RapidOCR
-            _RAPID["eng"] = RapidOCR()
-        except Exception:
-            _RAPID["eng"] = None
-    return _RAPID["eng"]
-
-
-def pay_ocr_ready():
-    """(ok, message): إيصالات الدفع بتشتغل بـ RapidOCR أو Tesseract (أي واحد منهم)."""
-    if _rapid() is not None or find_tesseract():
-        return True, ""
-    return False, "مفيش محرك OCR: لا RapidOCR ولا Tesseract. اتأكد إن البرنامج اتبنى بالمكتبات كاملة."
-
-
-def _ocr_image_lines(im, scale=1.0, dx=0.0, dy=0.0):
-    """OCR لصورة واحدة -> OcrLine بإحداثيات الصفحة الأصلية."""
-    out = []
-    eng = _rapid()
-    if eng is not None and np is not None:
-        with _RAPID_LOCK:
-            res = eng(np.array(im.convert("RGB")))
-        items = (res[0] if isinstance(res, (tuple, list)) else None) or []
-        for box, txt, _sc in items:
-            t = str(txt).strip()
-            if not t:
-                continue
-            xs = [p[0] for p in box]
-            ys = [p[1] for p in box]
-            out.append(OcrLine(t, dx + min(xs) / scale, dx + max(xs) / scale,
-                               dy + min(ys) / scale, dy + max(ys) / scale))
-        return out
-    for l in tess_lines(im.convert("L"), 6):
-        out.append(OcrLine(l.text, dx + l.left / scale, dx + l.right / scale,
-                           dy + l.top / scale, dy + l.bottom / scale))
-    return out
-
-
-def _tile_boxes(w, h, cols=5, max_tile=_TILE_MAX):
-    cw = w / float(cols)
-    rows = max(1, int(math.ceil(h / float(max_tile))))
-    rh = h / float(rows)
-    boxes = []
-    for i in range(cols):
-        x0 = max(0, int(i * cw - cw * 0.12))
-        x1 = min(w, int((i + 1) * cw + cw * 0.12))
-        for j in range(rows):
-            y0 = max(0, int(j * rh - rh * 0.06))
-            y1 = min(h, int((j + 1) * rh + rh * 0.06))
-            boxes.append((x0, y0, x1, y1))
-    return boxes
-
-
-def _merge_lines(lines):
-    """نفس السطر اتقرا من بلاطتين متداخلتين: يفضل مرة واحدة (الأطول)."""
-    out = []
-    for l in sorted(lines, key=lambda x: (x.cy, x.left)):
-        dup = None
-        for k in range(len(out) - 1, max(-1, len(out) - 80), -1):
-            o = out[k]
-            if abs(o.cy - l.cy) > max(o.h, l.h, 1.0) * 0.7:
-                break
-            ov = min(o.right, l.right) - max(o.left, l.left)
-            if ov > 0 and ov >= 0.6 * min(o.right - o.left, l.right - l.left):
-                dup = k
-                break
-        if dup is None:
-            out.append(l)
-        elif len(l.text) > len(out[dup].text):
-            out[dup] = l
-    return out
-
-
-def read_page(im, mode="fast"):
-    """يرجّع (w, h, lines). fast = بلاطات بالدقة الأصلية. accurate = الصفحة كلها + بلاطات مكبّرة 1.5x."""
-    im = ImageOps.exif_transpose(im).convert("RGB")
-    w, h = im.size
-    lines = []
-    f = 1.5 if mode == "accurate" else 1.0
-    if mode == "accurate":
-        s = min(1.0, float(_TILE_MAX) / max(w, h))
-        small = im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS) if s < 1.0 else im
-        lines += _ocr_image_lines(small, s)
-    for (x0, y0, x1, y1) in _tile_boxes(w, h, max_tile=_TILE_MAX / f):
-        tile = im.crop((x0, y0, x1, y1))
-        if f != 1.0:
-            tile = tile.resize((int(tile.width * f), int(tile.height * f)), Image.LANCZOS)
-        lines += _ocr_image_lines(tile, f, x0, y0)
-    return w, h, _merge_lines(lines)
-
-
-def _page_text(lines, w):
-    """نص الصفحة مرتب عمود عمود (كل عمود = إيصالات فوق بعض)."""
-    cw = max(1.0, w / 5.0)
-    ls = sorted(lines, key=lambda l: (int(((l.left + l.right) / 2.0) / cw), l.cy))
-    return "\n".join(l.text for l in ls)
-
-
-# ───────────── أوراق التعريف + العد بالهيكل ─────────────
-_SLIP_PAY = re.compile(r"TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL|SALE|GRAND|CARD|REPRINT")
-
-
-def is_id_slip(lines):
-    """ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) جوه الملف: مش إيصال دفع فمتتعدّش."""
-    if not lines or len(lines) > 16:
-        return False
-    allt = "\n".join(l.text.upper() for l in lines)
-    if _SLIP_PAY.search(allt):
-        return False
-    if re.search(r"(?<!\d)\d{12}(?!\d)", re.sub(r"[ \t]", "", allt)):
-        return False
-    if re.search(r"\bT\s?[I1L|]\s?D\b\W{0,4}[\dOo]{7,9}", allt) or re.search(r"\bT\s?[I1L|]\s?D\b", allt):
-        return True
-    has_date = re.search(r"\d{2}\s?[/.\-]\s?\d{2}\s?[/.\-]\s?20\d{2}", allt)
-    return bool(has_date) and len(lines) <= 8 and find_terminal_in([allt]) is not None
-
-
-_S_NAME = re.compile(r"NATIONAL|BANK\s*OF\s*EGYPT")
-_S_RRN = re.compile(r"(?<![A-Z])R{1,2}N\W{0,3}\d")
-_S_AMT = re.compile(r"^\s*AMOUNT\b")
-_S_AMT_BAD = re.compile(r"FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b")
-
-
-def struct_count(lines):
-    """عدّ الإيصالات بالهيكل: كل إيصال له لوجو + Terminal + RRN + AMOUNT + Approved (مرة واحدة).
-    بنقسم العلامات أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات.
-    يرجّع dict: sm (عدد الأعمدة)، mx (أكبر نوع علامة)، h."""
-    out = {"sm": 0, "mx": 0, "h": 3000.0, "types": {}}
-    if not lines:
-        return out
-    h = max(l.bottom for l in lines)
-    w = max(l.right for l in lines)
-    out["h"] = h
-    marks = []
-    for l in lines:
-        u = l.text.upper()
-        cx = (l.left + l.right) / 2.0
-        kinds = []
-        if _S_NAME.search(u):
-            kinds.append("logo")
-        if "TERMINAL" in u:
-            kinds.append("term")
-        if _S_RRN.search(u):
-            kinds.append("rrn")
-        if _S_AMT.search(u) and not _S_AMT_BAD.search(u):
-            kinds.append("amount")
-        if "APPROVED" in u:
-            kinds.append("appr")
-        for k in kinds:
-            marks.append((k, cx, l.cy, l.left, l.right))
-    ded = []
-    for m in marks:
-        dup = False
-        for o in ded:
-            if o[0] == m[0] and o[3] < m[4] and m[3] < o[4] and abs(o[2] - m[2]) < h * 0.02:
-                dup = True
-                break
-        if not dup:
-            ded.append(m)
-    for m in ded:
-        out["types"][m[0]] = out["types"].get(m[0], 0) + 1
-    if not ded:
-        return out
-    out["mx"] = max(out["types"].values())
-    ded.sort(key=lambda m: m[1])
-    cols, cur = [], [ded[0]]
-    for m in ded[1:]:
-        if m[1] - cur[-1][1] > w * 0.07:
-            cols.append(cur)
-            cur = []
-        cur.append(m)
-    cols.append(cur)
-    n = 0
-    for c in cols:
-        cnt = {}
-        for m in c:
-            cnt[m[0]] = cnt.get(m[0], 0) + 1
-        n += max(cnt.values())
-    out["sm"] = n
-    return out
-
-
-# ───────────── نقاط الارتكاز (RRN) والتسلسل ─────────────
-class ScanSummary:
-    def __init__(self):
-        self.full = 0
-        self.partial = 0
-        self.rrn_day = {}
-        self.non_payment = False
-        self.tid = None
-        self.day = self.month = None
-        self.other_day = []
-        self.seq_min = self.seq_max = None
-        self.seq_missing = []
-
-    @property
-    def count(self):
-        return self.full + self.partial
-
-    @property
-    def range_len(self):
-        return None if self.seq_min is None else self.seq_max - self.seq_min + 1
-
-    @property
-    def agree(self):
-        return self.range_len is None or self.count == self.range_len
-
-    @property
-    def range_text(self):
-        if self.seq_min is None:
-            return ""
-        return " • التسلسل %06d-%06d (%d)" % (self.seq_min, self.seq_max, self.range_len)
-
-    def missing_text(self, k=10):
-        miss = "، ".join("%06d" % n for n in self.seq_missing[:k])
-        return (" - أرقام مش لاقيها: %s%s" % (miss, " ..." if len(self.seq_missing) > k else "")) if self.seq_missing else ""
-
-
-class PayCollector:
-    def __init__(self):
-        self.pages = []
-        self.slips = 0
-        self.texts = []
-        self.page_h = 3000.0
-
-    def new_page(self, h):
-        self.pages.append([])
-        self.page_h = float(h) if h else 3000.0
-
-    def _add(self, rrn, day, l, r, cy):
-        for a in self.pages[-1]:
-            if a["l"] < r and l < a["r"] and abs(a["cy"] - cy) < self.page_h * 0.012:
-                a["rrn"] = a["rrn"] or rrn
-                a["day"] = a["day"] or day
-                return
-        self.pages[-1].append({"rrn": rrn, "day": day, "l": l, "r": r, "cy": cy})
-
-    def collect(self, lines):
-        if not self.pages:
-            self.new_page(3000.0)
-        self.texts.append("\n".join(l.text for l in lines))
-        dates = [l for l in lines if day_key(l.text)]
-        for l in lines:
-            a = rrn_of(l.text)
-            if a is None:
-                continue
-            day = day_key(l.text)
-            if day is None:
-                best, bd = None, 1e18
-                for d in dates:
-                    dy = abs(d.cy - l.cy)
-                    if dy > l.h * 5:
-                        continue
-                    if not (d.left < l.right + 60 and l.left < d.right + 60):
-                        continue
-                    if dy < bd:
-                        bd, best = dy, d
-                if best is not None:
-                    day = day_key(best.text)
-            self._add(None if a == "P" else a, day, l.left, l.right, l.cy)
-
-    def finish(self):
-        r = ScanSummary()
-        seen, days, partial_days = set(), {}, []
-        for a in (x for p in self.pages for x in p):
-            if a["rrn"]:
-                if a["rrn"] not in seen:
-                    seen.add(a["rrn"])
-                    r.full += 1
-                    r.rrn_day[a["rrn"]] = a["day"]
-                    if a["day"]:
-                        days[a["day"]] = days.get(a["day"], 0) + 1
-            else:
-                r.partial += 1
-                if a["day"]:
-                    partial_days.append(a["day"])
-                    days[a["day"]] = days.get(a["day"], 0) + 1
-        allt = "\n".join(self.texts)
-        r.non_payment = bool(re.search(
-            r"GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF", allt, re.I))
-        r.tid = _tid_of_text(allt)
-        if not days:
-            for m in _DATE_RE.finditer(allt):
-                k = day_key(m.group(0))
-                if k:
-                    days[k] = days.get(k, 0) + 1
-        if days:
-            best = max(days.items(), key=lambda e: e[1])[0]
-            r.day, r.month = best.split(".")
-            for rrn, d in r.rrn_day.items():
-                if d and d != best:
-                    r.other_day.append("إيصال %s بتاريخ %s" % (rrn[6:], d))
-            for d in partial_days:
-                if d != best:
-                    r.other_day.append("إيصال (رقمه مش واضح) بتاريخ %s" % d)
-        nums = sorted(int(k[6:]) for k in r.rrn_day)
-        if len(nums) >= 2:
-            best_start, best_len, start = 0, 1, 0
-            for i in range(1, len(nums) + 1):
-                if i == len(nums) or nums[i] - nums[i - 1] > 15:
-                    if i - start > best_len:
-                        best_len, best_start = i - start, start
-                    start = i
-            cl = nums[best_start:best_start + best_len]
-            r.seq_min, r.seq_max = cl[0], cl[-1]
-            have = set(cl)
-            r.seq_missing = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
-        return r
-
-
-def _tid_of_text(text):
-    """الماكينة: أكتر Terminal ID معروف متكرر في النص."""
-    tc = {}
-    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
-        c = TID_FIX.get(m.group(1), m.group(1))
-        if c in TERMINALS:
-            tc[c] = tc.get(c, 0) + 1
-    if tc:
-        return max(tc.items(), key=lambda e: e[1])[0]
-    return find_terminal_in([text]) or find_terminal_fuzzy_in([text], None)
-
-
-def _day_of_text(text):
-    days = {}
-    for m in _DATE_RE.finditer(text):
-        k = day_key(m.group(0))
-        if k:
-            days[k] = days.get(k, 0) + 1
-    if not days:
-        return None, None
-    best = max(days.items(), key=lambda e: e[1])[0]
-    d, mo = best.split(".")
-    return d, mo
-
-
-def plausible_day(d, m):
-    """تاريخ إيصال في المستقبل = قراءة غلط."""
-    if not d or not m:
-        return True
-    try:
-        di, mi = int(d), int(m)
-    except ValueError:
-        return False
-    today = datetime.date.today()
-    for y in (today.year, today.year - 1):
-        try:
-            dt = datetime.date(y, mi, di)
-        except ValueError:
-            continue
-        if dt <= today + datetime.timedelta(days=1):
-            if y == today.year or (today - dt).days <= 90:
-                return True
-    return False
-
-
-# ───────────── مصدر صفحات الـ PDF ─────────────
-def pdf_jpeg_pages(path):
-    """صور الصفحات الأصلية (JPEG) من PDF ممسوح (CamScanner وغيره): من غير تحويل ولا رسم."""
-    try:
-        with open(path, "rb") as f:
-            b = f.read()
-    except OSError:
-        return []
-    out, pos = [], 0
-    while True:
-        i = b.find(b"/DCTDecode", pos)
-        if i < 0:
-            break
-        s = b.find(b"stream", i)
-        if s < 0:
-            break
-        st = s + 6
-        if b[st:st + 2] == b"\r\n":
-            st += 2
-        elif b[st:st + 1] in (b"\n", b"\r"):
-            st += 1
-        e = b.find(b"endstream", st)
-        if e < 0:
-            break
-        en = e
-        while en > st and b[en - 1] in (10, 13, 32):
-            en -= 1
-        if en - st > 20000 and b[st:st + 2] == b"\xff\xd8" and b[en - 2:en] == b"\xff\xd9":
-            out.append(b[st:en])
-        pos = e + 9
-    return out
-
-
-def _pdf_page_count(pdf):
-    try:
-        from pypdf import PdfReader
-        return len(PdfReader(pdf).pages)
-    except Exception:
-        pass
-    try:
-        import pypdfium2 as pdfium
-        return len(pdfium.PdfDocument(pdf))
-    except Exception:
-        return 0
-
-
-class PageSource:
-    """صفحات PDF واحدة واحدة: صورة JPEG الأصلية لو ممسوح، وإلا رسم الصفحة (pdftoppm / pypdfium2)."""
-
-    def __init__(self, pdf, workdir, fast=True, dpi=200):
-        self.pdf, self.wd, self.dpi = pdf, workdir, dpi
-        self.jpegs = pdf_jpeg_pages(pdf) if fast else []
-        self.scanned = bool(self.jpegs)
-        self.n = len(self.jpegs) if self.scanned else (_pdf_page_count(pdf) or 0)
-
-    def get(self, i):
-        if self.scanned:
-            if i >= len(self.jpegs):
-                return None
-            with Image.open(io.BytesIO(self.jpegs[i])) as t:
-                return t.convert("RGB")
-        imgs = pdf_to_images(self.pdf, self.wd, dpi=self.dpi, first=i + 1, last=i + 1, max_side=3400)
-        if not imgs:
-            return None
-        try:
-            with Image.open(imgs[0]) as t:
-                return t.convert("RGB")
-        finally:
-            for q in imgs:
-                try:
-                    os.remove(q)
-                except OSError:
-                    pass
-
-
-# ───────────── نتيجة ملف إيصالات ─────────────
-class PayResult:
-    def __init__(self, src):
-        self.src = src
-        self.name = os.path.basename(src)
-        try:
-            self.size = os.path.getsize(src)
-        except OSError:
-            self.size = 0
-        self.pages = 0
-        self.count = -1             # -1 = لسه ما اتعدّش
-        self.tid = None
-        self.votes = {}
-        self.alt_tids = []
-        self.day = self.month = None
-        self.new_name = None
-        self.out_path = None
-        self.seq_min = self.seq_max = None
-        self.seq_missing = []
-        self.other_day = []
-        self.id_notes = []
-        self.cnt_notes = []
-        self.id_ok = True
-        self.cnt_ok = True
-        self.detail = ""
-        self.verdict = 0            # 0 = لسه ما اتراجعش، 1 = صح، -1 = غلط (مستبعد)
-        self.expected = None        # "الصح" بإيدك (عدد الباتش)
-        self.n15 = self.n10 = self.last = None
-        self.page_counts = []
-
-    key = property(lambda self: "%s:%d" % (self.name, self.size))
-    excluded = property(lambda self: self.verdict < 0)
-    pending = property(lambda self: self.count < 0 and self.verdict >= 0)
-    counted = property(lambda self: self.count >= 0)
-    ok = property(lambda self: self.verdict != 0 or (self.id_ok and self.cnt_ok))
-    notes = property(lambda self: list(self.id_notes) + list(self.cnt_notes))
-
-    @property
-    def order(self):
-        return TERMINALS[self.tid].order if self.tid in TERMINALS else 99
-
-
-def apply_payment_name(results, r, dest_dir):
-    """يسمّي ويكوّب الملف باسم الماكينة. لو اسم مكرر من ملف تاني بيزوّد _2."""
-    old = r.out_path
-    try:
-        if (old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(r.src)
-                and os.path.abspath(old).startswith(os.path.abspath(dest_dir))):
-            os.remove(old)
-    except OSError:
-        pass
-    r.new_name = r.out_path = None
-    miss_t, miss_d = "مش قادر أعرف الماكينة من الـ PDF", "مش قادر أعرف التاريخ من الـ PDF"
-    r.id_notes = [n for n in r.id_notes if n not in (miss_t, miss_d)]
-    if r.tid not in TERMINALS:
-        r.id_ok = False
-        r.id_notes.append(miss_t)
-        return
-    if not r.day or not r.month:
-        r.id_ok = False
-        r.id_notes.append(miss_d)
-        return
-    base = machine_new_name(TERMINALS[r.tid], r.day, r.month)
-    final, k = base, 2
-    while any(x is not r and not x.excluded and x.new_name == final for x in results):
-        final = "%s_%d" % (base, k)
-        k += 1
-    os.makedirs(dest_dir, exist_ok=True)
-    dst = os.path.join(dest_dir, final + ".pdf")
-    if os.path.abspath(dst) != os.path.abspath(r.src):
-        shutil.copy2(r.src, dst)
-    r.new_name, r.out_path = final, dst
-
-
-# ───────────── المرحلة 1: تعريف الماكينة واليوم ─────────────
-def identify_payment_pdf(pdf, workdir, progress=None, stop=lambda: False, max_probe=25, fast=True):
-    """بيقرا صفحات الملف (لحد 6، ولو مفيش ماكينة يكمّل لحد 25) ويصوّت على Terminal ID."""
-    r = PayResult(pdf)
-    src = PageSource(pdf, workdir, fast)
-    r.pages = src.n
-    votes, texts = {}, []
-    limit = min(max_probe, src.n) if src.n else max_probe
-    pi = 0
-    while pi < limit:
-        if stop():
-            break
-        if pi >= 6 and votes:
-            break
-        if progress:
-            progress("قراءة رقم الماكينة من صفحة %d" % (pi + 1))
-        im = src.get(pi)
-        if im is None:
-            break
-        w, h, lines = read_page(im, "fast")
-        txt = _page_text(lines, w)
-        texts.append(txt)
-        for k, v in tid_votes(txt).items():
-            votes[k] = votes.get(k, 0) + v
-        pi += 1
-        d, _m = _day_of_text("\n".join(texts))
-        rk = sorted(votes.items(), key=lambda e: -e[1])
-        # وقف بدري لو الماكينة واضحة (Terminal ID مقروء بوضوح) واليوم معروف
-        if d and rk and rk[0][1] >= 3 and (len(rk) < 2 or rk[0][1] >= rk[1][1] * 2):
-            break
-    allt = "\n".join(texts)
-    rk = sorted(votes.items(), key=lambda e: -e[1])
-    r.alt_tids, r.votes = [k for k, _ in rk], votes
-    tid = rk[0][0] if rk else _tid_of_text(allt)
-    from_unit = False
-    if tid is None:
-        row = find_unit_extra_in([allt])
-        same = [k for k, v in TERMINALS.items() if v.row == row] if row else []
-        if len(same) == 1:
-            tid, from_unit = same[0], True
-    day, month = _day_of_text(allt)
-    top = rk[0][1] if rk else 0.0
-    weak = tid is not None and ((not from_unit and top < 2) or not plausible_day(day, month))
-    if weak:
-        # مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): للمراجعة، من غير تسمية ولا عد
-        r.tid = None
-        r.day, r.month = day, month
-        r.id_ok = False
-        r.id_notes.append("الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه")
-        r.count = 0
-        r.detail = "للمراجعة (مش معدود)"
-        return r
-    r.tid, r.day, r.month = tid, day, month
-    if from_unit:
-        r.id_ok = False
-        r.id_notes.append("Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع")
-    return r
-
-
-def resolve_payment_duplicates(results, dest_dir):
-    """لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة."""
-    groups = {}
-    for r in results:
-        if r.tid and r.new_name and not r.excluded:
-            groups.setdefault(r.tid, []).append(r)
-    for tid, g in groups.items():
-        if len(g) < 2:
-            continue
-        g.sort(key=lambda x: -x.votes.get(tid, 0))
-        for r in g[1:]:
-            if not os.path.exists(r.src):
-                continue
-            claimed = set(x.tid for x in results if x.tid)
-            alt = None
-            for c in r.alt_tids:
-                if c == tid or c in claimed:
-                    continue
-                if r.votes.get(c, 0) >= 1:
-                    alt = c
-                    break
-            if alt is None:
-                continue
-            r.tid = alt
-            apply_payment_name(results, r, dest_dir)
-            if r.new_name:
-                r.id_ok = False
-                r.id_notes.append("الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة %d (المرشح التاني من قراءة الـ PDF)، راجع"
-                                  % TERMINALS[alt].order)
-
-
-def flag_payment_duplicates(results):
-    """بيعلّم الملفات اللي لسه واخدة نفس الماكينة (مفيش حل تلقائي)."""
-    tag = "نفس الماكينة"
-    for r in results:
-        had = any(n.startswith(tag) for n in r.id_notes)
-        r.id_notes = [n for n in r.id_notes if not n.startswith(tag)]
-        if had and not r.id_notes and r.new_name:
-            r.id_ok = True
-    groups = {}
-    for r in results:
-        if r.tid and r.new_name and not r.excluded:
-            groups.setdefault((r.tid, r.day, r.month), []).append(r)
-    for (tid, _d, _m), lst in groups.items():
-        if len(lst) < 2:
-            continue
-        info = TERMINALS.get(tid)
-        for r in lst:
-            others = " ، ".join(x.name for x in lst if x is not r)
-            r.id_ok = False
-            r.id_notes.append("%s (%s %s) اتعرفت كمان في: %s — راجع" % (
-                tag, info.order if info else "", info.unit if info else "", others))
-
-
-# ───────────── المرحلة 2: العد ─────────────
-def _scan_notes(r, sc, total, slips):
-    """ملاحظات المقارنة بين العدد وتسلسل الـ RRN واليوم (نفس رسايل التطبيق)."""
-    if sc.range_len is not None and sc.full >= total * 0.8 and total != sc.range_len:
-        r.cnt_ok = False
-        r.cnt_notes.append("العدد %d بس التسلسل %d%s" % (total, sc.range_len, sc.missing_text()))
-    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
-    r.other_day = list(sc.other_day)
-    if len(sc.other_day) >= 3 and len(sc.other_day) >= total * 0.1:
-        r.cnt_ok = False
-        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day[:5]))
-    if sc.non_payment:
-        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
-    if r.new_name is None and sc.tid:
-        # التعريف فشل: نسمّي من نتيجة العد (الاسم بيتعمل في apply_payment_name)
-        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
-        r.id_ok, r.id_notes = True, []
-    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
-        r.cnt_ok = False
-        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
-            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
-
-
-def _count_fast(r, workdir, progress, stop, max_pages):
-    """العد السريع: كل صفحة تتقرا مرة واحدة + عدّ بالهيكل. بيرجّع None لو اتوقف، False لو مش نافع."""
-    src = PageSource(r.src, workdir, True)
-    r.pages = src.n
-    col = PayCollector()
-    total = total_mx = failed = slips = done = 0
-    diff, empty = [], []
-    n = min(src.n, max_pages) if src.n else max_pages
-    for i in range(n):
-        if stop():
-            return None
-        if progress:
-            progress("عدّ صفحة %d من %s" % (i + 1, src.n or "؟"))
-        try:
-            im = src.get(i)
-            if im is None:
-                break
-            w, h, lines = read_page(im, "fast")
-        except OcrUnavailable:
-            raise
-        except Exception:
-            failed += 1
-            continue
-        done += 1
-        if is_id_slip(lines):
-            slips += 1
-            continue
-        sp = struct_count(lines)
-        total += sp["sm"]
-        total_mx += sp["mx"]
-        if sp["sm"] == 0:
-            empty.append(i + 1)
-        if abs(sp["sm"] - sp["mx"]) >= 2:
-            diff.append("%d (%d أو %d)" % (i + 1, sp["sm"], sp["mx"]))
-        col.new_page(sp["h"] or h)
-        col.collect(lines)
-    if total == 0 or done == 0:
-        return False
-    sc = col.finish()
-    r.count = total
-    r.detail = "عدّ سريع • %d صفحة • RRN مقروء %d%s%s" % (
-        done + failed, sc.full, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % slips) if slips else "")
-    if failed:
-        r.cnt_ok = False
-        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
-    if empty:
-        r.cnt_notes.append("صفحات ما لقيتش فيها إيصالات: " + "، ".join(str(x) for x in empty))
-    if diff:
-        r.cnt_notes.append("صفحات الطريقتين اختلفوا فيها: %s (راجعها لو العدد مهم)" % "، ".join(diff))
-    _scan_notes(r, sc, total, slips)
-    return True
-
-
-def _count_accurate(r, workdir, progress, stop, max_pages):
-    """العد الدقيق (أبطأ): الصفحة كلها + بلاطات مكبّرة، والعدد = عدد نقاط الارتكاز (RRN)."""
-    src = PageSource(r.src, workdir, True)
-    r.pages = src.n
-    col = PayCollector()
-    done = failed = 0
-    n = min(src.n, max_pages) if src.n else max_pages
-    for i in range(n):
-        if stop():
-            return None
-        if progress:
-            progress("عدّ دقيق: صفحة %d من %s" % (i + 1, src.n or "؟"))
-        try:
-            im = src.get(i)
-            if im is None:
-                break
-            w, h, lines = read_page(im, "accurate")
-        except OcrUnavailable:
-            raise
-        except Exception:
-            failed += 1
-            continue
-        done += 1
-        if is_id_slip(lines):
-            col.slips += 1
-            continue
-        col.new_page(max([l.bottom for l in lines] or [h]))
-        col.collect(lines)
-    if done == 0:
-        r.count = 0
-        r.cnt_ok = False
-        r.cnt_notes.append("فشل العد")
-        return True
-    sc = col.finish()
-    r.count = sc.count
-    r.detail = "عدّ دقيق • RRN كامل %d • ناقص القراءة %d%s%s" % (
-        sc.full, sc.partial, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % col.slips) if col.slips else "")
-    if failed:
-        r.cnt_ok = False
-        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
-    if not sc.agree:
-        r.cnt_ok = False
-        r.cnt_notes.append("العدد %d بس التسلسل %d%s (ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف)" % (
-            sc.count, sc.range_len, sc.missing_text()))
-    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
-    r.other_day = list(sc.other_day)
-    if sc.other_day:
-        r.cnt_ok = False
-        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day))
-    if sc.non_payment:
-        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
-    if r.new_name is None and sc.tid:
-        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
-        r.id_ok, r.id_notes = True, []
-    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
-        r.cnt_ok = False
-        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
-            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
-    return True
-
-
-def count_payment_pdf(r, workdir, progress=None, stop=lambda: False, fast=True, max_pages=400):
-    """بيعدّ إيصالات الملف. يرجّع False لو اتوقف قبل ما يخلص."""
-    r.cnt_notes, r.cnt_ok = [], True
-    if not os.path.exists(r.src):
-        r.count = 0
-        r.cnt_ok = False
-        r.cnt_notes.append("الملف الأصلي مش موجود")
-        return True
-    if fast:
-        res = _count_fast(r, workdir, progress, stop, max_pages)
-        if res is None:
-            return False
-        if res:
-            return True
-        r.cnt_notes, r.cnt_ok = [], True      # السريع ما نفعش: نكمّل بالدقيق
-    res = _count_accurate(r, workdir, progress, stop, max_pages)
-    return res is not None
-
-
-# ───────────── مقارنة الباتش + حالة الملف + الملاحظات ─────────────
-def batch_manual(r):
-    try:
-        return int(str(r.expected).strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def batch_auto(r):
-    return CLOSING_TXN.get(r.order) if r.order != 99 else None
-
-
-def batch_of(r):
-    m = batch_manual(r)
-    return m if m is not None else batch_auto(r)
-
-
-def batch_diff(r):
-    b = batch_of(r)
-    if b is None or r.pending or r.excluded:
-        return None
-    return b - r.count
-
-
-def batch_match(r):
-    """True/False، أو None لو مفيش حاجة نقارنها. لو راجعته يدوي وعلّمته صح يتحسب مطابق."""
-    if r.excluded or r.pending:
-        return None
-    if r.verdict > 0:
-        return True
-    d = batch_diff(r)
-    return None if d is None else d == 0
-
-
-def diff_text(d):
-    return "مطابق ✓" if d == 0 else ("ناقص %d" % d if d > 0 else "زيادة %d" % (-d))
-
-
-def pay_status(r):
-    """(نص، tag للجدول)."""
-    if r.excluded:
-        return "مستبعد", "skip"
-    if r.pending:
-        return "لسه ما اتعدّش", "skip"
-    if r.verdict > 0:
-        return "اتراجع: صح", "ok"
-    if r.ok:
-        return "سليم", "ok"
-    return "محتاج مراجعة", "warn"
-
-
-def pay_summary(r):
-    if r.excluded:
-        return "مستبعد (علامة غلط)"
-    if r.pending:
-        return "لسه ما اتعدّش (دوس ② عدّ الإيصالات)"
-    s = "عدد المعاملات: %d" % r.count
-    b, d = batch_of(r), batch_diff(r)
-    if b is not None and d is not None:
-        tag = " (يدوي)" if batch_manual(r) is not None else " (من التقفيل)"
-        res = "راجعته يدوي: صح ✓" if (r.verdict > 0 and d != 0) else diff_text(d)
-        s += "\nالباتش: %d%s • الفعلي: %d • %s" % (b, tag, r.count, res)
-    return s
-
-
-def missing_machines(results):
-    got = set(r.order for r in results if not r.excluded and r.order != 99)
-    return ["%d %s" % (n, TERMINALS[NUM_TO_TID[n]].unit) for n in range(1, 20) if n not in got]
-
-
-# (key, severity 2=لازم تراجع 1=انتبه 0=معلومة, عنوان، السبب، الحل)
-NOTE_KINDS = [
-    ("seq", 2, "العدد مش مطابق لتسلسل الإيصالات",
-     "أرقام الإيصالات (RRN) متتالية، فالعدد المتوقع هو من أول رقم لآخر رقم. العدد اللي اتعدّ مختلف عنه، يعني غالباً فيه إيصال ناقص في الملف أو البرنامج ما قراش إيصال.",
-     "افتح الملف وراجع الأرقام اللي مش لاقيها، وسجّل العدد الصح في خانة \"الصح\" لو اتأكدت."),
-    ("otherday", 2, "فيه إيصالات من يوم تاني",
-     "تاريخ بعض الإيصالات مختلف عن يوم باقي الملف، فممكن تكون اتضافت بالغلط أو الملف فيه أكتر من يوم.",
-     "راجع التواريخ المذكورة، ولو الملف مش بتاع اليوم علّمه غلط ✗."),
-    ("machconf", 2, "تعارض في رقم الماكينة",
-     "اسم الملف اتحدد لماكينة، لكن الإيصالات جواه بتقول إنها ماكينة تانية.",
-     "استخدم \"تحديد/تعديل\" واختار الماكينة الصح."),
-    ("readfail", 2, "فشل في قراءة صفحات",
-     "البرنامج ما قدرش يقرا صفحة أو أكتر، فالعدد ممكن يكون ناقص.",
-     "اختار الملف ودوس \"إعادة عد\". لو اتكرر راجع الملف بنفسك."),
-    ("emptypages", 1, "صفحات من غير إيصالات",
-     "فيه صفحات في الملف البرنامج ما لقاش فيها أي إيصال (ممكن تكون صفحة فاضية أو صورة مش واضحة).",
-     "افتح الصفحات المذكورة وتأكد إنها فعلاً فاضية."),
-    ("methoddiff", 1, "تضارب بين طريقتين للعد",
-     "البرنامج بيعد بطريقتين للتأكد، وفي صفحات معينة النتيجة اختلفت.",
-     "راجع الصفحات المذكورة لو العدد مهم ليك."),
-    ("nonpay", 0, "مستند إقفال أو ملخص",
-     "الملف فيه إيصال إقفال أو ملخص أو إعادة طباعة. البرنامج تجاهله ومش محسوب في العدد.",
-     "مفيش حاجة مطلوبة، ده طبيعي."),
-    ("nofile", 2, "الملف الأصلي مش موجود",
-     "الملف اتمسح أو اتنقل من مكانه، فالبرنامج مش قادر يعدّه.",
-     "رجّع الملف مكانه أو اعمل فحص من جديد."),
-    ("datefail", 1, "التاريخ مش واضح",
-     "البرنامج ما قدرش يقرا تاريخ اليوم من الملف.",
-     "افتح الملف وتأكد من التاريخ بنفسك."),
-    ("namefail", 2, "فشلت التسمية",
-     "البرنامج ما قدرش يتعرف على الماكينة فمسمّاش الملف.",
-     "استخدم \"تحديد/تعديل\" واختار الماكينة."),
-    ("idweak", 2, "الماكينة مش مؤكدة",
-     "رقم الماكينة (Terminal ID) ما اتقراش بوضوح، فالبرنامج خمّن الماكينة من بيانات تانية أو لقاها في أكتر من ملف.",
-     "اتأكد من الماكينة، ولو غلط استخدم \"تحديد/تعديل\"."),
-    ("other", 1, "ملاحظة تانية", "ملاحظة من البرنامج مش متصنفة.", "اقراها وقرر لو محتاجة مراجعة."),
-]
-_NOTE_RULES = [
-    (re.compile(r"^العدد \d+ بس التسلسل"), "seq"),
-    (re.compile(r"مش تبع نفس اليوم"), "otherday"),
-    (re.compile(r"العد لقى ماكينة"), "machconf"),
-    (re.compile(r"صفحة فشلت قراءتها|فشل العد|العد وقف"), "readfail"),
-    (re.compile(r"صفحات ما لقيتش فيها إيصالات"), "emptypages"),
-    (re.compile(r"الطريقتين اختلفوا"), "methoddiff"),
-    (re.compile(r"إقفال/ملخص"), "nonpay"),
-    (re.compile(r"الملف الأصلي مش موجود"), "nofile"),
-    (re.compile(r"مش قادر أعرف التاريخ"), "datefail"),
-    (re.compile(r"فشل التسمية|فشل التعريف|فشل النسخ"), "namefail"),
-    (re.compile(r"Terminal ID|مش واضح|مش قادر أعرف الماكينة|نفس الماكينة|اتعرفت كمان|الوحدة اتحددت|نفس ماكينة"), "idweak"),
-]
-
-
-def note_kind(n):
-    """يرجّع (key, severity, عنوان, سبب, حل) للملاحظة."""
-    for rx, key in _NOTE_RULES:
-        if rx.search(n):
-            return next(k for k in NOTE_KINDS if k[0] == key)
-    return NOTE_KINDS[-1]
-
-
-# ───────────────────────── التقفيل: عناصر + ترقيم + مخرجات ─────────────────────────
-class Item:
-    def __init__(self, label, image):
-        self.label = label          # اسم العرض (ملف / ملف pdf صفحة n)
-        self.image = image          # PIL بعد تصحيح الاتجاه
-        self.crop = None
-        self.tid = None
-        self.order = None
-        self.row = None
-        self.unit = None
-        self.amount = 0.0
-        self.date = None
-        self.ok = False
-        self.how = "none"
-        self.batches = []
-        self.suffix = None
-        self.orig_tid = None
-        self.conflict = False
-        self.skip = False
-        self.alt = None
-        self.key = ""
-        self.path = None
-        self.txn = None             # عدد معاملات الباتش من إيصال الإقفال
-
-    @property
-    def needs_review(self):
-        return (self.amount <= 0 or self.row is None or not self.ok or self.alt is not None
-                or self.how in ("auto-number", "conflict"))
-
-
-def _item_reset(self):
-    self.tid, self.order, self.row, self.unit, self.how = self.det
-    self.suffix = self.orig_tid = None
-    self.conflict = self.skip = False
-
-
-Item.reset = _item_reset
-Item.det = (None, None, None, None, "none")
-
-
-def renumber(raw_items):
-    """يعيد الترقيم والتكرار بعد أي تعديل يدوي. يرجّع (kept, warnings)."""
-    for r in raw_items:
-        r.reset()
-    warns = []
-    return assign_numbers(raw_items, warns), warns
-
-
-def same_day(a, b):
-    return a.date is None or b.date is None or a.date == b.date
-
-
-def assign_numbers(raw, warnings):
-    """المرحلة 2: التكرار وترقيم الماكينات (منقولة من نسخة الموبايل)."""
-    prio = {"manual": 0, "terminal": 0, "fuzzy": 1}
-    with_tid = [r for r in raw if r.tid is not None]
-    with_tid.sort(key=lambda r: (prio.get(r.how, 3), raw.index(r)))
-    taken = {}
-    for r in with_tid:
-        n = r.order
-        prev = taken.get(n)
-        if prev is None:
-            taken[n] = r
-        elif r.amount > 0 and abs(prev.amount - r.amount) < 0.005 and same_day(prev, r):
-            r.skip = True
-            warnings.append("%s: نفس الماكينة %s ونفس المبلغ %.2f (إيصال مكرر) - تم استبعاده" % (r.label, n, r.amount))
-        else:
-            r.orig_tid, r.tid, r.conflict = r.tid, None, True
-    used = set()
-
-    def give_suffix(r):
-        k = 2
-        while (r.orig_tid, k) in used:
-            k += 1
-        used.add((r.orig_tid, k))
-        r.tid, r.suffix, r.how = r.orig_tid, k, "extra-batch"
-
-    for r in raw:
-        if r.skip or r.tid is not None or r.row is None:
-            continue
-        if r.conflict and r.how in ("terminal", "fuzzy"):
-            give_suffix(r)
-            continue
-        free = [n for n in range(1, 20) if TERMINALS[NUM_TO_TID[n]].row == r.row and n not in taken]
-        if free:
-            n = free[0]
-            t = NUM_TO_TID[n]
-            r.tid, r.order, r.unit = t, n, TERMINALS[t].unit
-            taken[n] = r
-            r.how = "conflict" if r.conflict else "auto-number"
-        elif r.orig_tid is not None:
-            give_suffix(r)
-    kept = [r for r in raw if not r.skip]
-    votes = Counter(r.date for r in kept if r.date)
-    main = votes.most_common(1)[0][0] if votes else None
-    for r in kept:
-        nm = r.label
-        if main and r.date and r.date != main:
-            warnings.append("%s: تاريخ الإيصال %s بينما أغلب الإيصالات %s" % (nm, r.date, main))
-        if r.row is not None and r.amount > 0:
-            if not r.ok:
-                warnings.append("%s: %s = %.2f (راجع المبلغ يدوياً)" % (nm, r.unit, r.amount))
-            if r.alt is not None:
-                warnings.append("%s: القراءة التانية للمبلغ %.2f مختلفة عن %.2f - راجع الصورة" % (nm, r.alt, r.amount))
-            if r.how == "extra-batch":
-                warnings.append("%s: الماكينة %s ظهرت بمبلغ مختلف - اتحسبت كباتش إضافي %s" % (nm, r.order, r.suffix))
-            elif r.how in ("auto-number", "conflict"):
-                warnings.append("%s: رقم الماكينة اتحدد تلقائياً (%s) - اتأكد منه" % (nm, r.order))
-            elif r.how not in ("terminal", "fuzzy", "manual"):
-                warnings.append("%s: الوحدة اتحددت بالاسم/الميرشانت فقط" % nm)
-        else:
-            warnings.append("%s: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل" % nm)
-    try:
-        publish_closing_txn(kept)      # عدد معاملات الباتش لكل ماكينة (تقارنه إيصالات الدفع)
-    except Exception:
-        pass
-    return kept
-
-
-def main_date_of(items):
-    c = Counter(r.date for r in items if r.date)
-    return c.most_common(1)[0][0] if c else datetime.date.today().strftime("%d.%m")
-
-
-# ───────────── ملء قالب الإكسيل مباشرة في XML (من غير ما نبوّظ التنسيق) ─────────────
-_CELL_RE = re.compile(r"<c\b[^>]*?/>|<c\b[^>]*?>.*?</c>", re.S)
-
-
-def _col_num(c):
-    n = 0
-    for ch in c:
-        n = n * 26 + (ord(ch) - 64)
-    return n
-
-
-def _find_row(xml, row):
-    return re.search(r'<row\b[^>]*\br="%d"[^>]*?(?:/>|>.*?</row>)' % row, xml, re.S)
-
-
-def _read_num(xml, col, row):
-    rm = _find_row(xml, row)
-    if not rm:
-        return 0.0
-    for m in _CELL_RE.finditer(rm.group(0)):
-        cell = m.group(0)
-        op = re.search(r"<c\b[^>]*?>", cell).group(0)
-        r = re.search(r'\br="([A-Z]+)\d+"', op)
-        if not r or r.group(1) != col:
-            continue
-        t = re.search(r'\bt="([^"]+)"', op)
-        if t and t.group(1) != "n":
-            return 0.0
-        v = re.search(r"<v>([^<]*)</v>", cell)
-        try:
-            return float(v.group(1)) if v else 0.0
-        except ValueError:
-            return 0.0
-    return 0.0
-
-
-def _set_cell(xml, col, row, build):
-    rm = _find_row(xml, row)
-    if not rm:
-        raise Exception("row %d missing" % row)
-    row_xml = rm.group(0)
-    ref = "%s%d" % (col, row)
-    target = _col_num(col)
-    existing = before = None
-    for m in _CELL_RE.finditer(row_xml):
-        cell = m.group(0)
-        op = re.search(r"<c\b[^>]*?>", cell).group(0)
-        r = re.search(r'\br="([A-Z]+)\d+"', op)
-        if not r:
-            continue
-        cn = _col_num(r.group(1))
-        if cn == target:
-            existing = m
-            break
-        if cn > target and before is None:
-            before = m
-    style = formula = None
-    if existing:
-        cell = existing.group(0)
-        op = re.search(r"<c\b[^>]*?>", cell).group(0)
-        s = re.search(r'\bs="(\d+)"', op)
-        style = s.group(1) if s else None
-        f = re.search(r"<f\b[^>]*?(?:/>|>.*?</f>)", cell, re.S)
-        formula = f.group(0) if f else None
-    new_cell = build(ref, style, formula)
-    if existing:
-        row_xml = row_xml[:existing.start()] + new_cell + row_xml[existing.end():]
-    elif before:
-        row_xml = row_xml[:before.start()] + new_cell + row_xml[before.start():]
-    elif row_xml.endswith("/>"):
-        row_xml = row_xml[:-2] + ">" + new_cell + "</row>"
-    else:
-        i = row_xml.rfind("</row>")
-        row_xml = row_xml[:i] + new_cell + row_xml[i:]
-    return xml[:rm.start()] + row_xml + xml[rm.end():]
-
-
-def _first_sheet_path(z):
-    names = z.namelist()
-    try:
-        wb = z.read("xl/workbook.xml").decode("utf-8", "ignore")
-        rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", "ignore")
-        sm = re.search(r'<sheet\b[^>]*?r:id="([^"]+)"', wb)
-        if sm:
-            for m in re.finditer(r"<Relationship\b[^>]*>", rels):
-                tag = m.group(0)
-                if 'Id="%s"' % sm.group(1) in tag:
-                    t = re.search(r'Target="([^"]+)"', tag)
-                    if t:
-                        tg = t.group(1)
-                        return tg[1:] if tg.startswith("/") else "xl/" + tg
-    except KeyError:
-        pass
-    return "xl/worksheets/sheet1.xml" if "xl/worksheets/sheet1.xml" in names else names[0]
-
-
-def fill_template(template_path, out_path, totals):
-    with zipfile.ZipFile(template_path) as zin:
-        sheet = _first_sheet_path(zin)
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
-            found = False
-            for info in zin.infolist():
-                data = zin.read(info.filename)
-                if info.filename == sheet:
-                    found = True
-                    xml = data.decode("utf-8", "ignore")
-                    for r in range(2, 12):
-                        tot = round2(totals.get(r, 0.0))
-                        xml = _set_cell(xml, "D", r, lambda ref, st, f0, tot=tot:
-                                        '<c r="%s"%s><v>%s</v></c>' % (ref, ' s="%s"' % st if st else "", tot))
-                        cash = _read_num(xml, "E", r)
-                        total = round2(tot + cash)
-                        xml = _set_cell(xml, "F", r, lambda ref, st, f0, r=r, total=total:
-                                        '<c r="%s"%s>%s<v>%s</v></c>' % (
-                                            ref, ' s="%s"' % st if st else "",
-                                            f0 or "<f>D%d+IF(ISBLANK(E%d),0,E%d)</f>" % (r, r, r), total))
-                    data = xml.encode("utf-8")
-                zout.writestr(info, data)
-            if not found:
-                raise Exception("sheet not found: " + sheet)
-
-
-def simple_workbook(out_path, totals):
-    """لو مفيش قالب: إكسيل بسيط بنفس ترتيب الصفوف (A اسم الوحدة، D المبلغ، E كاش، F الإجمالي)."""
-    import openpyxl
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.sheet_view.rightToLeft = True
-    for c, h in zip("ABCDEF", ["الوحدة", "", "", "مبلغ الماكينات", "كاش", "الإجمالي"]):
-        ws[c + "1"] = h
-    for r in range(2, 12):
-        ws["A%d" % r] = ROW_NAMES.get(r, "")
-        ws["D%d" % r] = round2(totals.get(r, 0.0))
-        ws["F%d" % r] = "=D%d+IF(ISBLANK(E%d),0,E%d)" % (r, r, r)
-    ws["A12"] = "الإجمالي"
-    ws["D12"] = "=SUM(D2:D11)"
-    ws["E12"] = "=SUM(E2:E11)"
-    ws["F12"] = "=SUM(F2:F11)"
-    wb.save(out_path)
-
-
-def find_template(extra_dirs=()):
-    """قالب الإكسيل: الاسم المضبوط 'الاسكندريه 00.xlsx' الأول، وبعده أي ملف اسمه بينتهي بـ 00.xlsx."""
-    dirs = [d for d in list(extra_dirs) + [BASE_DIR, BUNDLE_DIR] if d and os.path.isdir(d)]
-    for d in dirs:
-        exact = os.path.join(d, "الاسكندريه 00.xlsx")
-        if os.path.exists(exact):
-            return exact
-    for d in dirs:
-        try:
-            names = sorted(os.listdir(d))
-        except Exception:
-            continue
-        for f in names:
-            if f.lower().endswith("00.xlsx") and not f.startswith(("~", ".")):
-                return os.path.join(d, f)
-    return None
-
-
-def build_closing_outputs(items, out_dir, template=None, report_date=None, progress=None):
-    """يكتب: raw_images/N.jpg، PDF مجمّع لكل يوم، الإكسيل، وتقرير نصي. يرجّع dict بالمسارات."""
-    os.makedirs(out_dir, exist_ok=True)
-    raw_dir = os.path.join(out_dir, "raw_images")
-    shutil.rmtree(raw_dir, ignore_errors=True)
-    os.makedirs(raw_dir, exist_ok=True)
-    report_date = report_date or main_date_of(items)
-    items = sorted([i for i in items if not i.skip],
-                   key=lambda r: ((r.order or 99), (r.suffix or 1)))
-    for r in items:
-        if r.order is None:
-            nm = "x_%s" % re.sub(r"[^\w\-]+", "_", r.label)[:40]
-        else:
-            nm = "%d%s" % (r.order, "_%d" % r.suffix if r.suffix else "")
-        r.path = os.path.join(raw_dir, nm + ".jpg")
-        r.image.save(r.path, quality=92)
-    main_items = [r for r in items if r.date is None or r.date == report_date]
-    other = {}
-    for r in items:
-        if r.date is not None and r.date != report_date:
-            other.setdefault(r.date, []).append(r)
-
-    def build_pdf(lst, path):
-        pages = []
-        for r in lst:
-            try:
-                crop = r.crop if r.crop is not None else scan_receipt(r.image)[0]
-            except Exception:
-                crop = r.image
-            r.crop = crop
-            W, H = 1240, 1754
-            page = Image.new("RGB", (W, H), "white")
-            c = crop.copy()
-            c.thumbnail((W - 80, H - 80))
-            page.paste(c, ((W - c.width) // 2, (H - c.height) // 2))
-            pages.append(page)
-        if not pages:
-            return False
-        pages[0].save(path, "PDF", save_all=True, append_images=pages[1:], resolution=150.0)
-        return True
-
-    res = {"report_date": report_date, "pdf": None, "extra_pdfs": [], "xlsx": None, "report": None}
-    rd = report_date.replace(".", ".")
-    pdf_path = os.path.join(out_dir, "الاسكندريه %s.pdf" % rd)
-    if build_pdf(main_items, pdf_path):
-        res["pdf"] = pdf_path
-    for d, lst in other.items():
-        p = os.path.join(out_dir, "الاسكندريه %s.pdf" % d)
-        if build_pdf(lst, p):
-            res["extra_pdfs"].append(p)
-    totals = {r: 0.0 for r in range(2, 12)}
-    for r in main_items:
-        if r.row is not None and r.amount > 0:
-            totals[r.row] = totals.get(r.row, 0.0) + r.amount
-    xlsx = os.path.join(out_dir, "الاسكندريه %s.xlsx" % rd)
-    try:
-        if template and os.path.exists(template):
-            fill_template(template, xlsx, totals)
-        else:
-            simple_workbook(xlsx, totals)
-        res["xlsx"] = xlsx
-    except Exception as e:  # pragma: no cover
-        res["xlsx_error"] = str(e)
-    found = {r.order for r in main_items if r.amount > 0 and r.order}
-    res["missing"] = [i for i in range(1, 20) if i not in found]
-    res["totals"] = totals
-    lines = ["تقرير التقفيل - %s" % rd, "=" * 40]
-    for r in main_items:
-        lines.append("%s | %s | %s | %.2f %s" % (
-            r.order or "-", unit_label(r.tid, r.unit), r.label, r.amount, "" if r.ok else "(راجع)"))
-    lines.append("-" * 40)
-    for row in range(2, 12):
-        lines.append("%s: %.2f" % (ROW_NAMES[row], totals.get(row, 0.0)))
-    lines.append("الإجمالي: %.2f" % sum(totals.values()))
-    if res["missing"]:
-        lines.append("ماكينات ما ظهرش لها باتش: " + "، ".join(str(i) for i in res["missing"]))
-    rp = os.path.join(out_dir, "تقرير التقفيل %s.txt" % rd)
-    with open(rp, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    res["report"] = rp
-    return res
-
-
-def expand_sources(paths, recursive=False):
-    """أي مجموعة مسارات (ملفات أو مجلدات) -> (صور، PDFs). من غير أي افتراض عن الأسماء أو الترتيب."""
-    imgs, pdfs = [], []
-
-    def add(p):
-        low = p.lower()
-        if os.path.basename(p).startswith(("."," ")):
-            return
-        if low.endswith(".pdf"):
-            pdfs.append(p)
-        elif low.endswith(IMG_EXT):
-            imgs.append(p)
-
-    for p in paths:
-        if os.path.isdir(p):
-            if recursive:
-                for dp, _dn, fns in os.walk(p):
-                    for f in fns:
-                        add(os.path.join(dp, f))
-            else:
-                for f in os.listdir(p):
-                    fp = os.path.join(p, f)
-                    if os.path.isfile(fp):
-                        add(fp)
-        elif os.path.isfile(p):
-            add(p)
-    return sorted(set(imgs)), sorted(set(pdfs))
-
-
-def process_closing(img_paths, pdf_paths, workdir, progress=None, stop=lambda: False, fixes=None):
-    """يقرا كل الصور وصفحات الـ PDF ويرجّع (items, excluded_payment, warnings)."""
-    fixes = fixes or {}
-    ok, msg = ocr_ready()
-    if not ok:
-        raise OcrUnavailable(msg)
-    todo = []     # (label, key, loader)
-    for p in img_paths:
-        todo.append(("%s" % os.path.basename(p), "%s:%d" % (os.path.basename(p), os.path.getsize(p)),
-                     (lambda p=p: load_image(p))))
-    for pdf in pdf_paths:
-        if stop():
-            break
-        if progress:
-            progress(0.0, "تحويل صفحات: %s" % os.path.basename(pdf))
-        pages = pdf_to_images(pdf, os.path.join(workdir, "pdf"), dpi=220)
-        for i, pg in enumerate(pages, 1):
-            todo.append(("%s (ص%d)" % (os.path.basename(pdf), i), "%s:p%d:%d" % (
-                os.path.basename(pdf), i, os.path.getsize(pdf)), (lambda pg=pg: load_image(pg))))
-    raw, excluded, warnings = [], [], []
-    for n, (label, key, loader) in enumerate(todo):
-        if stop():
-            break
-        if progress:
-            progress(n / float(max(1, len(todo))) * 0.9, "قراءة %d من %d: %s" % (n + 1, len(todo), label))
-        try:
-            res = analyze_image(loader())
-        except OcrUnavailable:
-            raise
-        except Exception as e:
-            warnings.append("%s: فشلت القراءة (%s)" % (label, e))
-            continue
-        if res["kind"] == "payment":
-            excluded.append(label)
-            continue
-        if res["kind"] != "batch":
-            continue
-        a = res["analysis"]
-        it = Item(label, res["image"])
-        it.crop = res.get("crop")
-        it.key = key
-        it.tid, it.row, it.unit, it.how = a.tid, a.row, a.unit, a.how
-        it.order = TERMINALS[a.tid].order if a.tid else None
-        it.amount, it.date, it.ok, it.batches, it.alt = a.val, a.date, a.ok, a.batches, res["alt"]
-        it.txn = getattr(a, "txn", None)
-        fx = fixes.get(key)
-        if isinstance(fx, dict):
-            v, ft = fx.get("val"), fx.get("tid")
-            if isinstance(v, (int, float)) and v > 0:
-                it.amount, it.batches = round2(v), [round2(v)]
-            if ft in TERMINALS:
-                info = TERMINALS[ft]
-                it.tid, it.order, it.row, it.unit = ft, info.order, info.row, info.unit
-            it.ok, it.alt, it.how = True, None, "manual"
-        it.det = (it.tid, it.order, it.row, it.unit, it.how)
-        raw.append(it)
-    if excluded:
-        warnings.append("اتجاهلت %d صورة إيصال دفع أو مستند (مش باتش كلوز): %s%s" % (
-            len(excluded), "، ".join(excluded[:8]), " ..." if len(excluded) > 8 else ""))
-    kept = assign_numbers(raw, warnings) if raw else []
-    return kept, excluded, warnings, raw
-
-
-# ───────────────────────── تشغيل من سطر الأوامر للاختبار ─────────────────────────
-if __name__ == "__main__":  # pragma: no cover
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "closing":
-        imgs, pdfs = expand_sources(sys.argv[2:])
-        wd = tempfile.mkdtemp()
-        items, ex, warns, _raw = process_closing(imgs, pdfs, wd, progress=lambda f, m: print("..", m))
-        for r in items:
-            print(r.label, "| tid", r.tid, "| order", r.order, "| amount", r.amount, "| ok", r.ok,
-                  "| alt", r.alt, "| how", r.how, "| date", r.date, "| batches", r.batches)
-        print("excluded:", ex)
-        print("warnings:", warns)
-    elif cmd == "payments":
-        wd = tempfile.mkdtemp()
-        for p in sys.argv[2:]:
-            r = identify_payment_pdf(p, wd, progress=lambda m: print("..", m))
-            count_payment_pdf(r, wd, progress=lambda m: print("..", m))
-            print(r.name, "pages", r.pages, "count", r.count, "tid", r.tid, "votes", r.votes, "day", r.day, r.month,
-                  "seq", r.seq_min, r.seq_max, "missing", len(r.seq_missing), "ok", r.ok)
-            if r.tid:
-                print("name:", machine_new_name(TERMINALS[r.tid], r.day or "?", r.month or "?"))
-            print("notes:", r.notes)
-'''
-
-_A2R_POS_TOOLS_SRC = r'''# -*- coding: utf-8 -*-
-"""
-A2R POS Tools  (v4.50)
-زرّين للمشرف فقط: "التقفيل" و"إيصالات الدفع".
-- كل زر بيطلب باسورد مستقل (مختلف عن باسورد المشرف) في كل مرة.
-- مفيش واتساب: كل مرة بتختار مجلد أو ملفات (صور / PDF) مرتبة أو مش مرتبة.
-"""
-import os
-import sys
-import re
-import json
-import time
-import hmac
-import queue
-import shutil
-import hashlib
-import logging
-import tempfile
-import threading
-import datetime
-import subprocess
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-
-import customtkinter as ctk
-
-import a2r_pos_engine as E
-
-TOOLS_VERSION = "v60"
-
-# باسورد الفكرتين: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مش نص صريح، ومنفصل تماماً عن باسورد المشرف.
-_PW_SALT = "684cb086e29d8d07046fc249108085fc"
-_PW_HASH = "0e8d736a1037c8dc5297dd2be3bba6af0793f7a98ebe0cabc578d8d6ce89fe48"
-_PW_ITER = 200000
-
-_FAILS = 0
-_LOCKS = 0
-_LOCKED_UNTIL = 0.0
-
-
-def verify_pos_password(pw):
-    """حساس لحالة الحروف (من غير lower/strip)."""
-    h = hashlib.pbkdf2_hmac("sha256", (pw or "").encode("utf-8"), _PW_SALT.encode("utf-8"), _PW_ITER).hex()
-    return hmac.compare_digest(h, _PW_HASH)
-
-
-def _lock_remaining():
-    return max(0, int(_LOCKED_UNTIL - time.time() + 0.999))
-
-
-def _register_fail():
-    global _FAILS, _LOCKS, _LOCKED_UNTIL
-    _FAILS += 1
-    try:
-        logging.warning("POS tools: wrong password attempt #%d", _FAILS)
-    except Exception:
-        pass
-    if _FAILS >= 3:
-        _FAILS = 0
-        _LOCKS += 1
-        _LOCKED_UNTIL = time.time() + min(600, 30 * (2 ** (_LOCKS - 1)))
-
-
-def _register_ok():
-    global _FAILS, _LOCKS, _LOCKED_UNTIL
-    _FAILS = _LOCKS = 0
-    _LOCKED_UNTIL = 0.0
-
-
-# ───────────────────────── ثيم وأدوات مساعدة ─────────────────────────
-_DEFAULT = {"bg": "#080E17", "card": "#121E2E", "border": "#1E2E42", "input": "#0A131F", "text": "#FFFFFF",
-            "muted": "#8FA3B8", "primary": "#0284C7", "hover": "#0369A1", "success": "#10B981",
-            "danger": "#EF4444", "warning": "#F59E0B", "accent": "#38BDF8"}
-
-
-def _theme(parent):
-    t = dict(_DEFAULT)
-    try:
-        main = sys.modules.get("__main__")
-        themes = getattr(main, "THEMES", None)
-        cur = themes.get(getattr(parent, "current_theme_name", ""), None) if themes else None
-        if cur:
-            t.update({"bg": cur["bg"], "card": cur["card"], "border": cur["border"], "input": cur["input"],
-                      "text": cur["text"], "muted": cur["text_muted"], "primary": cur["primary"],
-                      "hover": cur["primary_hover"], "success": cur["success"], "danger": cur["danger"],
-                      "warning": cur["warning"], "accent": cur["accent"]})
-    except Exception:
-        pass
-    return t
-
-
-def _font():
-    return getattr(sys.modules.get("__main__"), "FONT_FAMILY", "Segoe UI")
-
-
-# ألوان الأزرار: غامقة عشان الكتابة البيضا تبان (الأخضر الفسفوري كان بيخفي الكلام)
-_GREEN, _GREEN_H = "#15803D", "#166534"
-_AMBER, _AMBER_H = "#B45309", "#92400E"
-_SLATE, _SLATE_H = "#334155", "#1E293B"
-
-
-def _icon(win):
-    try:
-        f = getattr(sys.modules.get("__main__"), "set_window_icon_safe", None)
-        if f:
-            f(win)
-    except Exception:
-        pass
-
-
-def _documents_dir():
-    d = getattr(sys.modules.get("__main__"), "DOCUMENTS_DIR", None)
-    if not d:
-        d = os.path.join(os.path.expanduser("~"), "Documents", "A2R_Reports")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _appdata_dir():
-    d = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "A2R")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _open_path(p):
-    try:
-        if not p or not os.path.exists(p):
-            messagebox.showinfo("A2R", "الملف أو المكان ده مش موجود.")
-            return
-        if sys.platform == "win32":
-            os.startfile(p)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", p])
-        else:
-            subprocess.Popen(["xdg-open", p])
-    except Exception as e:
-        messagebox.showerror("A2R", str(e))
-
-
-def _lang():
-    return getattr(sys.modules.get("__main__"), "CURRENT_LANG", "en")
-
-
-def _L(ar, en):
-    return ar if _lang() == "ar" else en
-
-
-def _settings_path():
-    return os.path.join(_appdata_dir(), "pos_settings.json")
-
-
-def _load_settings():
-    try:
-        with open(_settings_path(), "r", encoding="utf-8") as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_setting(k, v):
-    try:
-        d = _load_settings()
-        d[k] = v
-        with open(_settings_path(), "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=1)
-    except Exception:
-        pass
-
-
-def _reveal(p):
-    """يفتح مكان الملف في الإكسبلورر ويحدد الملف (أو يفتح الفولدر لو الملف مش موجود)."""
-    try:
-        if p and os.path.isfile(p) and sys.platform == "win32":
-            subprocess.Popen(["explorer", "/select," + os.path.normpath(p)])
-        elif p and os.path.isdir(p):
-            _open_path(p)
-        elif p and os.path.isdir(os.path.dirname(p)):
-            _open_path(os.path.dirname(p))
-        else:
-            messagebox.showinfo("A2R", "المكان ده لسه مش موجود.")
-    except Exception as e:
-        messagebox.showerror("A2R", str(e))
-
-
-def _newest(folder, ext):
-    try:
-        c = [os.path.join(folder, f) for f in os.listdir(folder)
-             if f.lower().endswith(ext) and not f.startswith("~")]
-        return max(c, key=os.path.getmtime) if c else None
-    except Exception:
-        return None
-
-
-def _fixes_path():
-    return os.path.join(_appdata_dir(), "pos_fixes.json")
-
-
-def _load_fixes():
-    try:
-        with open(_fixes_path(), "r", encoding="utf-8") as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_fix(key, tid, val):
-    if not key:
-        return
-    d = _load_fixes()
-    d[key] = {"val": val, "tid": tid}
-    try:
-        with open(_fixes_path(), "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-def _terminal_choices():
-    return ["— غير محدد —"] + [E.terminal_label(k) for k, _ in sorted(E.TERMINALS.items(), key=lambda kv: kv[1].order)]
-
-
-def _tid_from_choice(s):
-    m = re.search(r"\((\d{8})\)", s or "")
-    return m.group(1) if m else None
-
-
-def _style_tree(theme):
-    st = ttk.Style()
-    name = "A2RPos.Treeview"
-    st.configure(name, background=theme["card"], fieldbackground=theme["card"], foreground=theme["text"],
-                 rowheight=26, borderwidth=0, font=(_font(), 10))
-    st.configure(name + ".Heading", font=(_font(), 10, "bold"))
-    st.map(name, background=[("selected", theme["primary"])], foreground=[("selected", "#FFFFFF")])
-    return name
-
-
-class _Modal(ctk.CTkToplevel):
-    def __init__(self, parent, title, w, h):
-        super().__init__(parent)
-        self.title(title)
-        self.resizable(False, False)
-        _icon(self)
-        self.t = _theme(parent)
-        self.configure(fg_color=self.t["bg"])
-        try:
-            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-            self.geometry("%dx%d+%d+%d" % (w, h, (sw - w) // 2, (sh - h) // 3))
-        except Exception:
-            pass
-        try:
-            self.transient(parent)
-        except Exception:
-            pass
-        self.after(120, self._grab)
-
-    def _grab(self):
-        try:
-            self.grab_set()
-            self.focus_force()
-        except Exception:
-            pass
-
-
-# ───────────────────────── نافذة الباسورد ─────────────────────────
-class PosPasswordDialog(_Modal):
-    def __init__(self, parent, feature_title, on_success):
-        super().__init__(parent, "A2R - صلاحية المشرف", 380, 230)
-        self.on_success = on_success
-        t, F = self.t, _font()
-        ctk.CTkLabel(self, text="🔐 " + feature_title, font=(F, 15, "bold"), text_color=t["accent"]).pack(pady=(14, 2))
-        ctk.CTkLabel(self, text="اكتب كلمة المرور الخاصة بالأدوات", font=(F, 10, "bold"),
-                     text_color=t["muted"]).pack(pady=(0, 8))
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=26)
-        self.e = ctk.CTkEntry(row, show="•", justify="center", font=(F, 13, "bold"), fg_color=t["input"],
-                              border_color=t["border"], text_color=t["text"])
-        self.e.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.e.bind("<Return>", lambda ev: self.check())
-        self._vis = False
-        self.eye = ctk.CTkButton(row, text="👁️", width=36, fg_color=t["card"], text_color=t["text"],
-                                 command=self.toggle)
-        self.eye.pack(side="right")
-        self.err = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["danger"], wraplength=330)
-        self.err.pack(pady=(6, 0))
-        ctk.CTkButton(self, text="فتح", font=(F, 12, "bold"), fg_color=t["primary"], hover_color=t["hover"],
-                      command=self.check).pack(fill="x", padx=26, pady=(8, 4))
-        self.after(200, self.e.focus_set)
-        self._tick()
-
-    def toggle(self):
-        self._vis = not self._vis
-        self.e.configure(show="" if self._vis else "•")
-        self.eye.configure(text="🙈" if self._vis else "👁️")
-
-    def _tick(self):
-        try:
-            rem = _lock_remaining()
-            if rem > 0:
-                self.err.configure(text="تم القفل مؤقتاً بسبب محاولات خاطئة. حاول بعد %d ثانية." % rem)
-                self.after(1000, self._tick)
-        except tk.TclError:
-            pass
-
-    def check(self):
-        rem = _lock_remaining()
-        if rem > 0:
-            self._tick()
-            return
-        if verify_pos_password(self.e.get()):
-            _register_ok()
-            cb = self.on_success
-            self.destroy()
-            cb()
-            return
-        _register_fail()
-        self.e.delete(0, "end")
-        try:
-            import winsound
-            winsound.MessageBeep(winsound.MB_ICONHAND)
-        except Exception:
-            pass
-        rem = _lock_remaining()
-        self.err.configure(text=("كلمة المرور غير صحيحة. اتقفل مؤقتاً %d ثانية." % rem) if rem else
-                           "كلمة المرور غير صحيحة!")
-        if rem:
-            self._tick()
-
-
-# ───────────────────────── عامل خلفي ─────────────────────────
-class _Job:
-    def __init__(self, fn):
-        self.q = queue.Queue()
-        self.stop_ev = threading.Event()
-        self.fn = fn
-        self.th = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self):
-        try:
-            self.q.put(("done", self.fn(self)))
-        except E.OcrUnavailable as e:
-            self.q.put(("error", str(e)))
-        except Exception as e:
-            logging.exception("pos job")
-            self.q.put(("error", "%s: %s" % (type(e).__name__, e)))
-
-    def progress(self, frac, text):
-        self.q.put(("progress", frac, text))
-
-    def start(self):
-        self.th.start()
-
-
-class _FeatureWindow(ctk.CTkToplevel):
-    """أساس نافذتي الفكرتين: اختيار المصدر (مجلد أو ملفات) كل مرة، تقدّم، وجدول نتائج."""
-    TITLE = ""
-
-    def __init__(self, parent, w, h):
-        super().__init__(parent)
-        self.parent = parent
-        self.t = _theme(parent)
-        self.F = _font()
-        self.title("A2R - %s  %s" % (self.TITLE, TOOLS_VERSION))
-        _icon(self)
-        self.configure(fg_color=self.t["bg"])
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = min(w, int(sw * 0.86)), min(h, int(sh * 0.80))
-        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 4)))
-        self.minsize(720, 460)
-        self.sources = []
-        self.recursive = tk.BooleanVar(value=False)
-        self.job = None
-        self.workdir = tempfile.mkdtemp(prefix="a2r_pos_")
-        self.protocol("WM_DELETE_WINDOW", self._close)
-
-    def _close(self):
-        if self.job:
-            self.job.stop_ev.set()
-        shutil.rmtree(self.workdir, ignore_errors=True)
-        self.destroy()
-
-    # --- عناصر مشتركة
-    def _btn(self, parent, text, cmd, color=None, w=None, **kw):
-        t = self.t
-        col, hov = color or t["primary"], t["hover"]
-        if col == t["success"]:          # الأخضر الفسفوري بيتبدل بأخضر غامق عشان الكتابة تبان
-            col, hov = _GREEN, _GREEN_H
-        elif col == t["warning"]:        # نفس الفكرة للأصفر/البرتقالي
-            col, hov = _AMBER, _AMBER_H
-        elif col == t["card"]:           # الأزرار العادية: رمادي-أزرق واضح على الخلفية
-            col, hov = _SLATE, _SLATE_H
-        kw.setdefault("height", 32)
-        return ctk.CTkButton(parent, text=text, command=cmd, font=(self.F, 11, "bold"),
-                             fg_color=col, hover_color=hov, text_color="#FFFFFF",
-                             text_color_disabled="#CBD5E1", width=w or 120, **kw)
-
-    def _build_source_bar(self, parent):
-        t, F = self.t, self.F
-        bar = ctk.CTkFrame(parent, fg_color=t["card"], border_color=t["border"], border_width=1)
-        bar.pack(fill="x", padx=12, pady=(8, 4))
-        r = ctk.CTkFrame(bar, fg_color="transparent")
-        r.pack(fill="x", padx=8, pady=6)
-        self._btn(r, "📁 اختيار مجلد", self.pick_folder, w=125).pack(side="right", padx=4)
-        self._btn(r, "🗂️ اختيار ملفات", self.pick_files, w=125).pack(side="right", padx=4)
-        ctk.CTkCheckBox(r, text="يشمل المجلدات الفرعية", variable=self.recursive, font=(F, 10),
-                        text_color=t["text"]).pack(side="right", padx=10)
-        self.lbl_src = ctk.CTkLabel(r, text="لم يتم اختيار مصدر بعد", font=(F, 11, "bold"),
-                                    text_color=t["muted"], anchor="w", justify="left")
-        self.lbl_src.pack(side="left", fill="x", expand=True)
-
-    def _src_summary(self):
-        imgs, pdfs = E.expand_sources(self.sources, self.recursive.get())
-        self._imgs, self._pdfs = imgs, pdfs
-        self.lbl_src.configure(
-            text="%d صورة + %d ملف PDF" % (len(imgs), len(pdfs)) + ("" if (imgs or pdfs) else "  ⚠️ مفيش حاجة مناسبة"),
-            text_color=self.t["success"] if (imgs or pdfs) else self.t["warning"])
-
-    def pick_folder(self):
-        d = filedialog.askdirectory(parent=self, title="اختار المجلد اللي فيه الصور أو ملفات PDF")
-        if d:
-            self.sources = [d]
-            self._src_summary()
-
-    def pick_files(self):
-        fs = filedialog.askopenfilenames(
-            parent=self, title="اختار صور أو ملفات PDF",
-            filetypes=[("صور و PDF", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf"),
-                       ("صور", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff"), ("PDF", "*.pdf"),
-                       ("كل الملفات", "*.*")])
-        if fs:
-            self.sources = list(fs)
-            self._src_summary()
-
-    def _build_progress(self, parent):
-        t, F = self.t, self.F
-        fr = ctk.CTkFrame(parent, fg_color="transparent")
-        fr.pack(fill="x", padx=12, pady=2)
-        self.btn_start = self._btn(fr, "▶ بدء القراءة", self.start, color=t["success"], w=130)
-        self.btn_start.pack(side="right", padx=4)
-        self.btn_stop = self._btn(fr, "⏹ إيقاف", self.stop, color=t["danger"], w=85, state="disabled")
-        self.btn_stop.pack(side="right", padx=4)
-        self.bar = ctk.CTkProgressBar(fr, progress_color=t["accent"])
-        self.bar.set(0)
-        self.bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.lbl_status = ctk.CTkLabel(parent, text="", font=(F, 10, "bold"), text_color=t["muted"], anchor="w",
-                                       justify="left", wraplength=700)
-        self.lbl_status.pack(fill="x", padx=14, pady=(0, 2))
-
-    def _tree(self, parent, columns, widths, height=10):
-        name = _style_tree(self.t)
-        fr = ctk.CTkFrame(parent, fg_color="transparent")
-        fr.pack(fill="both", expand=True, padx=12, pady=4)
-        tv = ttk.Treeview(fr, columns=[c for c, _ in columns], show="headings", style=name, height=height,
-                          selectmode="browse")
-        for (cid, title), wd in zip(columns, widths):
-            tv.heading(cid, text=title)
-            tv.column(cid, width=wd, anchor="center", stretch=(cid in ("file", "status", "name")))
-        sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        tv.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        tv.tag_configure("ok", foreground=self.t["success"])
-        tv.tag_configure("warn", foreground=self.t["warning"])
-        tv.tag_configure("skip", foreground=self.t["muted"])
-        return tv
-
-    def stop(self):
-        if self.job:
-            self.job.stop_ev.set()
-            self.lbl_status.configure(text="جاري الإيقاف بعد العملية الحالية...")
-
-    def _set_busy(self, busy):
-        self.btn_start.configure(state="disabled" if busy else "normal")
-        self.btn_stop.configure(state="normal" if busy else "disabled")
-
-    def _run_job(self, fn, on_done):
-        self._set_busy(True)
-        self.bar.set(0)
-        self.job = _Job(fn)
-        self.job.start()
-        self._poll(on_done)
-
-    def _poll(self, on_done):
-        job = self.job
-        try:
-            while True:
-                m = job.q.get_nowait()
-                if m[0] == "progress":
-                    self.bar.set(max(0.0, min(1.0, m[1])))
-                    self.lbl_status.configure(text=m[2], text_color=self.t["muted"])
-                elif m[0] == "error":
-                    self._set_busy(False)
-                    self.lbl_status.configure(text="⚠️ " + m[1], text_color=self.t["danger"])
-                    messagebox.showerror("A2R", m[1], parent=self)
-                    return
-                else:
-                    self._set_busy(False)
-                    self.bar.set(1)
-                    on_done(m[1])
-                    return
-        except queue.Empty:
-            pass
-        except tk.TclError:
-            return
-        self.after(150, lambda: self._poll(on_done))
-
-    def start(self):
-        raise NotImplementedError
-
-
-# ───────────────────────── التقفيل ─────────────────────────
-class _ReceiptViewer(ctk.CTkToplevel):
-    """نافذة واحدة: عرض الإيصال (زوم بالعجلة أو بالضغط على أي جزء) + تعديل الماكينة والمبلغ."""
-
-    MIN_Z, MAX_Z = 0.1, 8.0
-
-    def __init__(self, parent, item, on_save=None):
-        super().__init__(parent)
-        self.item, self.on_save = item, on_save
-        from PIL import Image as _Img, ImageTk as _ImgTk
-        self._Img, self._ImgTk = _Img, _ImgTk
-        t, F = _theme(parent), _font()
-        self.t = t
-        self.title("A2R - %s" % item.label)
-        _icon(self)
-        self.configure(fg_color=t["bg"])
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        mw, mh = min(760, int(sw * 0.55)), int(sh * 0.86)
-        self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 30))
-        self.minsize(420, 380)
-        info = "%s  |  %s  |  المبلغ المقروء: %s" % (
-            item.label, E.terminal_label(item.tid) if item.tid else "ماكينة غير محددة",
-            "%.2f" % item.amount if item.amount else "—")
-        info_lbl = ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20)
-        info_lbl.pack(pady=(6, 2))
-        self._info_w = mw - 20
-
-        # الصور المتاحة: الإيصال المقصوص + الصورة الكاملة (لو مختلفين)
-        self._srcs = []
-        try:
-            if item.crop is not None:
-                self._srcs.append(("الإيصال", item.crop.copy().convert("RGB")))
-            if item.image is not None and (item.crop is None or item.image.size != item.crop.size):
-                self._srcs.append(("الصورة الكاملة", item.image.copy().convert("RGB")))
-        except Exception:
-            pass
-        self._src_i = 0
-        self._zoom, self._fit, self._ox, self._oy, self._iw, self._ih = 1.0, True, 0, 0, 1, 1
-        self._photo = None
-        self._tot_w = self._tot_h = 1
-
-        tb = ctk.CTkFrame(self, fg_color="transparent")
-        tb.pack(fill="x", padx=8, pady=2)
-        tb.grid_columnconfigure(tuple(range(6)), weight=1, uniform="v")
-
-        def vb(col, text, cmd, color=_SLATE):
-            b = ctk.CTkButton(tb, text=text, command=cmd, height=30, font=(F, 11, "bold"), fg_color=color,
-                              hover_color=_SLATE_H, text_color="#FFFFFF")
-            b.grid(row=0, column=col, padx=2, sticky="ew")
-            return b
-
-        vb(0, "➕ تكبير", lambda: self._step(1.25), "#0369A1")
-        vb(1, "➖ تصغير", lambda: self._step(0.8), "#0369A1")
-        vb(2, "⛶ مناسب", self.fit)
-        vb(3, "1:1 أصلي", lambda: self._set_zoom(1.0))
-        vb(4, "↻ تدوير", self.rotate)
-        self.b_swap = vb(5, "🔀 " + (self._srcs[1][0] if len(self._srcs) > 1 else "—"), self.swap)
-        if len(self._srcs) < 2:
-            self.b_swap.configure(state="disabled")
-        self.lbl_zoom = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["muted"])
-        self.lbl_zoom.pack()
-
-        # --- التعديل (في نفس النافذة)
-        self.lbl_info = info_lbl
-        ed = ctk.CTkFrame(self, fg_color=t["card"], border_color=t["border"], border_width=1)
-        ed.pack(fill="x", padx=8, pady=(2, 4))
-        row = ctk.CTkFrame(ed, fg_color="transparent")
-        row.pack(fill="x", padx=8, pady=6)
-        ctk.CTkButton(row, text="💾 حفظ", width=80, height=30, font=(F, 11, "bold"), fg_color=_GREEN,
-                      hover_color=_GREEN_H, text_color="#FFFFFF", command=self._save).pack(side="left", padx=2)
-        self.e_amt = ctk.CTkEntry(row, justify="center", width=100, font=(F, 12, "bold"))
-        self.e_amt.pack(side="right", padx=4)
-        self.e_amt.insert(0, "%.2f" % item.amount if item.amount else "")
-        ctk.CTkLabel(row, text="المبلغ:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
-        self.cb = ttk.Combobox(row, values=_terminal_choices(), state="readonly", width=26, justify="right")
-        self.cb.pack(side="right", padx=4)
-        cur = E.terminal_label(item.tid) if item.tid else "— غير محدد —"
-        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
-        ctk.CTkLabel(row, text="الماكينة:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
-        self.e_amt.bind("<Return>", lambda e: self._save())
-        self.lbl_msg = ctk.CTkLabel(ed, text="", font=(F, 10, "bold"), text_color=t["danger"])
-        self.lbl_msg.pack(pady=(0, 4))
-
-        fr = tk.Frame(self, bg=t["bg"])
-        fr.pack(fill="both", expand=True, padx=8, pady=(2, 8))
-        fr.grid_rowconfigure(0, weight=1)
-        fr.grid_columnconfigure(0, weight=1)
-        self.cv = tk.Canvas(fr, bg="#0B1220", highlightthickness=0, cursor="fleur")
-        vs = ttk.Scrollbar(fr, orient="vertical", command=self.cv.yview)
-        hs = ttk.Scrollbar(fr, orient="horizontal", command=self.cv.xview)
-        self.cv.configure(xscrollcommand=hs.set, yscrollcommand=vs.set)
-        self.cv.grid(row=0, column=0, sticky="nsew")
-        vs.grid(row=0, column=1, sticky="ns")
-        hs.grid(row=1, column=0, sticky="ew")
-        self._img_id = self.cv.create_image(0, 0, anchor="nw")
-
-        self.cv.bind("<Configure>", lambda e: self._on_resize())
-        self._press = None
-        self._moved = False
-        self.cv.bind("<ButtonPress-1>", self._on_press)
-        self.cv.bind("<B1-Motion>", self._on_drag)
-        self.cv.bind("<ButtonRelease-1>", self._on_release)
-        self.cv.bind("<Button-3>", lambda e: self._set_zoom(self._zoom / 1.6, e.x, e.y))
-        self.cv.bind("<MouseWheel>", self._wheel_zoom)          # العجلة = زوم إن / أوت
-        self.cv.bind("<Button-4>", self._wheel_zoom)            # لينكس
-        self.cv.bind("<Button-5>", self._wheel_zoom)
-        self.cv.bind("<Shift-MouseWheel>", lambda e: self.cv.xview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.bind("<KeyPress-plus>", lambda e: self._step(1.25))
-        self.bind("<KeyPress-equal>", lambda e: self._step(1.25))
-        self.bind("<KeyPress-minus>", lambda e: self._step(0.8))
-        self.bind("<Control-Key-0>", lambda e: self.fit())
-        self.lift()
-        try:
-            self.focus_force()
-        except Exception:
-            pass
-        if not self._srcs:
-            ctk.CTkLabel(self, text="مش قادر أعرض الصورة", text_color=t["danger"]).pack(pady=20)
-        self.after(80, self.fit)
-
-    # --- أدوات
-    def _src(self):
-        return self._srcs[self._src_i][1] if self._srcs else None
-
-    def _max_z(self):
-        im = self._src()
-        if im is None:
-            return self.MAX_Z
-        return max(1.0, min(self.MAX_Z, (30e6 / max(1, im.width * im.height)) ** 0.5))
-
-    def _cw(self):
-        return max(50, self.cv.winfo_width())
-
-    def _ch(self):
-        return max(50, self.cv.winfo_height())
-
-    def _on_resize(self):
-        if self._fit:
-            self.fit()
-        else:
-            self._render()
-
-    def fit(self):
-        im = self._src()
-        if im is None:
-            return
-        z = min(self._cw() / im.width, self._ch() / im.height)
-        self._fit = True
-        self._zoom = max(self.MIN_Z, min(self._max_z(), z))
-        self._render()
-
-    def _step(self, f):
-        self._set_zoom(self._zoom * f)
-
-    def _set_zoom(self, z, ax=None, ay=None):
-        im = self._src()
-        if im is None:
-            return
-        z = max(self.MIN_Z, min(self._max_z(), z))
-        ax = self._cw() / 2 if ax is None else ax
-        ay = self._ch() / 2 if ay is None else ay
-        fx = (self.cv.canvasx(ax) - self._ox) / max(1, self._iw)
-        fy = (self.cv.canvasy(ay) - self._oy) / max(1, self._ih)
-        self._fit = False
-        self._zoom = z
-        self._render()
-        tw, th = self._tot_w, self._tot_h
-        nx = self._ox + fx * self._iw - ax
-        ny = self._oy + fy * self._ih - ay
-        self.cv.xview_moveto(max(0.0, nx) / max(1, tw))
-        self.cv.yview_moveto(max(0.0, ny) / max(1, th))
-
-    def _render(self):
-        im = self._src()
-        if im is None:
-            return
-        w, h = max(1, int(im.width * self._zoom)), max(1, int(im.height * self._zoom))
-        try:
-            res = self._Img.LANCZOS if self._zoom < 1 else self._Img.BICUBIC
-            disp = im.resize((w, h), res)
-            self._photo = self._ImgTk.PhotoImage(disp)
-        except Exception:
-            return
-        self._iw, self._ih = w, h
-        self._tot_w, self._tot_h = max(w, self._cw()), max(h, self._ch())
-        self._ox, self._oy = (self._tot_w - w) // 2, (self._tot_h - h) // 2
-        self.cv.itemconfigure(self._img_id, image=self._photo)
-        self.cv.coords(self._img_id, self._ox, self._oy)
-        self.cv.configure(scrollregion=(0, 0, self._tot_w, self._tot_h))
-        self.lbl_zoom.configure(text="التكبير: %d%%   (عجلة الماوس = زوم • اضغط على أي جزء لتكبيره • كليك يمين = تصغير • اسحب للتحريك)"
-                                % round(self._zoom * 100))
-
-    def _on_press(self, e):
-        self._press, self._moved = (e.x, e.y), False
-        self.cv.scan_mark(e.x, e.y)
-
-    def _on_drag(self, e):
-        if self._press and (abs(e.x - self._press[0]) > 4 or abs(e.y - self._press[1]) > 4):
-            self._moved = True
-        if self._moved:
-            self.cv.scan_dragto(e.x, e.y, gain=1)
-
-    def _on_release(self, e):
-        # ضغطة من غير سحب = تكبير الجزء اللي اتضغط عليه
-        if self._press and not self._moved:
-            self._set_zoom(self._zoom * 1.6, e.x, e.y)
-        self._press = None
-
-    def _wheel_zoom(self, e):
-        up = (getattr(e, "delta", 0) > 0) or getattr(e, "num", 0) == 4
-        self._set_zoom(self._zoom * (1.15 if up else 1 / 1.15), e.x, e.y)
-        return "break"
-
-    def _save(self):
-        tid = _tid_from_choice(self.cb.get())
-        try:
-            amt = float(self.e_amt.get().replace(",", "").strip())
-            if amt <= 0:
-                raise ValueError
-        except ValueError:
-            self.lbl_msg.configure(text="اكتب مبلغ صحيح أكبر من صفر", text_color=self.t["danger"])
-            return
-        amt = E.round2(amt)
-        if self.on_save:
-            self.on_save(self.item, tid, amt)
-        it = self.item
-        self.lbl_info.configure(text="%s  |  %s  |  المبلغ المقروء: %s" % (
-            it.label, E.terminal_label(it.tid) if it.tid else "ماكينة غير محددة",
-            "%.2f" % it.amount if it.amount else "—"))
-        self.lbl_msg.configure(text="✓ تم الحفظ", text_color=self.t["success"])
-
-    def rotate(self):
-        if not self._srcs:
-            return
-        nm, im = self._srcs[self._src_i]
-        self._srcs[self._src_i] = (nm, im.rotate(-90, expand=True))
-        self.fit()
-
-    def swap(self):
-        if len(self._srcs) > 1:
-            self._src_i = (self._src_i + 1) % len(self._srcs)
-            self.b_swap.configure(text="🔀 " + self._srcs[(self._src_i + 1) % len(self._srcs)][0])
-            self.fit()
-
-
-class ClosingWindow(_FeatureWindow):
-    TITLE = "التقفيل"
-
-    def __init__(self, parent):
-        super().__init__(parent, 780, 520)
-        self.minsize(700, 440)
-        t, F = self.t, self.F
-        self.raw_all, self.kept, self.warnings, self.outputs = [], [], [], None
-        _st = _load_settings()
-        self.out_dir = _st.get("closing_out") or os.path.join(_documents_dir(), "Closing")
-        self.template = _st.get("closing_template") if os.path.exists(_st.get("closing_template") or "") else None
-        ctk.CTkLabel(self, text="📑 التقفيل - قراءة باتشات الماكينات", font=(F, 15, "bold"),
-                     text_color=t["accent"]).pack(pady=(8, 0))
-        self._build_source_bar(self)
-        # سطر معلومات بس (الناتج + القالب) - الأزرار بتاعتهم اتشالت، وفتح مكان الملفات من الشريط اللي تحت
-        self.lbl_out = ctk.CTkLabel(self, text="", font=(F, 9), text_color=t["muted"], anchor="w", justify="left",
-                                    wraplength=720)
-        self.lbl_out.pack(fill="x", padx=16, pady=(0, 2))
-        self._refresh_out_label()
-        self._build_progress(self)
-        # الشريط السفلي والملاحظات الأول (side=bottom) عشان الأزرار ماتختفيش في الشاشات الصغيرة
-        bt = ctk.CTkFrame(self, fg_color="transparent")
-        bt.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
-        self.txt = ctk.CTkTextbox(self, height=70, font=(F, 10), fg_color=t["input"], text_color=t["text"])
-        self.txt.pack(side="bottom", fill="x", padx=12, pady=4)
-        self.txt.configure(state="disabled")
-        cols = [("n", "م"), ("file", "الملف"), ("tid", "الماكينة"), ("unit", "الوحدة"), ("amount", "المبلغ"),
-                ("status", "الحالة")]
-        self.tv = self._tree(self, cols, [40, 190, 90, 110, 85, 230], height=6)
-        self.tv.bind("<Double-1>", lambda e: self.view_selected())
-        # أي صف محتاج تأكيد يدوي يظهر بالأحمر (خلفية حمرا فاتحة + كتابة حمرا غامقة)
-        self.tv.tag_configure("err", foreground="#B91C1C", background="#FDE2E2")
-        self.b_view = self._btn(bt, "🔍 عرض وتعديل", self.view_selected, color=t["warning"], w=10)
-        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=10)
-        self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=10)
-        self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=10)
-        self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=10)
-        # صف واحد، أعمدة متساوية، مرتبين من اليمين لليسار
-        bt.grid_columnconfigure(tuple(range(5)), weight=1, uniform="cb")
-        for i, b in enumerate((self.b_view, self.b_rebuild, self.b_folder, self.b_pdf, self.b_xlsx)):
-            b.grid(row=0, column=4 - i, padx=3, sticky="ew")
-
-    def _refresh_out_label(self):
-        tpl = self.template or E.find_template([self.out_dir])
-        self._tpl_eff = tpl
-        self.lbl_out.configure(text="الناتج: %s   |   القالب: %s" % (
-            self.out_dir, tpl if tpl else "مش موجود - هيتعمل إكسيل بسيط بنفس الترتيب"))
-
-    def pick_out(self):
-        d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الناتج")
-        if d:
-            self.out_dir = d
-            _save_setting("closing_out", d)
-            self._refresh_out_label()
-
-    def pick_template(self):
-        f = filedialog.askopenfilename(parent=self, title="اختار قالب الإكسيل (الاسكندريه 00.xlsx)",
-                                       filetypes=[("Excel", "*.xlsx")])
-        if f:
-            self.template = f
-            _save_setting("closing_template", f)
-            self._refresh_out_label()
-
-    def _out_file(self, kind):
-        p = (self.outputs or {}).get(kind)
-        if p and os.path.exists(p):
-            return p
-        return _newest(self.out_dir, ".pdf" if kind == "pdf" else ".xlsx")
-
-    def _open_out(self, kind):
-        p = self._out_file(kind)
-        if not p:
-            messagebox.showinfo("A2R", "لسه ما اتعملش ملف. اضغط «بدء القراءة» الأول.", parent=self)
-            return
-        _open_path(p)
-
-    def show_folder(self):
-        """بيفتح فولدر الملفات اللي اتغيّر اسمها بعد التسمية (raw_images: رقم الماكينة.jpg)."""
-        raw = os.path.join(self.out_dir, "raw_images")
-        if os.path.isdir(raw):
-            _open_path(raw)
-        else:
-            messagebox.showinfo("A2R", "لسه ما فيش ملفات متسمّاة. اضغط «بدء القراءة» الأول.", parent=self)
-
-    def view_selected(self):
-        sel = self.tv.selection()
-        item = self._iid.get(sel[0]) if sel and getattr(self, "_iid", None) else None
-        if item is None:
-            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
-            return
-        try:
-            if getattr(self, "_viewer", None) is not None and self._viewer.winfo_exists():
-                self._viewer.destroy()
-        except Exception:
-            pass
-        self._viewer = _ReceiptViewer(self, item, on_save=self.apply_edit)
-
-    # --- التشغيل
-    def start(self):
-        self._src_summary()
-        if not (self._imgs or self._pdfs):
-            messagebox.showwarning("A2R", "اختار مجلد أو ملفات صور / PDF الأول.", parent=self)
-            return
-        ok, msg = E.ocr_ready()
-        if not ok:
-            messagebox.showerror("A2R", msg, parent=self)
-            return
-        imgs, pdfs, out_dir, tpl = self._imgs, self._pdfs, self.out_dir, self._tpl_eff
-        fixes = _load_fixes()
-        wd = self.workdir
-
-        def job(j):
-            kept, excl, warns, raw = E.process_closing(
-                imgs, pdfs, wd, progress=lambda f, m: j.progress(f, m), stop=j.stop_ev.is_set, fixes=fixes)
-            outs = None
-            if kept and not j.stop_ev.is_set():
-                j.progress(0.93, "بناء ملفات الـ PDF والإكسيل...")
-                outs = E.build_closing_outputs(kept, out_dir, tpl)
-            return kept, warns, raw, outs
-
-        self._run_job(job, self._done)
-
-    def _done(self, res):
-        kept, warns, raw, outs = res
-        self.raw_all, self.kept, self.warnings, self.outputs = raw, kept, warns, outs
-        self._fill()
-        if not raw:
-            self.lbl_status.configure(text="مفيش باتشات اتقرت في المصدر ده.", text_color=self.t["warning"])
-        else:
-            self._status_after_build()
-
-    def _status_after_build(self):
-        o = self.outputs or {}
-        total = sum((o.get("totals") or {}).values())
-        bad = sum(1 for r in self.kept if r.needs_review)
-        msg = "اكتمل: %d باتش" % len(self.kept)
-        if o:
-            msg += " | تقفيل يوم %s | الإجمالي %s ج.م" % (o.get("report_date"), format(total, ",.2f"))
-        if bad:
-            msg += " | ⚠️ %d محتاج مراجعة" % bad
-        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
-
-    def _status_text(self, r):
-        if r.skip:
-            return "مستبعد - مكرر"
-        notes = []
-        if r.amount <= 0:
-            notes.append("المبلغ مش مقروء")
-        elif not r.ok:
-            notes.append("مبلغ غير مؤكد")
-        if r.row is None:
-            notes.append("الوحدة مش معروفة")
-        if r.alt is not None:
-            notes.append("قراءة تانية %.2f" % r.alt)
-        if r.how == "extra-batch":
-            notes.append("باتش إضافي %s" % r.suffix)
-        elif r.how in ("auto-number", "conflict"):
-            notes.append("رقم الماكينة تلقائي")
-        elif r.how == "manual":
-            return "✓ تعديل يدوي"
-        return "⚠️ " + " ، ".join(notes) if notes else "✓ مؤكد"
-
-    def _fill(self):
-        self.tv.delete(*self.tv.get_children())
-        order = sorted(self.raw_all, key=lambda r: ((r.order or 99), (r.suffix or 1), r.label))
-        self._iid = {}
-        for r in order:
-            st = self._status_text(r)
-            tag = "skip" if r.skip else ("err" if (st.startswith("⚠️") or r.needs_review) else "ok")
-            sfx = "_%d" % r.suffix if r.suffix else ""
-            iid = self.tv.insert("", "end", values=(
-                "%s%s" % (r.order or "-", sfx), r.label, r.tid or "—", E.unit_label(r.tid, r.unit),
-                "%.2f" % r.amount if r.amount else "—", st), tags=(tag,))
-            self._iid[iid] = r
-        self.txt.configure(state="normal")
-        self.txt.delete("1.0", "end")
-        lines = list(self.warnings)
-        o = self.outputs or {}
-        if o.get("missing"):
-            lines.append("ماكينات ما ظهرش لها باتش: " + "، ".join(str(i) for i in o["missing"]))
-        if o.get("extra_pdfs"):
-            lines.append("فيه إيصالات بتواريخ تانية: اتعمل لها PDF منفصل ومش داخلة في الإجمالي.")
-        if o.get("xlsx_error"):
-            lines.append("⚠️ فشل الإكسيل: " + o["xlsx_error"])
-        tot = o.get("totals") or {}
-        if tot:
-            lines.insert(0, "الإجماليات: " + " | ".join(
-                "%s %s" % (E.ROW_NAMES[r], format(v, ",.2f")) for r, v in sorted(tot.items()) if v))
-        self.txt.insert("1.0", ("ملاحظات للمراجعة (%d):\n• " % len(lines) + "\n• ".join(lines)) if lines else "مفيش ملاحظات ✓")
-        self.txt.configure(state="disabled")
-
-    def apply_edit(self, item, tid, amt):
-        if tid in E.TERMINALS:
-            i = E.TERMINALS[tid]
-            item.det = (tid, i.order, i.row, i.unit, "manual")
-        else:
-            item.det = (None, None, None, None, "manual")
-        item.amount, item.batches, item.ok, item.alt, item.how = amt, [amt], True, None, "manual"
-        _save_fix(item.key, tid, amt)
-        self.kept, self.warnings = E.renumber(self.raw_all)
-        self.outputs = dict(self.outputs or {})
-        self._fill()
-        self.lbl_status.configure(text="اتعدّل. اضغط «إعادة بناء» عشان الـ PDF والإكسيل يتحدّثوا.",
-                                  text_color=self.t["warning"])
-
-    def rebuild(self):
-        if not self.kept:
-            return
-        kept, out_dir, tpl = self.kept, self.out_dir, self._tpl_eff
-
-        def job(j):
-            j.progress(0.3, "بناء ملفات الـ PDF والإكسيل...")
-            return E.build_closing_outputs(kept, out_dir, tpl)
-
-        def done(outs):
-            self.outputs = outs
-            self._fill()
-            self._status_after_build()
-
-        self._run_job(job, done)
-
-
-# ───────────────────────── إيصالات الدفع ─────────────────────────
-class _EditPayDialog(_Modal):
-    """تحديد/تعديل ملف إيصالات: الماكينة واليوم والشهر والعدد + \"الصح\" (عدد الباتش) لو عايز تكتبه بإيدك."""
-
-    def __init__(self, parent, r, on_ok):
-        super().__init__(parent, "تحديد / تعديل ملف إيصالات", 500, 390)
-        t, F = self.t, _font()
-        self.on_ok = on_ok
-        ctk.CTkLabel(self, text=r.name, font=(F, 11, "bold"), text_color=t["accent"], wraplength=460).pack(pady=(12, 6))
-        fr = ctk.CTkFrame(self, fg_color="transparent")
-        fr.pack(fill="x", padx=20)
-        rows = [("الماكينة:", None), ("اليوم:", r.day), ("الشهر:", r.month),
-                ("عدد الإيصالات:", r.count if r.count >= 0 else ""),
-                ("الصح (عدد الباتش) - اختياري:", r.expected)]
-        ctk.CTkLabel(fr, text=rows[0][0], font=(F, 11, "bold"), text_color=t["text"]).grid(row=0, column=1, sticky="e", pady=4)
-        self.cb = ttk.Combobox(fr, values=_terminal_choices(), state="readonly", width=38, justify="right")
-        self.cb.grid(row=0, column=0, padx=8, pady=4)
-        cur = E.terminal_label(r.tid) if r.tid else "— غير محدد —"
-        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
-        self.ents = []
-        for i, (lbl, val) in enumerate(rows[1:], 1):
-            ctk.CTkLabel(fr, text=lbl, font=(F, 11, "bold"), text_color=t["text"]).grid(row=i, column=1, sticky="e", pady=4)
-            e = ctk.CTkEntry(fr, justify="center", width=120, font=(F, 12, "bold"))
-            e.grid(row=i, column=0, padx=8, pady=4, sticky="w")
-            e.insert(0, "" if val is None else str(val))
-            self.ents.append(e)
-        ctk.CTkLabel(self, text="لو سيبت العدد فاضي هيتعدّ تاني بالقراءة الآلية.", font=(F, 10),
-                     text_color=t["muted"]).pack()
-        self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
-        self.lbl.pack()
-        ctk.CTkButton(self, text="حفظ وإعادة التسمية", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
-                      text_color="#FFFFFF", command=self.save).pack(fill="x", padx=20, pady=8)
-
-    def save(self):
-        tid = _tid_from_choice(self.cb.get())
-        try:
-            d, m = int(self.ents[0].get()), int(self.ents[1].get())
-            c_raw = self.ents[2].get().strip()
-            c = int(c_raw) if c_raw else None
-            e_raw = self.ents[3].get().strip()
-            ex = int(e_raw) if e_raw else None
-            if not (1 <= d <= 31 and 1 <= m <= 12) or (c is not None and c < 0) or (ex is not None and ex < 0):
-                raise ValueError
-        except ValueError:
-            self.lbl.configure(text="اليوم 1-31 والشهر 1-12 والأعداد أرقام صحيحة")
-            return
-        if tid not in E.TERMINALS:
-            self.lbl.configure(text="اختار الماكينة")
-            return
-        cb = self.on_ok
-        self.destroy()
-        cb(tid, str(d), str(m), c, ex)
-
-
-# ───────────── حفظ حالة إيصالات الدفع (علشان لو البرنامج اتقفل يكمّل من مكانه) ─────────────
-_PAY_KEYS = ("src", "size", "name", "pages", "count", "tid", "day", "month", "new_name", "out_path",
-             "id_notes", "cnt_notes", "id_ok", "cnt_ok", "detail", "verdict", "expected", "votes",
-             "alt_tids", "seq_min", "seq_max", "seq_missing", "other_day")
-
-
-def _pay_state_path():
-    return os.path.join(_appdata_dir(), "pos_payments_state.json")
-
-
-def _pay_save(results):
-    try:
-        data = [{k: getattr(r, k) for k in _PAY_KEYS} for r in list(results)]
-        tmp = _pay_state_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, _pay_state_path())
-    except Exception:
-        logging.exception("pay state save")
-
-
-def _pay_load():
-    out = []
-    try:
-        with open(_pay_state_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return out
-    for d in data if isinstance(data, list) else []:
-        try:
-            if not isinstance(d, dict) or not d.get("src"):
-                continue
-            r = E.PayResult(d["src"])
-            for k in _PAY_KEYS:
-                if k in d:
-                    setattr(r, k, d[k])
-            out.append(r)
-        except Exception:
-            continue
-    return out
-
-
-class _PayOverview(_Modal):
-    """ملخص الماكينات: كل ماكينة (1-19) جاب ليها ملف ولا لأ، وعددها مقارنة بالباتش."""
-
-    def __init__(self, parent, results):
-        super().__init__(parent, "ملخص ماكينات إيصالات الدفع", 820, 560)
-        t, F = self.t, _font()
-        self.resizable(True, True)
-        by = {}
-        for r in results:
-            if not r.excluded and r.order != 99:
-                by.setdefault(r.order, []).append(r)
-        miss = [n for n in range(1, 20) if n not in by]
-        total = sum(r.count for rs in by.values() for r in rs if r.count > 0)
-        pend = sum(1 for rs in by.values() for r in rs if r.pending)
-        bad = sum(1 for rs in by.values() for r in rs if r.count >= 0 and not r.ok)
-        ctk.CTkLabel(self, text="📊 ملخص الماكينات", font=(F, 15, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
-        ctk.CTkLabel(self, text="إجمالي الإيصالات: %d  |  ماكينات ناقصة: %d  |  لسه ما اتعدّتش: %d  |  محتاج مراجعة: %d"
-                     % (total, len(miss), pend, bad), font=(F, 11, "bold"),
-                     text_color=t["warning"] if (miss or pend or bad) else t["success"]).pack(pady=2)
-        name = _style_tree(t)
-        fr = ctk.CTkFrame(self, fg_color="transparent")
-        fr.pack(fill="both", expand=True, padx=12, pady=6)
-        cols = ("n", "unit", "file", "count", "batch", "diff", "status")
-        heads = ("م", "الوحدة", "الملف", "العدد", "الباتش", "الفرق", "الحالة")
-        wid = (40, 150, 200, 70, 70, 90, 150)
-        tv = ttk.Treeview(fr, columns=cols, show="headings", style=name, height=19, selectmode="browse")
-        for c, h, w in zip(cols, heads, wid):
-            tv.heading(c, text=h)
-            tv.column(c, width=w, anchor="center", stretch=(c in ("file", "status")))
-        sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
-        tv.configure(yscrollcommand=sb.set)
-        tv.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        tv.tag_configure("ok", foreground=t["success"])
-        tv.tag_configure("warn", foreground=t["warning"])
-        tv.tag_configure("bad", foreground=t["danger"])
-        dash = "—"
-        for n in range(1, 20):
-            info = E.TERMINALS[E.NUM_TO_TID[n]]
-            rs = sorted(by.get(n, []), key=lambda x: x.new_name or x.name)
-            if not rs:
-                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), dash, dash, dash, dash, "ناقصة - مفيش ملف"),
-                          tags=("bad",))
-                continue
-            for r in rs:
-                b, d = E.batch_of(r), E.batch_diff(r)
-                st, tag = E.pay_status(r)
-                if tag == "ok" and E.batch_match(r) is False:
-                    tag = "warn"
-                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), r.new_name or r.name,
-                                             r.count if r.count >= 0 else dash, b if b is not None else dash,
-                                             E.diff_text(d) if d is not None else dash, st), tags=(tag,))
-
-
-class PaymentsWindow(_FeatureWindow):
-    TITLE = "إيصالات الدفع"
-
-    def __init__(self, parent):
-        super().__init__(parent, 1120, 720)
-        t, F = self.t, self.F
-        st = _load_settings()
-        self.dest = st.get("pay_dest") or os.path.join(_documents_dir(), "وحدات")
-        self.fast = tk.BooleanVar(value=bool(st.get("pay_fast", True)))
-        self.skip_done = tk.BooleanVar(value=bool(st.get("pay_skip_done", True)))
-        self.results = _pay_load()
-        self._iid = {}
-        ctk.CTkLabel(self, text="🧾 إيصالات الدفع", font=(F, 16, "bold"), text_color=t["accent"]).pack(pady=(10, 0))
-        self._build_source_bar(self)
-        fr = ctk.CTkFrame(self, fg_color="transparent")
-        fr.pack(fill="x", padx=12, pady=2)
-        self._btn(fr, "📂 فتح فولدر الملفات المسمّاة", self.open_dest, color=t["card"], w=230).pack(side="right", padx=4)
-        self._btn(fr, "✏️ تغيير المكان", self.pick_dest, color=t["card"], w=130).pack(side="right", padx=4)
-        self.lbl_dest = ctk.CTkLabel(fr, text="الناتج: " + self.dest, font=(F, 10), text_color=t["muted"], anchor="w")
-        self.lbl_dest.pack(side="left", fill="x", expand=True)
-        self._build_progress(self)
-        # خطّين: ① إعادة التسمية  ② العد
-        self.btn_start.configure(text="① فحص وإعادة تسمية", width=160)
-        self.btn_count = self._btn(self.btn_start.master, "② عدّ الإيصالات", self.start_count, color=t["warning"], w=150,
-                                   state="disabled")
-        self.btn_count.pack(side="right", padx=4)
-        opt = ctk.CTkFrame(self, fg_color="transparent")
-        opt.pack(fill="x", padx=12, pady=(0, 2))
-        ctk.CTkCheckBox(opt, text="عدّ سريع (قراءة كل صفحة مرة واحدة من الصورة الأصلية)", variable=self.fast, font=(F, 10),
-                        text_color=t["text"], command=lambda: _save_setting("pay_fast", bool(self.fast.get()))
-                        ).pack(side="right", padx=8)
-        ctk.CTkCheckBox(opt, text="تخطّي الملفات اللي اتفحصت قبل كده", variable=self.skip_done, font=(F, 10),
-                        text_color=t["text"], command=lambda: _save_setting("pay_skip_done", bool(self.skip_done.get()))
-                        ).pack(side="right", padx=8)
-        cols = [("n", "م"), ("file", "الملف الأصلي"), ("unit", "الماكينة"), ("pages", "صفحات"), ("count", "العدد"),
-                ("batch", "الباتش"), ("diff", "الفرق"), ("day", "اليوم"), ("name", "الاسم الجديد"), ("status", "الحالة")]
-        self.tv = self._tree(self, cols, [34, 160, 150, 55, 60, 60, 80, 55, 190, 110], height=10)
-        self.tv.tag_configure("bad", foreground=t["danger"])
-        self.tv.bind("<<TreeviewSelect>>", lambda e: self._show_notes())
-        self.tv.bind("<Double-1>", lambda e: self.open_selected())   # دبل كليك = فتح الـ PDF
-        self.txt = ctk.CTkTextbox(self, height=130, font=(F, 10), fg_color=t["input"], text_color=t["text"], wrap="word")
-        self.txt.pack(fill="x", padx=12, pady=4)
-        self.txt.configure(state="disabled")
-        self.lbl_total = ctk.CTkLabel(self, text="", font=(F, 11, "bold"), text_color=t["text"])
-        self.lbl_total.pack(fill="x", padx=14)
-        bt = ctk.CTkFrame(self, fg_color="transparent")
-        bt.pack(fill="x", padx=12, pady=(2, 10))
-        for txt, cmd, col, w in (("🗑 مسح الكل", self.clear_all, t["danger"], 100),
-                                 ("💾 تقرير TXT", self.save_report, t["card"], 110),
-                                 ("📊 ملخص الماكينات", self.open_overview, t["card"], 140),
-                                 ("↻ إعادة عدّ", self.recount_selected, t["card"], 105),
-                                 ("✏️ تحديد/تعديل", self.edit_selected, t["warning"], 120),
-                                 ("الباقي صح", self.mark_rest_ok, t["card"], 95),
-                                 ("✗ غلط", lambda: self.set_verdict(-1), t["danger"], 80),
-                                 ("✓ صح", lambda: self.set_verdict(1), t["success"], 80)):
-            self._btn(bt, txt, cmd, color=col, w=w).pack(side="right", padx=3)
-        if self.results:
-            self._fill()
-            pend = sum(1 for r in self.results if r.pending)
-            self.lbl_status.configure(
-                text=("فيه %d ملف لسه ما اتعدّش. دوس \"② عدّ الإيصالات\" لما تحب." % pend) if pend
-                else "آخر نتيجة: %d ملف." % len(self.results), text_color=self.t["muted"])
-            self.btn_count.configure(state="normal")
-
-    # ---------- عام ----------
-    def _set_busy(self, busy):
-        super()._set_busy(busy)
-        self.btn_count.configure(state="disabled" if (busy or not self.results) else "normal")
-
-    def job_running(self):
-        return str(self.btn_stop.cget("state")) == "normal"
-
-    def open_dest(self):
-        """بيفتح الفولدر اللي فيه الملفات المسمّاة (مش نافذة اختيار)."""
-        try:
-            os.makedirs(self.dest, exist_ok=True)
-        except OSError:
-            pass
-        _open_path(self.dest)
-
-    def pick_dest(self):
-        d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الملفات المسمّاة", initialdir=self.dest)
-        if d:
-            self.dest = d
-            _save_setting("pay_dest", d)
-            self.lbl_dest.configure(text="الناتج: " + self.dest)
-
-    def _selected(self):
-        sel = self.tv.selection()
-        return self._iid.get(sel[0]) if sel else None
-
-    def _sort(self):
-        self.results.sort(key=lambda x: (x.order, x.new_name or x.name))
-
-    # ---------- ① التعريف وإعادة التسمية ----------
-    def start(self):
-        self._src_summary()
-        if not self._pdfs:
-            messagebox.showwarning("A2R", "اختار مجلد أو ملفات PDF الأول (الصور مش بتتحسب في الفكرة دي).", parent=self)
-            return
-        ok, msg = E.pay_ocr_ready()
-        if not ok:
-            messagebox.showerror("A2R", msg, parent=self)
-            return
-        existing = list(self.results)
-        have = set(r.key for r in existing)
-        todo, skipped = [], 0
-        for p in self._pdfs:
-            try:
-                k = "%s:%d" % (os.path.basename(p), os.path.getsize(p))
-            except OSError:
-                continue
-            if self.skip_done.get() and k in have:
-                skipped += 1
-                continue
-            todo.append(p)
-        if not todo:
-            messagebox.showinfo("A2R", "كل الملفات في المصدر ده اتفحصت قبل كده (%d ملف)." % skipped, parent=self)
-            return
-        fast = bool(self.fast.get())
-        dest, wd, ignored = self.dest, self.workdir, len(self._imgs)
-
-        def job(j):
-            newkeys = set("%s:%d" % (os.path.basename(p), os.path.getsize(p)) for p in todo)
-            kept = []
-            for r in existing:
-                if r.key in newkeys:       # بنعيد فحصه: نمسح نسخته المسمّاة القديمة (الأصلي مش بيتمس)
-                    try:
-                        if (r.out_path and os.path.exists(r.out_path) and os.path.abspath(r.out_path) != os.path.abspath(r.src)
-                                and os.path.abspath(r.out_path).startswith(os.path.abspath(dest))):
-                            os.remove(r.out_path)
-                    except OSError:
-                        pass
-                else:
-                    kept.append(r)
-            res = []
-            for i, p in enumerate(todo):
-                if j.stop_ev.is_set():
-                    break
-                base = i / float(len(todo))
-                name = os.path.basename(p)
-                try:
-                    r = E.identify_payment_pdf(
-                        p, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
-                            base, "① ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
-                        stop=j.stop_ev.is_set, fast=fast)
-                except E.OcrUnavailable:
-                    raise
-                except Exception as e:
-                    logging.exception("identify")
-                    r = E.PayResult(p)
-                    r.id_ok = False
-                    r.id_notes.append("فشل التعريف: %s" % str(e).split("\n")[0])
-                res.append(r)
-            allres = kept + res
-            for r in res:
-                if r.pending:               # الملفات الضعيفة (مش إيصال ماكينة) مش بتتسمّى
-                    try:
-                        E.apply_payment_name(allres, r, dest)
-                    except Exception as e:
-                        r.id_ok = False
-                        r.id_notes.append("فشل التسمية: %s" % e)
-            E.resolve_payment_duplicates(allres, dest)
-            E.flag_payment_duplicates(allres)
-            _pay_save(allres)
-            return allres, ignored, skipped
-
-        self._run_job(job, self._done_rename)
-
-    def _done_rename(self, payload):
-        allres, ignored, skipped = payload
-        self.results = allres
-        self._sort()
-        self._fill()
-        named = sum(1 for r in self.results if r.new_name and not r.excluded)
-        bad = sum(1 for r in self.results if not r.ok)
-        msg = "① اكتمل الفحص: %d ملف، %d اتسمّى" % (len(self.results), named)
-        if bad:
-            msg += " | ⚠️ %d محتاج مراجعة" % bad
-        if skipped:
-            msg += " | (اتخطّيت %d اتفحصوا قبل كده)" % skipped
-        if ignored:
-            msg += " | (اتجاهلت %d صورة)" % ignored
-        pend = sum(1 for r in self.results if r.pending)
-        if pend:
-            msg += "  —  دوس \"② عدّ الإيصالات\" لعدّ %d ملف." % pend
-        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
-        self.btn_count.configure(state="normal" if self.results else "disabled")
-
-    # ---------- ② العد ----------
-    def start_count(self):
-        todo = [r for r in self.results if r.pending]
-        if not todo:
-            messagebox.showinfo("A2R", "كل الملفات اتعدّت. اختار ملف ودوس \"↻ إعادة عدّ\" لو عايز تعيد.", parent=self)
-            return
-        ok, msg = E.pay_ocr_ready()
-        if not ok:
-            messagebox.showerror("A2R", msg, parent=self)
-            return
-        fast, dest, wd = bool(self.fast.get()), self.dest, self.workdir
-
-        def job(j):
-            for i, r in enumerate(todo):
-                if j.stop_ev.is_set():
-                    break
-                if r.excluded:
-                    continue
-                base = i / float(len(todo))
-                name = r.new_name or r.name
-                try:
-                    done = E.count_payment_pdf(
-                        r, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
-                            base, "② ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
-                        stop=j.stop_ev.is_set, fast=fast)
-                    if done and r.new_name is None and r.tid and r.day and r.month:
-                        E.apply_payment_name(self.results, r, dest)    # التعريف فشل: نسمّي من نتيجة العد
-                except E.OcrUnavailable:
-                    raise
-                except Exception:
-                    logging.exception("count")
-                    r.count = 0
-                    r.cnt_ok = False
-                    r.cnt_notes.append("فشل العد")
-                _pay_save(self.results)
-            E.flag_payment_duplicates(self.results)
-            _pay_save(self.results)
-            return todo
-
-        self._run_job(job, self._done_count)
-
-    def _done_count(self, _items):
-        self._sort()
-        self._fill()
-        done = [r for r in self.results if r.counted and not r.excluded]
-        n = sum(r.count for r in done)
-        bad = sum(1 for r in self.results if r.counted and not r.ok)
-        pend = sum(1 for r in self.results if r.pending)
-        msg = "② اكتمل العد: %d ملف | إجمالي الإيصالات %d" % (len(done), n)
-        if pend:
-            msg += " | فاضل %d لسه (اتوقف) - دوس ② تاني يكمّل من مكانه" % pend
-        if bad:
-            msg += " | ⚠️ %d محتاج مراجعة" % bad
-        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if (bad or pend) else self.t["success"])
-
-    def recount_selected(self):
-        r = self._selected()
-        if not r:
-            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
-            return
-        if self.job_running():
-            return
-        r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
-        _pay_save(self.results)
-        self._fill()
-        self.start_count()
-
-    # ---------- العرض ----------
-    def _fill(self):
-        keep = None
-        r0 = self._selected()
-        if r0 is not None:
-            keep = r0
-        self.tv.delete(*self.tv.get_children())
-        self._iid = {}
-        dash = "—"
-        sel_iid = None
-        for r in self.results:
-            b, d = E.batch_of(r), E.batch_diff(r)
-            stt, tag = E.pay_status(r)
-            if tag == "ok" and E.batch_match(r) is False:
-                tag = "warn"
-            if r.counted and not r.excluded and E.batch_match(r) is False and r.verdict == 0 and tag != "skip":
-                tag = "warn"
-            iid = self.tv.insert("", "end", values=(
-                r.order if r.order != 99 else "-", r.name, E.terminal_label(r.tid) if r.tid else "غير محدد",
-                r.pages or dash, r.count if r.count >= 0 else dash, b if b is not None else dash,
-                E.diff_text(d) if d is not None else dash, ("%s/%s" % (r.day, r.month)) if r.day else dash,
-                r.new_name or dash, stt), tags=(tag,))
-            self._iid[iid] = r
-            if r is keep:
-                sel_iid = iid
-        if sel_iid:
-            self.tv.selection_set(sel_iid)
-        counted = [r for r in self.results if r.counted and not r.excluded]
-        miss = E.missing_machines(self.results) if self.results else []
-        self.lbl_total.configure(text="إجمالي الإيصالات: %d  |  الملفات: %d  |  اتعدّت: %d  |  لسه: %d  |  محتاج مراجعة: %d  |  ماكينات ناقصة: %d" % (
-            sum(r.count for r in counted), len(self.results), len(counted),
-            sum(1 for r in self.results if r.pending), sum(1 for r in counted if not r.ok), len(miss)))
-        self.btn_count.configure(state="normal" if (self.results and not self.job_running()) else "disabled")
-        self._show_notes()
-
-    def _show_notes(self):
-        r = self._selected()
-        out = []
-        if r:
-            st, _tag = E.pay_status(r)
-            out.append("[%s]  %s" % (st, E.pay_summary(r).replace("\n", "  |  ")))
-            if r.detail:
-                out.append("التفاصيل: " + r.detail)
-            seen = set()
-            for n in r.notes:
-                k = E.note_kind(n)
-                out.append("")
-                out.append("%s %s" % ("🔴" if k[1] == 2 else ("🟠" if k[1] == 1 else "ℹ️"), k[2]))
-                out.append("   • " + n)
-                if k[0] not in seen:
-                    seen.add(k[0])
-                    out.append("   لماذا: " + k[3])
-                    out.append("   الحل: " + k[4])
-            if not r.notes:
-                out.append("\nمفيش ملاحظات ✓")
-        else:
-            lines = []
-            for x in self.results:
-                for n in x.notes:
-                    lines.append("• %s: %s" % (x.name, n))
-            miss = E.missing_machines(self.results) if self.results else []
-            if miss:
-                lines.append("• ماكينات ملهاش ملف: " + " ، ".join(miss))
-            out.append("\n".join(lines) if lines else "اختار ملف لعرض ملاحظاته.")
-        self.txt.configure(state="normal")
-        self.txt.delete("1.0", "end")
-        self.txt.insert("1.0", "\n".join(out))
-        self.txt.configure(state="disabled")
-
-    def open_selected(self):
-        r = self._selected()
-        if r:
-            p = r.out_path if (r.out_path and os.path.exists(r.out_path)) else r.src
-            _open_path(p)
-
-    def open_overview(self):
-        if not self.results:
-            messagebox.showinfo("A2R", "مفيش نتايج لسه.", parent=self)
-            return
-        _PayOverview(self, self.results)
-
-    # ---------- المراجعة: صح / غلط / تعديل ----------
-    def set_verdict(self, v):
-        """صح = يفضل مع ملفات اليوم، غلط = يتشال من العد والفولدر. الضغط تاني بيلغي الاختيار."""
-        r = self._selected()
-        if not r:
-            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
-            return
-        if self.job_running():
-            return
-        nv = 0 if r.verdict == v else v
-        was_ex = r.excluded
-        r.verdict = nv
-        try:
-            op = r.out_path
-            inside = bool(op) and os.path.abspath(op).startswith(os.path.abspath(self.dest)) \
-                and os.path.abspath(op) != os.path.abspath(r.src)
-            if nv < 0 and not was_ex:
-                if inside and os.path.exists(op):
-                    os.remove(op)        # النسخة المسمّاة بس (مش الأصلي أبداً)
-            elif nv >= 0 and was_ex and inside and os.path.exists(r.src) and not os.path.exists(op):
-                os.makedirs(os.path.dirname(op), exist_ok=True)
-                shutil.copy2(r.src, op)
-        except OSError:
-            logging.exception("verdict file")
-        E.flag_payment_duplicates(self.results)
-        _pay_save(self.results)
-        self._fill()
-        # علّمته صح بس البرنامج مش عارف ماكينته: اسأل عليها
-        if nv > 0 and not r.tid:
-            self.edit_selected()
-
-    def mark_rest_ok(self):
-        lst = [r for r in self.results if not r.ok]
-        if not lst:
-            messagebox.showinfo("A2R", "مفيش حاجة محتاجة مراجعة.", parent=self)
-            return
-        if not messagebox.askyesno("A2R", "هتعلّم %d ملف على إنهم صح؟" % len(lst), parent=self):
-            return
-        for r in lst:
-            r.verdict = 1
-        _pay_save(self.results)
-        self._fill()
-
-    def edit_selected(self):
-        r = self._selected()
-        if not r:
-            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
-            return
-        if self.job_running():
-            return
-
-        def ok(tid, d, m, c, ex):
-            r.tid, r.day, r.month = tid, d, m
-            r.expected = ex
-            r.id_ok, r.id_notes = True, []
-            r.verdict = 1
-            if c is None:
-                r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
-            else:
-                r.count, r.cnt_notes, r.cnt_ok, r.detail = c, [], True, "تعديل يدوي"
-            try:
-                E.apply_payment_name(self.results, r, self.dest)
-            except Exception as e:
-                r.id_ok = False
-                r.id_notes.append("فشل التسمية: %s" % e)
-            E.flag_payment_duplicates(self.results)
-            self._sort()
-            _pay_save(self.results)
-            self._fill()
-            if c is None:
-                self.lbl_status.configure(text="اتسمّى. دوس \"② عدّ الإيصالات\" لعدّ إيصالاته.", text_color=self.t["warning"])
-
-        _EditPayDialog(self, r, ok)
-
-    def clear_all(self):
-        if not self.results:
-            return
-        mine = [r for r in self.results if r.out_path]
-        if not messagebox.askyesno(
-                "A2R", "هيتمسح %d ملف مسمّى من:\n%s\n\nوهتتمسح نتيجة الفحص.\n(ملفاتك الأصلية مش هتتمس)" % (len(mine), self.dest),
-                parent=self):
-            return
-        for r in mine:
-            try:
-                p = os.path.abspath(r.out_path)
-                if p.startswith(os.path.abspath(self.dest)) and p != os.path.abspath(r.src) and os.path.exists(p):
-                    os.remove(p)
-            except OSError:
-                pass
-        self.results = []
-        _pay_save(self.results)
-        self._fill()
-        self.lbl_status.configure(text="تم المسح. اختار مصدر وابدأ يوم جديد.", text_color=self.t["muted"])
-
-    def save_report(self):
-        if not self.results:
-            return
-        p = filedialog.asksaveasfilename(parent=self, defaultextension=".txt", filetypes=[("Text", "*.txt")],
-                                         initialfile="تقرير إيصالات الدفع %s.txt" % datetime.date.today().strftime("%d-%m-%Y"))
-        if not p:
-            return
-        lines = ["تقرير إيصالات الدفع", "=" * 44]
-        for r in self.results:
-            st, _t = E.pay_status(r)
-            lines.append("%s | %s | العدد %s | %s | %s" % (
-                E.terminal_label(r.tid) if r.tid else "غير محدد", r.name, r.count if r.count >= 0 else "—",
-                r.new_name or "بدون اسم", st))
-            b, d = E.batch_of(r), E.batch_diff(r)
-            if b is not None and d is not None:
-                lines.append("    الباتش: %d • الفعلي: %d • %s" % (b, r.count, E.diff_text(d)))
-            if r.detail:
-                lines.append("    " + r.detail)
-            lines += ["    - " + n for n in r.notes]
-        miss = E.missing_machines(self.results)
-        if miss:
-            lines += ["-" * 44, "ماكينات ملهاش ملف: " + " ، ".join(miss)]
-        lines.append("-" * 44)
-        lines.append("إجمالي الإيصالات: %d" % sum(r.count for r in self.results if r.count > 0 and not r.excluded))
-        with open(p, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        _open_path(p)
-
-
-# ───────────────────────── النافذة الرئيسية للأدوات + نقطة الدخول ─────────────────────────
-class PosToolsHub(_Modal):
-    def __init__(self, app):
-        super().__init__(app, _L("A2R - أدوات المشرف", "A2R - Supervisor"), 440, 300)
-        self.app = app
-        t, F = self.t, _font()
-        self._wins = {}
-        ctk.CTkLabel(self, text=_L("🛠️ المشرف", "🛠️ Supervisor"), font=(F, 17, "bold"),
-                     text_color=t["accent"]).pack(pady=(14, 2))
-        ctk.CTkLabel(self, text=_L("كل صلاحيات المشرف في مكان واحد", "All supervisor tools in one place"),
-                     font=(F, 10, "bold"), text_color=t["muted"]).pack(pady=(0, 8))
-        g = ctk.CTkFrame(self, fg_color="transparent")
-        g.pack(fill="both", expand=True, padx=20, pady=4)
-        g.grid_columnconfigure((0, 1), weight=1, uniform="a")
-
-        def mk(r, c, text, cmd, color):
-            ctk.CTkButton(g, text=text, height=64, font=(F, 12, "bold"), fg_color=color, hover_color=t["hover"],
-                          command=cmd).grid(row=r, column=c, padx=5, pady=5, sticky="nsew")
-
-        mk(0, 0, _L("📑 التقفيل 🔐", "📑 Closing 🔐"), lambda: self.ask("التقفيل", ClosingWindow), t["primary"])
-        mk(0, 1, _L("🧾 إيصالات الدفع 🔐", "🧾 Payment receipts 🔐"),
-           lambda: self.ask("إيصالات الدفع", PaymentsWindow), t["primary"])
-        mk(1, 0, _L("📊 فتح الإكسيل", "📊 Open Excel"), lambda: self.run_app("open_excel"), "#059669")
-        mk(1, 1, _L("🗂️ سجل الأرشيف", "🗂️ Archive history"), lambda: self.run_app("open_archive_history"), "#7C3AED")
-        ctk.CTkLabel(self, text="A2R %s" % TOOLS_VERSION, font=(F, 9, "bold"), text_color="#64748B").pack(pady=(4, 8))
-
-    def run_app(self, name):
-        fn = getattr(self.app, name, None)
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        self.destroy()
-        if fn:
-            try:
-                fn()
-            except Exception as e:
-                messagebox.showerror("A2R", str(e))
-
-    def ask(self, title, cls):
-        w = self._wins.get(title)
-        try:
-            if w is not None and w.winfo_exists():
-                w.deiconify()
-                w.lift()
-                return
-        except Exception:
-            pass
-
-        def go():
-            win = cls(self.app)
-            self._wins[title] = win
-
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        PosPasswordDialog(self, title, go)
-
-
-_HUB = None
-
-
-def open_pos_tools(app):
-    """بيتنادى من زر المشرف. لو المستخدم مش مشرف بيترفض."""
-    global _HUB
-    if not getattr(app, "is_supervisor", False):
-        messagebox.showwarning("A2R", "هذه الصلاحية متاحة للمشرف فقط!")
-        return
-    try:
-        if _HUB is not None and _HUB.winfo_exists():
-            _HUB.deiconify()
-            _HUB.lift()
-            return
-    except Exception:
-        pass
-    _HUB = PosToolsHub(app)
-
-
-def pos_tools_button_text():
-    return _L("🛠️ المشرف", "🛠️ Supervisor")
-
-
-def refresh_pos_tools_button(app):
-    b = getattr(app, "btn_pos_tools", None)
-    if b is not None:
-        try:
-            b.configure(text=pos_tools_button_text())
-        except Exception:
-            pass
-
-
-def make_pos_tools_button(app, parent, **kw):
-    """بيعمل الزر (من غير ما يحطه). الاسم بيتغير مع لغة البرنامج."""
-    t = _theme(app)
-    btn = ctk.CTkButton(parent, text=pos_tools_button_text(), font=(_font(), 11, "bold"), fg_color=t["primary"],
-                        hover_color=t["hover"], command=lambda: open_pos_tools(app), **kw)
-    app.btn_pos_tools = btn
-    return btn
-'''
-
-POS_TOOLS_ERROR = ""
-try:
-    _a2r_embed("a2r_pos_engine", _A2R_POS_ENGINE_SRC)
-    _a2r_embed("a2r_pos_tools", _A2R_POS_TOOLS_SRC)
-    from a2r_pos_tools import open_pos_tools, make_pos_tools_button, refresh_pos_tools_button
-    POS_TOOLS_AVAILABLE = True
-except Exception as _pos_exc:
-    POS_TOOLS_AVAILABLE = False
-    POS_TOOLS_ERROR = repr(_pos_exc)
-    try:
-        logging.error("POS tools failed to load: %s", POS_TOOLS_ERROR)
-    except Exception as _e:
-        _log_silent("module#1", _e)
 ctk.set_appearance_mode("Dark")
+try:
+    _tm = ctk.ThemeManager.theme
+    for _w, _r in (("CTkButton", 10), ("CTkEntry", 9), ("CTkComboBox", 9), ("CTkOptionMenu", 9), ("CTkFrame", 14)):
+        if _w in _tm and "corner_radius" in _tm[_w]: _tm[_w]["corner_radius"] = _r
+    _tm["CTkButton"]["border_width"] = 0
+except Exception:
+    pass
 
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = sys._MEIPASS
@@ -4291,28 +198,6 @@ def setup_windows_autostart():
         winreg.CloseKey(key)
     except Exception as _e:
         _log_silent("setup_windows_autostart#1", _e)
-def configure_printer_57x90_silent():
-    if sys.platform != "win32":
-        return False, "Windows required"
-    ps_cmd = (
-        "$p = Get-CimInstance Win32_Printer | Where-Object { $_.Default -eq $true }; "
-        "if ($p) { "
-        "  $n = $p.Name; "
-        "  try { "
-        "    Set-PrintConfiguration -PrinterName $n -PaperSize Custom -ErrorAction SilentlyContinue; "
-        "  } catch {} "
-        "} "
-    )
-    try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            timeout=8
-        )
-        return True, "Success"
-    except Exception as e:
-        return False, str(e)
-
 DEFAULT_RECEIPTS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "A2R_Reports")
 os.makedirs(DOCUMENTS_DIR, exist_ok=True)
@@ -4341,6 +226,8 @@ def _fmt_mm(v):
     v = float(v)
     return str(int(v)) if v == int(v) else f"{v:g}"
 
+_CONFIG_LOCK = threading.Lock()
+
 def _read_app_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -4348,6 +235,22 @@ def _read_app_config():
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+def _save_app_prefs(**updates):
+    """يحفظ تفضيلات الجهاز (اللغة، الثيم، الصوت، المزامنة/الطباعة التلقائية) في config.json.
+    مسار الفحص مش بيتحفظ عشان يرجع دايمًا لـ Downloads مع كل تشغيل."""
+    with _CONFIG_LOCK:
+        try:
+            d = _read_app_config()
+            d.update(updates)
+            tmp = CONFIG_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, CONFIG_FILE)
+            return True
+        except Exception as e:
+            log_exception("save_app_prefs", e)
+            return False
 
 def load_print_paper():
     global _PRINT_PAPER_MM
@@ -4382,15 +285,111 @@ def save_print_paper(w, h, name=""):
 def print_paper_label():
     return f"{_fmt_mm(_PRINT_PAPER_MM[0])}x{_fmt_mm(_PRINT_PAPER_MM[1])}"
 
-def print_settings_arg():
-    name = _PRINT_PAPER_NAME or f"{_fmt_mm(_PRINT_PAPER_MM[0])} x {_fmt_mm(_PRINT_PAPER_MM[1])} mm"
-    return f"paper={name},shrink"
+def print_settings_arg(scaled=True):
+    """إعدادات الطباعة لـ SumatraPDF:
+    نرسل paper= فقط لو في اسم ورق حقيقي من درايفر الطابعة (الأسماء الوهمية بيتجاهلها SumatraPDF).
+    ولو الصفحة اتظبط مقاسها بـ pypdf بنستخدم noscale عشان الدرايفر ميرجعش يصغّرها."""
+    mode = "noscale" if scaled else "shrink"
+    if _PRINT_PAPER_NAME:
+        return f"paper={_PRINT_PAPER_NAME},{mode}"
+    return mode
+
+def get_default_printer_name():
+    """يجلب اسم الطابعة الافتراضية مباشرة من Win32 API أو الريجستري (فوري بدون PowerShell أو أدمن)."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+        sz = wintypes.DWORD(0)
+        winspool.GetDefaultPrinterW(None, ctypes.byref(sz))
+        if sz.value > 0:
+            buf = ctypes.create_unicode_buffer(sz.value)
+            if winspool.GetDefaultPrinterW(buf, ctypes.byref(sz)):
+                if buf.value.strip():
+                    return buf.value.strip()
+    except Exception as e:
+        _log_silent("get_default_printer_win32", e)
+    if WINREG_AVAILABLE:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\Windows")
+            val, _ = winreg.QueryValueEx(key, "Device")
+            winreg.CloseKey(key)
+            if val:
+                return str(val).split(",")[0].strip()
+        except Exception as e:
+            _log_silent("get_default_printer_reg", e)
+    return ""
+
+def open_default_printer_preferences():
+    """يفتح نافذة إعدادات الطابعة الافتراضية (Printing Preferences) مباشرة بدون أدمن، مع بديل لوحة الطابعات."""
+    if sys.platform != "win32":
+        return False
+    prn = get_default_printer_name()
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    rundll = os.path.join(sys32, "rundll32.exe")
+    if not os.path.exists(rundll):
+        rundll = "rundll32.exe"
+    try:
+        if prn:
+            subprocess.Popen([rundll, "printui.dll,PrintUIEntry", "/e", "/n", prn])
+            return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ui", e)
+    try:
+        subprocess.Popen(["control", "printers"])
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ctrl", e)
+    try:
+        os.startfile("ms-settings:printers")
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ms", e)
+    return False
 
 def list_printer_papers():
     """مقاسات الورق اللي درايفر الطابعة الافتراضية بيدعمها: (اسم الطابعة, [(اسم الورق, عرض مم, طول مم)]).
-    بتقرا من .NET PrinterSettings فمش محتاجة أدمن. بترجّع ("", []) لو فشلت."""
+    يستخدم Win32 DeviceCapabilitiesW مباشرة (فوري بدون PowerShell أو أدمن)، مع PowerShell كبديل احتياطي."""
     if sys.platform != "win32":
         return "", []
+    prn = get_default_printer_name()
+    if prn:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+            winspool.DeviceCapabilitiesW.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.WORD, ctypes.c_void_p, ctypes.c_void_p
+            ]
+            winspool.DeviceCapabilitiesW.restype = wintypes.DWORD
+            DC_PAPERSIZE = 3
+            DC_PAPERNAMES = 16
+            n_names = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, None, None)
+            n_sizes = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, None, None)
+            if 0 < n_names < 10000 and 0 < n_sizes < 10000:
+                cnt = min(n_names, n_sizes)
+                name_buf = ctypes.create_unicode_buffer(n_names * 64)
+                size_buf = (_POINT * n_sizes)()
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, ctypes.byref(name_buf), None)
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, ctypes.byref(size_buf), None)
+                out = []
+                for i in range(cnt):
+                    raw_nm = name_buf[i * 64:(i + 1) * 64]
+                    nm = raw_nm.split("\x00", 1)[0].strip()
+                    w = round(size_buf[i].x / 10.0, 1)
+                    h = round(size_buf[i].y / 10.0, 1)
+                    if nm and w > 0 and h > 0:
+                        out.append((nm, w, h))
+                if out:
+                    return prn, out
+        except Exception as e:
+            log_exception("list_printer_papers_win32", e)
+
+    # بديل احتياطي عبر PowerShell لو Win32 مرجعش مقاسات
     ps_cmd = (
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
         "Add-Type -AssemblyName System.Drawing; "
@@ -4410,14 +409,14 @@ def list_printer_papers():
         out = []
         for it in papers:
             nm = str(it.get("n") or "").strip()
-            w = float(it.get("w")) / 100.0 * 25.4   # PaperSize بالـ 1/100 بوصة
+            w = float(it.get("w")) / 100.0 * 25.4
             h = float(it.get("h")) / 100.0 * 25.4
             if nm and w > 0 and h > 0:
                 out.append((nm, round(w, 1), round(h, 1)))
-        return str(d.get("printer") or ""), out
+        return str(d.get("printer") or prn or ""), out
     except Exception as e:
         log_exception("list_printer_papers", e)
-        return "", []
+        return prn, []
 def set_default_printer_paper(w_mm, h_mm):
     """بتضبط مقاس الورق في إعدادات الطابعة الافتراضية لليوزر الحالي (UserPrintTicket): بدون أدمن.
     بترجّع dict فيه: ok, printer, w, h (المقاس الفعلي اللي الدرايفر قبله بالمم) أو err. بتتنفذ في thread مش في الواجهة."""
@@ -4476,10 +475,12 @@ def log_exception(context, exc):
 load_print_paper()
 
 def db_connect():
-    """اتصال موحّد بقاعدة البيانات: مهلة انتظار 15 ثانية بدل الفشل الفوري لو القاعدة مشغولة (database is locked)."""
+    """اتصال موحّد بقاعدة البيانات مع تفعيل WAL ومهلة انتظار 15 ثانية لمنع database is locked."""
     conn = sqlite3.connect(DB_FILE, timeout=15)
     try:
         conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     except Exception as e:
         log_exception("db_connect", e)
     return conn
@@ -4497,18 +498,6 @@ def init_local_database():
                 amount REAL,
                 created_at TEXT,
                 file_name TEXT
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS void_tx (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                unit TEXT,
-                plate TEXT,
-                insured TEXT,
-                amount REAL,
-                created_at TEXT,
-                file_name TEXT,
-                reason TEXT
             )
         ''')
         c.execute('''
@@ -4595,6 +584,20 @@ def archive_day_dir(folder_path, d):
                         f"{d.month:02d}-{d.strftime('%B')}", f"{d.day:02d}")
 
 THEMES = {
+    "Modern Dark": {
+        "mode": "Dark",
+        "bg": "#1A1F2B", "card": "#262D3E", "sub_card": "#202636",
+        "border": "#3A4358", "input": "#1B2130", "text": "#F5F6FA",
+        "text_muted": "#AEB6C8", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#34D399", "danger": "#F87171", "warning": "#F59E0B", "accent": "#E5B93C"
+    },
+    "Modern Light": {
+        "mode": "Light",
+        "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
+        "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
+        "text_muted": "#71717A", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#A16207"
+    },
     "Aero Dark": {
         "mode": "Dark",
         "bg": "#080E17", "card": "#121E2E", "sub_card": "#0F1926",
@@ -4629,6 +632,20 @@ THEMES = {
         "border": "#2C1B4D", "input": "#110920", "text": "#FFFFFF",
         "text_muted": "#A8A29E", "primary": "#7C3AED", "primary_hover": "#6D28D9",
         "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#C084FC"
+    },
+    "Luxury Gold": {
+        "mode": "Dark",
+        "bg": "#110F0A", "card": "#1D1911", "sub_card": "#16130C",
+        "border": "#52431E", "input": "#14110B", "text": "#FFFBEB",
+        "text_muted": "#D4B872", "primary": "#B8860B", "primary_hover": "#9A6F08",
+        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#F5C542"
+    },
+    "Metallic Silver": {
+        "mode": "Dark",
+        "bg": "#16191F", "card": "#232832", "sub_card": "#1C2028",
+        "border": "#5C6778", "input": "#1A1E26", "text": "#F8FAFC",
+        "text_muted": "#CBD5E1", "primary": "#4B5563", "primary_hover": "#374151",
+        "success": "#34D399", "danger": "#F87171", "warning": "#FBBF24", "accent": "#E2E8F0"
     }
 }
 THEME_KEYS = list(THEMES.keys())
@@ -4643,6 +660,12 @@ THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
 #  primary = الإجراء الأساسي | success_btn = إنشاء/إضافة | tool = تقارير وأرشيف | warn_btn = طباعة ودفع
 #  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
 _ROLE_BTN = {
+    "Modern Dark": {
+        "secondary": ("#334155", "#475569"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Modern Light": {
+        "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Aero Dark": {
         "secondary": ("#334155", "#475569"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
@@ -4651,13 +674,19 @@ _ROLE_BTN = {
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Cyber Amber": {
         "secondary": ("#3F3F46", "#52525B"), "success_btn": ("#047857", "#065F46"),
-        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#9A3412", "#7C2D12"), "danger_btn": ("#DC2626", "#B91C1C")},
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
     "Emerald Glass": {
         "secondary": ("#1E3A34", "#2A4D45"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#BE123C", "#9F1239")},
     "Royal Purple": {
         "secondary": ("#3B2A5A", "#4C3A73"), "success_btn": ("#0F766E", "#115E59"),
         "tool": ("#1D4ED8", "#1E40AF"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Luxury Gold": {
+        "secondary": ("#3A311D", "#4E4226"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#7C5A10", "#63460B"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#B91C1C", "#991B1B")},
+    "Metallic Silver": {
+        "secondary": ("#3F4756", "#525C6E"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#475569", "#334155"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
 }
 for _n, _roles in _ROLE_BTN.items():
     for _k, (_c, _h) in _roles.items():
@@ -4666,42 +695,93 @@ for _n, _roles in _ROLE_BTN.items():
 
 # أي زر في أي دور (أسماء الـ attributes في النافذة الرئيسية)
 BUTTON_ROLES = {
-    "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_today", "btn_view_rec"],
-    "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel", "btn_pos_close"],
-    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_mini_archive", "btn_chrome"],
-    "warn_btn": ["btn_print_slip", "btn_pos_pay", "btn_fix_printer"],
-    "secondary": ["btn_yesterday", "btn_mute", "btn_back_to_mini", "btn_pdf_export"],
+    "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
+    "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_full"],
+    "warn_btn": ["btn_print_slip", "btn_fix_printer", "btn_mini_reprint"],
+    "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
     "danger_btn": ["btn_elevate"],
 }
 
 TAG_COLORS = {
     "Dark": {
-        "dup": ("#7F1D1D", "#FECACA"), "wrong": ("#7C2D12", "#FED7AA"),
-        "missing": ("#713F12", "#FEF08A"), "manual": ("#1E3A5F", "#BFDBFE"),
-        "void": ("#374151", "#9CA3AF")
+        "odd": ("#22293A", "#F5F6FA"),
+        "dup": ("#6B1D2B", "#FECACA"), "wrong": ("#633A16", "#FED7AA"),
+        "missing": ("#5A4B14", "#FEF08A"), "manual": ("#1E3A68", "#BFDBFE"),
+        "void": ("#4A1D6B", "#F5D0FE")
     },
     "Light": {
+        "odd": ("#F1F5F9", "#18181B"),
         "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
         "missing": ("#FFEB9C", "#7F6000"), "manual": ("#DDEBF7", "#1F3864"),
-        "void": ("#E5E7EB", "#4B5563")
+        "void": ("#E9D5FF", "#581C87")
     },
 }
 
 FONT_FAMILY = "Segoe UI"
-FONT_TITLE_LOGO = (FONT_FAMILY, 16, "bold")
+FONT_TITLE_LOGO = (FONT_FAMILY, 18, "bold")
 FONT_SECTION_LBL = (FONT_FAMILY, 10, "bold")
-FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "bold")
+FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "normal")
 FONT_KPI_VAL = (FONT_FAMILY, 16, "bold")
 FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
 FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
-FONT_ENTRY = (FONT_FAMILY, 11, "bold")
+FONT_ENTRY = (FONT_FAMILY, 11, "normal")
+
+
+def theme_btn_colors(t, kind="quiet"):
+    """primary = الإجراء المهم | quiet = باقي الأزرار | danger = خطر (مسح/إلغاء)"""
+    if kind == "primary": return t["primary"], t["primary_hover"]
+    if kind == "danger": return t["danger_btn"], t["danger_btn_hover"]
+    return t["secondary"], t["secondary_hover"]
+
+
+def style_entry(w, t):
+    try:
+        w.configure(fg_color=t["input"], border_color=t["border"], text_color=t["text"], border_width=1, corner_radius=8)
+    except Exception as _e: _log_silent("style_entry", _e)
+    try: w.configure(placeholder_text_color=t["text_muted"])
+    except Exception as _e: _log_silent("style_entry#ph", _e)
+
+
+def style_combo(w, t):
+    try:
+        w.configure(fg_color=t["input"], border_color=t["border"], button_color=t["border"],
+                    button_hover_color=t["primary"], text_color=t["text"], corner_radius=8,
+                    dropdown_fg_color=t["card"], dropdown_text_color=t["text"], dropdown_hover_color=t["primary"])
+    except Exception as _e: _log_silent("style_combo", _e)
+
+
+def apply_tree_style(t, rowheight=30):
+    """ستايل موحّد لكل الجداول (سجل الأرشيف + عرض السجلات): بدون حدود، عناوين أوضح، صفوف أعلى."""
+    style = ttk.Style()
+    try: style.theme_use("clam")
+    except Exception as _e: _log_silent("apply_tree_style#1", _e)
+    try: style.layout("A2R.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    except Exception as _e: _log_silent("apply_tree_style#2", _e)
+    style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
+                    font=(FONT_FAMILY, 10, "normal"), rowheight=rowheight, borderwidth=0, relief="flat")
+    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
+                    font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0, padding=(6, 6))
+    style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
+    style.configure("Vertical.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
+                    arrowcolor=t["text_muted"], lightcolor=t["border"], darkcolor=t["border"], relief="flat")
+    style.map("Vertical.TScrollbar", background=[("active", t["primary"])])
+    style.configure("Horizontal.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
+                    arrowcolor=t["text_muted"], lightcolor=t["border"], darkcolor=t["border"], relief="flat")
+    style.map("Horizontal.TScrollbar", background=[("active", t["primary"])])
+    def _fixed(option):
+        try: return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
+        except Exception: return []
+    style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
+              foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+    return style
 
 LANGUAGES = {
     "en": {
         "toggle_btn": "🌐 عربي", "dir_path": "DIRECTORY PATH", "browse": "Browse", "open": "Open",
         "date_lbl": "REPORT DATE", "today": "Today", "yesterday": "Yesterday",
         "start": "⚡ START EXTRACTION", "reset": "Reset",
-        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "pos_close_btn": "🧾 POS Closing", "pos_pay_btn": "💳 Payments", "view_records": "🔍 Records Viewer",
+        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "view_records": "🔍 Records Viewer",
         "export_pdf": "📄 PDF Summary", "kpi1": "OPERATIONS", "kpi2": "TOTAL SUM",
         "open_excel": "📊 Open Excel", "currency": "EGP", "open_chrome": "🌐 Traffic Portal",
         "cash_btn": "💵 Cash", "clean_downloads": "📦 Archive", "autosync_on": "Auto Sync ON", "autosync_off": "Auto Sync OFF",
@@ -4723,7 +803,7 @@ LANGUAGES = {
         "open_pdf_btn": "Open Selected File", "confirm_reset": "Are you sure you want to clear current operations and reset dashboard?",
         "btn_void_sel": "❌ Void Selected", "btn_restore_sel": "↩️ Restore Selected",
         "records_stats": "Shown: {shown} | Net Total: {net:,.2f} EGP | Grand System Sum: {total:,.2f} EGP",
-        "legend_text": "🟥 Duplicate   ⬛ Voided (Deducted)",
+        "legend_text": "🟥 Duplicate   🟪 Voided (Deducted)",
         "menu_open_file": "Open Receipt File", "menu_void_tx": "❌ Void this Transaction", "menu_restore_tx": "↩️ Restore this Transaction",
         "void_confirm_title": "Confirm Void", "void_confirm_msg": "Are you sure you want to void record #{idx} with amount {amt:.2f} EGP?",
         "void_reason_title": "Void Reason", "void_reason_prompt": "Enter void reason (optional):",
@@ -4748,6 +828,7 @@ LANGUAGES = {
         "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
         "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
+        "mini_reprint_last": "🖨️ Reprint Last",
         "tray_open": "Open", "tray_console": "Full Console", "tray_exit": "Exit Application",
         "btn_reprint": "🖨️ Reprint", "menu_reprint": "🖨️ Reprint Receipt", "reprint_success": "Receipt sent to printer!",
         "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "Default printer paper set to 57x90 mm!"
@@ -4756,7 +837,7 @@ LANGUAGES = {
         "toggle_btn": "🌐 English", "dir_path": "مسار مجلد الإيصالات", "browse": "تحديد", "open": "فتح",
         "date_lbl": "تاريخ التقرير", "today": "اليوم", "yesterday": "أمس",
         "start": "⚡ بدء استخراج ومعالجة البيانات", "reset": "تصفير",
-        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "pos_close_btn": "🧾 تقفيل POS", "pos_pay_btn": "💳 إيصالات الدفع", "view_records": "🔍 عرض السجلات",
+        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "view_records": "🔍 عرض السجلات",
         "export_pdf": "📄 تقرير PDF", "kpi1": "عدد العمليات", "kpi2": "إجمالي مبالغ السيستم",
         "open_excel": "📊 فتح الإكسيل", "currency": "ج.م", "open_chrome": "🌐 بوابة المرور",
         "cash_btn": "💵 حاسبة الكاش", "clean_downloads": "📦 أرشفة", "autosync_on": "مزامنة تلقائية: مفعل", "autosync_off": "مزامنة تلقائية: معطل",
@@ -4779,7 +860,7 @@ LANGUAGES = {
         "open_pdf_btn": "فتح الملف المحدد", "confirm_reset": "هل أنت متأكد من رغبتك في تصفير الشاشة والبيانات الحالية؟",
         "btn_void_sel": "❌ إلغاء المحددة", "btn_restore_sel": "↩️ استرجاع الملغية",
         "records_stats": "المعروض: {shown} | الصافي: {net:,.2f} ج.م | الإجمالي العام: {total:,.2f} ج.م",
-        "legend_text": "🟥 مكرر   ⬛ ملغي (مخصوم)",
+        "legend_text": "🟥 مكرر   🟪 ملغي (مخصوم)",
         "menu_open_file": "فتح ملف المعاملة", "menu_void_tx": "❌ إلغاء هذه المعاملة (تسجيل في قاعدة البيانات)", "menu_restore_tx": "↩️ استرجاع هذه المعاملة كمعاملة سليمة",
         "void_confirm_title": "تأكيد الإلغاء", "void_confirm_msg": "هل أنت متأكد من إلغاء المعاملة رقم {idx} بمبلغ {amt:.2f} ج.م وخصمها من الإجمالي؟",
         "void_reason_title": "سبب الإلغاء", "void_reason_prompt": "اكتب سبب الإلغاء (اختياري):",
@@ -4804,6 +885,7 @@ LANGUAGES = {
         "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
         "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
         "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
+        "mini_reprint_last": "🖨️ إعادة طباعة الأخير",
         "tray_open": "فتح البرنامج", "tray_console": "النسخة الكاملة", "tray_exit": "إغلاق البرنامج نهائياً",
         "btn_reprint": "🖨️ إعادة طباعة", "menu_reprint": "🖨️ إعادة طباعة هذا الإيصال", "reprint_success": "تم إرسال الإيصال للطابعة الحرارية!",
         "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "تم ضبط مقاس الطابعة الافتراضية 57x90 مم بنجاح!"
@@ -4995,33 +1077,154 @@ def install_clipboard_shortcuts(root):
         return "break"
     root.bind_all("<Control-KeyPress>", handler)
 
-def center_window_relative(win, parent, width, height):
+def _win_scale(win):
+    try:
+        sc = float(win._get_window_scaling())
+        return sc if sc > 0 else 1.0
+    except Exception:
+        return 1.0
+
+def _focus_target(widget):
+    if widget is None:
+        return
+    try:
+        t = _entry_widget(widget)
+        if t is not None and t.winfo_exists():
+            t.focus_force()
+            t.focus_set()
+    except Exception as _e:
+        _log_silent("focus_target", _e)
+
+def _set_win_alpha(win, alpha):
+    """تغيير شفافية النافذة بسلاسة (0.0 أثناء الرسم، 1.0 بعد الاكتمال) بدون withdraw اللي بتتعارض مع CustomTkinter."""
+    try:
+        if win.winfo_exists():
+            win.attributes("-alpha", float(alpha))
+    except Exception as _e:
+        _log_silent("set_win_alpha", _e)
+
+def _win32_raise(win):
+    """رفع فعلي للنافذة نفسها على مستوى ويندوز 64-bit باستخدام GetAncestor(GA_ROOT) بدون المساس بالنافذة الرئيسية."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        hwnd = wintypes.HWND(win.winfo_id())
+        root_hwnd = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT = 2 (النافذة نفسها فقط، ليس المالك)
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+        HWND_TOPMOST = wintypes.HWND(-1)
+        HWND_NOTOPMOST = wintypes.HWND(-2)
+        user32.SetWindowPos(root_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(root_hwnd)
+        user32.SetForegroundWindow(root_hwnd)
+        user32.SetWindowPos(root_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+    except Exception as _e:
+        _log_silent("win32_raise", _e)
+
+def bring_window_to_front(win, focus_widget=None, delay=15):
+    """يظهر النافذة مكتملة في إطار واحد بسلاسة ويرفعها أمام البرنامج بشكل مضمون مع توجيه مؤشر الكتابة."""
+    def _raise():
+        try:
+            if not win.winfo_exists():
+                return
+            win.update_idletasks()
+            try:
+                if win.state() != "normal":
+                    win.deiconify()
+                    win.state("normal")
+            except Exception as _e:
+                _log_silent("bring_window_to_front#st", _e)
+            _set_win_alpha(win, 1.0)
+            win.lift()
+            win.attributes("-topmost", True)
+            _win32_raise(win)
+            win.focus_force()
+            if focus_widget is not None:
+                _focus_target(focus_widget)
+            def _release():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    _set_win_alpha(win, 1.0)
+                    win.attributes("-topmost", False)
+                    win.lift()
+                    _win32_raise(win)
+                    if focus_widget is not None:
+                        _focus_target(focus_widget)
+                except Exception as _e:
+                    _log_silent("bring_window_to_front#rel", _e)
+            # 360ms: بعد انتهاء مؤقت CustomTkinter (200ms) وتطبيق الأيقونة (300ms) عشان النافذة تفضل قدام التطبيق دائمًا
+            win.after(360, _release)
+        except Exception as _e:
+            _log_silent("bring_window_to_front", _e)
+    try:
+        if delay <= 0:
+            _raise()
+        else:
+            win.after(delay, _raise)
+    except Exception as _e:
+        _log_silent("bring_window_to_front#sched", _e)
+
+def center_window_relative(win, parent, width, height, focus_widget=None):
     win.update_idletasks()
     set_window_icon_safe(win)
+    sc = _win_scale(win)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(int(width), int((sw - 40) / sc))
+    h = min(int(height), int((sh - 80) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
     try: parent_hidden = (parent.state() == "withdrawn")
     except Exception: parent_hidden = False
     if parent_hidden:
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{width}x{height}+{(sw - width) // 2}+{(sh - height) // 2}")
+        x = max(0, (sw - pw_phys) // 2)
+        y = max(0, (sh - ph_phys) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        bring_window_to_front(win, focus_widget=focus_widget)
         return
     px, py = parent.winfo_rootx(), parent.winfo_rooty()
     pw, ph = parent.winfo_width(), parent.winfo_height()
-    x = px + (pw - width) // 2
-    y = py + (ph - height) // 2
-    win.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+    x = max(0, min(px + (pw - pw_phys) // 2, sw - pw_phys - 10))
+    y = max(0, min(py + (ph - ph_phys) // 2, sh - ph_phys - 40))
+    win.geometry(f"{w}x{h}+{x}+{y}")
     win.transient(parent)
+    bring_window_to_front(win, focus_widget=focus_widget)
 
-# حجم موحد لنافذتي 🗂️ سجل الأرشيف و🔍 عرض السجلات: صغيرة في نص الشاشة، والمستخدم يكبّرها لما يحب
-LOG_WIN_W, LOG_WIN_H = 1000, 600
-LOG_WIN_MIN_W, LOG_WIN_MIN_H = 900, 460
+def fit_and_center(win, parent, width, min_height=180, focus_widget=None):
+    """يحسب الارتفاع الفعلي للنافذة بعد رسم كل العناصر حتى لا يُقص أي زر أو تذييل، ثم يوسّطها ويرفعها للأمام."""
+    win.update_idletasks()
+    sc = _win_scale(win)
+    req_h = max(int(min_height), int(win.winfo_reqheight() / sc) + 10)
+    center_window_relative(win, parent, width, req_h, focus_widget=focus_widget)
 
-def center_window_on_screen(win, width, height):
-    """يوسّط النافذة في نص الشاشة (مش نسبةً للنافذة الرئيسية) من غير transient، فتفضل قابلة للتكبير/التصغير."""
+# حجم موحد ومتناسق لنافذتي 📚 سجل الأرشيف و🔍 عرض السجلات (يحترم نسبة تكبير شاشة ويندوز)
+LOG_WIN_W, LOG_WIN_H = 880, 510
+LOG_WIN_MIN_W, LOG_WIN_MIN_H = 740, 410
+
+def center_window_on_screen(win, width, height, show=True):
+    """يوسّط النافذة في نص الشاشة مع مراعاة نسبة تكبير ويندوز."""
     win.update_idletasks()
     set_window_icon_safe(win)
+    sc = _win_scale(win)
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    w, h = min(width, sw - 40), min(height, sh - 110)
-    win.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+    w = min(int(width), int((sw - 48) / sc))
+    h = min(int(height), int((sh - 100) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
+    x = max(0, (sw - pw_phys) // 2)
+    y = max(0, (sh - ph_phys) // 2 - 16)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    if show:
+        bring_window_to_front(win)
 
 # ── تلميحات الأزرار + Esc لكل النوافذ + النوافذ بتفتكر حجمها ومكانها ─────────────────
 class _Tooltip:
@@ -5249,16 +1452,13 @@ def extract_date_from_text(txt):
             except Exception as _e: _log_silent("extract_date_from_text#1", _e)
     return None
 
-# عرض لفة الورق الفعلي في الطابعة (مم) لإيصال المعاملة اليدوية وبون التصوير: 80 للفة 80 مم، 57 للفة 57 مم.
-# الإيصال الأساسي (quote_receipt) مش بيتأثر بالرقم ده.
-PRINT_ROLL_W_MM = 80
-
 def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
     if not REPORTLAB_AVAILABLE:
         raise Exception("ReportLab is not installed!")
     op_dt = op_dt or datetime.datetime.now()
-    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض اللفة
-    _k = (PRINT_ROLL_W_MM * 72 / 25.4) / PAGE_W if PRINT_ROLL_W_MM else 1.0
+    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض الورق المختار
+    roll_w_mm = _PRINT_PAPER_MM[0] if (_PRINT_PAPER_MM and _PRINT_PAPER_MM[0] > 0) else 57.0
+    _k = (roll_w_mm * 72 / 25.4) / PAGE_W
     c = canvas.Canvas(filepath, pagesize=(PAGE_W * _k, PAGE_H * _k))
     c.scale(_k, _k)
     font_name = "Helvetica-Bold"
@@ -5510,16 +1710,627 @@ def _hide_path(p):
     except Exception as e:
         log_exception("hide_path", e)
 
+# ================= إضافة كروم المدمجة v2.0.0 (الشريط الجانبي + جسر محلي 127.0.0.1) =================
+CHROME_EXT_DIR = os.path.join(ARCHIVE_BACKUP_DIR, "A2R_Chrome_Extension")
+LOCAL_BRIDGE_HOST = "127.0.0.1"
+LOCAL_BRIDGE_PORT = 47221
+_CHROME_EXT_TEXT_FILES = {
+    'manifest.json': '{\n  "manifest_version": 3,\n  "name": "A2R Operations Console",\n  "version": "2.8.0",\n  "description": "A2R Operations Console - Persistent Slim Resizable Sidebar (132px) & Offline Traffic Portal Manager",\n  "permissions": [\n    "tabs",\n    "alarms",\n    "sidePanel",\n    "activeTab",\n    "scripting",\n    "storage"\n  ],\n  "host_permissions": [\n    "http://127.0.0.1:47221/*"\n  ],\n  "action": {\n    "default_title": "A2R Operations Console",\n    "default_icon": {\n      "16": "icons/icon16.png",\n      "48": "icons/icon48.png",\n      "128": "icons/icon128.png"\n    }\n  },\n  "side_panel": {\n    "default_path": "sidepanel.html"\n  },\n  "content_scripts": [\n    {\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ],\n      "js": [\n        "content_sidebar.js"\n      ],\n      "run_at": "document_end"\n    }\n  ],\n  "web_accessible_resources": [\n    {\n      "resources": [\n        "sidepanel.html",\n        "sidepanel.css",\n        "sidepanel.js",\n        "icons/*"\n      ],\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ]\n    }\n  ],\n  "background": {\n    "service_worker": "background.js"\n  },\n  "icons": {\n    "16": "icons/icon16.png",\n    "48": "icons/icon48.png",\n    "128": "icons/icon128.png"\n  }\n}\n',
+    'background.js': '// A2R Operations Console - Chrome Extension v2.7.0 (100% Offline)\n// 1) Persistent resizable slim sidebar (132px) across ALL web tabs (state & width saved in chrome.storage.local)\n// 2) Auto-pin Traffic Portal tab & keep last 4 PDF receipt tabs\n// 3) 40-second IDLE auto-return to Traffic Portal (192.168.235.50)\n\nconst PORTAL_HOST = "192.168.235.50";\nconst MAX_RECEIPT_TABS = 4;\nconst DEFAULT_IDLE_SEC = 40;\nlet idleReturnSec = DEFAULT_IDLE_SEC;\ntry {\n  chrome.storage.local.get({ a2r_idle_sec: DEFAULT_IDLE_SEC }, (res) => {\n    idleReturnSec = Number(res.a2r_idle_sec);\n    if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n  });\n  chrome.storage.onChanged.addListener((changes, area) => {\n    if (area === "local" && changes.a2r_idle_sec) {\n      idleReturnSec = Number(changes.a2r_idle_sec.newValue);\n      if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n    }\n  });\n} catch (_) {}\nconst KEY_OPEN = "a2r_sidebar_open";\nconst KEY_WIDTH = "a2r_sidebar_width";\n\nlet lastActivityTs = Date.now();\nlet returnedForCurrentIdle = false;\n\ntry {\n  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {\n    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});\n  }\n} catch (_) {}\n\nfunction getTabUrl(tab) {\n  return ((tab && (tab.url || tab.pendingUrl)) || "").toLowerCase();\n}\n\nfunction canInjectSlimSidebar(tab) {\n  const u = getTabUrl(tab);\n  if (!u.startsWith("http://") && !u.startsWith("https://")) return false;\n  if (u.startsWith("https://chrome.google.com/webstore") || u.startsWith("https://chromewebstore.google.com")) return false;\n  if (u.endsWith(".pdf") || u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return false;\n  return true;\n}\n\nchrome.action.onClicked.addListener((tab) => {\n  if (!tab || tab.id === undefined) return;\n  markUserActive();\n\n  if (!canInjectSlimSidebar(tab)) {\n    try {\n      if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n        chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n      }\n    } catch (_) {}\n    return;\n  }\n\n  chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 132 }, (res) => {\n    const nextOpen = !(res[KEY_OPEN] !== false);\n    const savedWidth = res[KEY_WIDTH] || 132;\n    chrome.storage.local.set({ [KEY_OPEN]: nextOpen });\n\n    chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth }).catch(async () => {\n      try {\n        await chrome.scripting.executeScript({\n          target: { tabId: tab.id },\n          files: ["content_sidebar.js"],\n        });\n        await chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth });\n      } catch (_) {\n        try {\n          if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n            chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n          }\n        } catch (_) {}\n      }\n    });\n  });\n});\n\nfunction isPortalTab(tab) {\n  const u = getTabUrl(tab);\n  if (!u.includes(PORTAL_HOST)) return false;\n  if (u.includes("quote_receipt") || u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt")) {\n    return false;\n  }\n  return true;\n}\n\nfunction isProtectedChromePage(tab) {\n  const u = getTabUrl(tab);\n  return u.startsWith("chrome://extensions") || u.startsWith("chrome://settings");\n}\n\nfunction isReceiptPdfTab(tab, portalTabIds) {\n  if (!tab || tab.pinned) return false;\n  const u = getTabUrl(tab);\n  if (!u) return false;\n  if (isPortalTab(tab)) return false;\n\n  if (u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return true;\n  if (u.includes(PORTAL_HOST) && (u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt"))) {\n    return true;\n  }\n  if (\n    tab.openerTabId &&\n    portalTabIds.has(tab.openerTabId) &&\n    (u.includes(".pdf") || u.startsWith("blob:") || u.startsWith("data:application/pdf"))\n  ) {\n    return true;\n  }\n  return false;\n}\n\nfunction markUserActive() {\n  lastActivityTs = Date.now();\n  returnedForCurrentIdle = false;\n}\n\nasync function maintainPinAndReceipts(windowId) {\n  try {\n    const tabs = await chrome.tabs.query({ windowId });\n    const portalTabs = tabs.filter(isPortalTab);\n    const portalTabIds = new Set(portalTabs.map((t) => t.id));\n    for (const pt of portalTabs) {\n      if (!pt.pinned) {\n        chrome.tabs.update(pt.id, { pinned: true }).catch(() => {});\n      }\n    }\n    const receiptTabs = tabs\n      .filter((t) => isReceiptPdfTab(t, portalTabIds))\n      .sort((a, b) => a.id - b.id);\n    if (receiptTabs.length > MAX_RECEIPT_TABS) {\n      const toClose = receiptTabs.slice(0, receiptTabs.length - MAX_RECEIPT_TABS);\n      for (const oldTab of toClose) {\n        chrome.tabs.remove(oldTab.id).catch(() => {});\n      }\n    }\n  } catch (_) {}\n}\n\nasync function checkIdleAndReturnToPortal() {\n  try {\n    if (returnedForCurrentIdle) return;\n    const idleSec = (Date.now() - lastActivityTs) / 1000;\n    if (!idleReturnSec) return;\n    if (idleSec < idleReturnSec) return;\n\n    let activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });\n    if (!activeTabs || !activeTabs.length) {\n      activeTabs = await chrome.tabs.query({ active: true });\n    }\n    if (!activeTabs || !activeTabs.length) return;\n\n    const curTab = activeTabs[0];\n    if (!curTab || isPortalTab(curTab) || isProtectedChromePage(curTab)) return;\n\n    let winTabs = await chrome.tabs.query({ windowId: curTab.windowId });\n    let portal = winTabs.find(isPortalTab);\n\n    if (portal) {\n      if (!portal.active) {\n        returnedForCurrentIdle = true;\n        await chrome.tabs.update(portal.id, { active: true });\n      }\n      return;\n    }\n\n    const allTabs = await chrome.tabs.query({});\n    portal = allTabs.find(isPortalTab);\n    if (portal && portal.id !== curTab.id) {\n      returnedForCurrentIdle = true;\n      if (portal.windowId !== undefined) {\n        await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n      }\n      await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n    }\n  } catch (_) {}\n}\n\nsetInterval(checkIdleAndReturnToPortal, 2000);\n\nfunction scheduleAlarmFallback() {\n  try {\n    if (!idleReturnSec) return;\n    chrome.alarms.clear("a2r_idle_check").catch(() => {});\n    chrome.alarms.create("a2r_idle_check", { when: Date.now() + idleReturnSec * 1000 });\n  } catch (_) {}\n}\n\nchrome.alarms.onAlarm.addListener((alarm) => {\n  if (alarm && alarm.name === "a2r_idle_check") {\n    checkIdleAndReturnToPortal();\n  }\n});\n\nchrome.runtime.onMessage.addListener((msg) => {\n  if (!msg) return;\n  if (msg.type === "A2R_USER_ACTIVITY") {\n    markUserActive();\n    scheduleAlarmFallback();\n  } else if (msg.type === "A2R_OPEN_TAB" && msg.url) {\n    chrome.tabs.create({ url: msg.url }).catch(() => {});\n  }\n});\n\nchrome.tabs.onCreated.addListener((tab) => {\n  if (!tab) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n});\n\nchrome.tabs.onActivated.addListener((activeInfo) => {\n  if (!activeInfo) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (activeInfo.windowId !== undefined) maintainPinAndReceipts(activeInfo.windowId);\n});\n\nchrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {\n  if (!tab) return;\n  if (changeInfo.status === "complete" || changeInfo.url) {\n    if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n  }\n});\n',
+    'content_sidebar.js': '// A2R Operations Console - Persistent Resizable Slim Sidebar (132px, Push-Layout, Chrome Dark) + Idle Detector\n(() => {\n  const HOST_ID = "a2r-slim-sidebar-host";\n  const PUSH_STYLE_ID = "a2r-slim-sidebar-push-style";\n  const KEY_OPEN = "a2r_sidebar_open";\n  const KEY_WIDTH = "a2r_sidebar_width";\n  const KEY_SITES = "a2r_sidebar_sites";\n  const PORTAL_HOST = "192.168.235.50";\n  const DEFAULT_WIDTH = 132;\n  const MIN_WIDTH = 115;\n  const MAX_WIDTH = 480;\n\n  let currentWidth = DEFAULT_WIDTH;\n\n  function clampWidth(w) {\n    const n = Math.round(Number(w) || DEFAULT_WIDTH);\n    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, n));\n  }\n\n  function applyPagePush(w) {\n    let st = document.getElementById(PUSH_STYLE_ID);\n    if (!st) {\n      st = document.createElement("style");\n      st.id = PUSH_STYLE_ID;\n      (document.head || document.documentElement).appendChild(st);\n    }\n    st.textContent = `\n      html {\n        width: calc(100% - ${w}px) !important;\n        max-width: calc(100% - ${w}px) !important;\n        margin-right: ${w}px !important;\n        box-sizing: border-box !important;\n      }\n      body {\n        max-width: 100% !important;\n        box-sizing: border-box !important;\n      }\n    `;\n  }\n\n  function removePagePush() {\n    const st = document.getElementById(PUSH_STYLE_ID);\n    if (st) st.remove();\n  }\n\n  function applyWidth(w) {\n    currentWidth = clampWidth(w);\n    const host = document.getElementById(HOST_ID);\n    if (host) {\n      host.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n    }\n  }\n\n  function closeSidebar() {\n    const el = document.getElementById(HOST_ID);\n    if (el) el.remove();\n    removePagePush();\n  }\n\n  function openSidebar(widthPx = currentWidth) {\n    currentWidth = clampWidth(widthPx);\n    const existing = document.getElementById(HOST_ID);\n    if (existing) {\n      existing.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      return;\n    }\n\n    applyPagePush(currentWidth);\n\n    const host = document.createElement("div");\n    host.id = HOST_ID;\n    host.style.cssText = [\n      "position:fixed",\n      "top:0",\n      "right:0",\n      `width:${currentWidth}px`,\n      "height:100vh",\n      "z-index:2147483647",\n      "box-shadow:-1px 0 8px rgba(0,0,0,0.35)",\n      "border-left:1px solid #3C4043",\n      "background:#202124",\n      "margin:0",\n      "padding:0",\n      "overflow:hidden",\n      "box-sizing:border-box"\n    ].join(" !important;") + " !important;";\n\n    // Easy-to-grab 8px left-edge drag handle with subtle center grip pill\n    const handle = document.createElement("div");\n    handle.title = "اسحب لتكبير أو تصغير العرض (دبل كليك للحجم الافتراضي 132px)";\n    handle.style.cssText = [\n      "position:absolute",\n      "top:0",\n      "left:0",\n      "width:8px",\n      "height:100%",\n      "cursor:ew-resize",\n      "z-index:10",\n      "background:transparent",\n      "display:flex",\n      "align-items:center",\n      "justify-content:center",\n      "transition:background 0.15s ease"\n    ].join(" !important;") + " !important;";\n\n    const grip = document.createElement("div");\n    grip.style.cssText = [\n      "width:3px",\n      "height:38px",\n      "border-radius:3px",\n      "background:rgba(154,160,166,0.45)",\n      "pointer-events:none"\n    ].join(" !important;") + " !important;";\n    handle.appendChild(grip);\n\n    handle.addEventListener("mouseenter", () => {\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.25)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n    });\n    handle.addEventListener("mouseleave", () => {\n      if (!handle.dataset.dragging) {\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n      }\n    });\n\n    handle.addEventListener("dblclick", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      applyWidth(DEFAULT_WIDTH);\n      try { chrome.storage.local.set({ [KEY_WIDTH]: DEFAULT_WIDTH }); } catch (_) {}\n    });\n\n    handle.addEventListener("mousedown", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      handle.dataset.dragging = "1";\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.45)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n\n      const shield = document.createElement("div");\n      shield.style.cssText = "position:fixed !important;inset:0 !important;z-index:2147483647 !important;cursor:ew-resize !important;background:transparent !important;";\n      (document.documentElement || document.body).appendChild(shield);\n\n      const onMove = (mEv) => {\n        const w = clampWidth(window.innerWidth - mEv.clientX);\n        applyWidth(w);\n        notifyActivity();\n      };\n\n      const onUp = () => {\n        delete handle.dataset.dragging;\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n        window.removeEventListener("mousemove", onMove, true);\n        window.removeEventListener("mouseup", onUp, true);\n        shield.remove();\n        try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n      };\n\n      window.addEventListener("mousemove", onMove, true);\n      window.addEventListener("mouseup", onUp, true);\n    });\n\n    const iframe = document.createElement("iframe");\n    iframe.src = chrome.runtime.getURL("sidepanel.html?mode=slim");\n    iframe.style.cssText = "width:100% !important;height:100% !important;border:0 !important;display:block !important;background:#202124 !important;";\n    iframe.allow = "clipboard-write";\n\n    host.appendChild(handle);\n    host.appendChild(iframe);\n    (document.documentElement || document.body).appendChild(host);\n  }\n\n  function setSidebarOpen(open, persist = false) {\n    if (open) openSidebar(currentWidth);\n    else closeSidebar();\n    if (persist) {\n      try { chrome.storage.local.set({ [KEY_OPEN]: !!open }); } catch (_) {}\n    }\n    return { open: !!open };\n  }\n\n  function toggleSidebar() {\n    const next = !document.getElementById(HOST_ID);\n    return setSidebarOpen(next, true);\n  }\n\n  window.__a2rToggleSidebar = toggleSidebar;\n\n  if (window.__a2rSlimSidebarLoaded) return;\n  window.__a2rSlimSidebarLoaded = true;\n\n  let lastPing = 0;\n  function notifyActivity() {\n    const now = Date.now();\n    if (now - lastPing < 2000) return;\n    lastPing = now;\n    try {\n      chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {});\n    } catch (_) {}\n  }\n\n  ["mousedown", "pointerdown", "click", "keydown", "input", "wheel", "scroll", "mousemove", "touchstart"].forEach((evName) => {\n    window.addEventListener(evName, notifyActivity, { passive: true, capture: true });\n  });\n\n  // الفتح التلقائي: على بوابة المرور + المواقع المثبتة فقط (بدل كل المواقع)\n  let lastOpenEnabled = true;\n  let pinnedSites = {};\n  function siteAllowed() {\n    const host = location.hostname;\n    return host === PORTAL_HOST || !!pinnedSites[host];\n  }\n  try {\n    chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: DEFAULT_WIDTH, [KEY_SITES]: {} }, (res) => {\n      if (chrome.runtime.lastError) return;\n      currentWidth = clampWidth(res[KEY_WIDTH]);\n      lastOpenEnabled = res[KEY_OPEN] !== false;\n      pinnedSites = res[KEY_SITES] || {};\n      if (lastOpenEnabled && siteAllowed()) {\n        openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  // Live sync open/close state and resized width across ALL open tabs simultaneously\n  try {\n    chrome.storage.onChanged.addListener((changes, area) => {\n      if (area !== "local") return;\n      if (changes[KEY_WIDTH] && changes[KEY_WIDTH].newValue !== undefined) {\n        applyWidth(changes[KEY_WIDTH].newValue);\n      }\n      if (changes[KEY_OPEN] && changes[KEY_OPEN].newValue !== undefined) {\n        lastOpenEnabled = changes[KEY_OPEN].newValue !== false;\n        if (changes[KEY_OPEN].newValue) openSidebar(currentWidth);\n        else closeSidebar();\n      }\n      if (changes[KEY_SITES]) {\n        pinnedSites = changes[KEY_SITES].newValue || {};\n        if (!siteAllowed()) closeSidebar();\n        else if (lastOpenEnabled) openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {\n    if (!msg) return;\n    if (msg.type === "A2R_TOGGLE_SIDEBAR") {\n      sendResponse(toggleSidebar());\n      return true;\n    }\n    if (msg.type === "A2R_SET_SIDEBAR") {\n      if (msg.width !== undefined) currentWidth = clampWidth(msg.width);\n      sendResponse(setSidebarOpen(!!msg.open, false));\n      return true;\n    }\n  });\n\n  window.addEventListener("message", (ev) => {\n    if (!ev || !ev.data) return;\n    if (ev.data.type === "A2R_TOGGLE_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          const fixed = host === PORTAL_HOST;\n          if (!fixed) {\n            if (sites[host]) { delete sites[host]; closeSidebar(); }\n            else sites[host] = true;\n            pinnedSites = sites;\n            chrome.storage.local.set({ [KEY_SITES]: sites });\n          }\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: fixed || !!sites[host], fixed }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_QUERY_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: host === PORTAL_HOST || !!sites[host], fixed: host === PORTAL_HOST }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_CLOSE_SIDEBAR") {\n      setSidebarOpen(false, true);\n    } else if (ev.data.type === "A2R_USER_ACTIVITY") {\n      notifyActivity();\n    }\n  });\n})();\n',
+    'sidepanel.html': '<!DOCTYPE html>\n<html lang="ar" dir="rtl">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>A2R Operations Console</title>\n  <link rel="stylesheet" href="sidepanel.css">\n</head>\n<body>\n  <header class="topbar">\n    <div class="brand">\n      <span class="logo">A2R</span>\n      <span id="connBadge" class="badge offline">● مغلق</span>\n    </div>\n    <div class="top-actions">\n      <button id="btnPinSite" class="icon-btn hidden" title="تشغيل الإضافة تلقائيًا على هذا الموقع">📍</button>\n      <button id="btnTopOpenApp" class="icon-btn" title="إظهار البرنامج">🖥️</button>\n      <button id="btnCloseSlim" class="icon-btn close-btn hidden" title="إغلاق">✕</button>\n    </div>\n  </header>\n\n  <nav class="tabs">\n    <button class="tab-btn active" data-tab="home">الرئيسية</button>\n    <button class="tab-btn" data-tab="records">السجلات</button>\n    <button class="tab-btn" data-tab="archive">الأرشيف</button>\n  </nav>\n\n  <div id="toast" class="toast hidden"></div>\n\n  <main class="content">\n    <!-- TAB 1: HOME -->\n    <section id="tab-home" class="tab-pane active">\n      <div class="stack">\n        <div class="kpi-card green">\n          <div class="kpi-title">إجمالي السيستم</div>\n          <div id="kpiSum" class="kpi-val green-txt">0.00</div>\n        </div>\n\n        <div class="kpi-card blue">\n          <div class="kpi-title">عدد العمليات</div>\n          <div id="kpiCount" class="kpi-val">0</div>\n        </div>\n\n        <div class="kpi-mini-stack">\n          <div class="mini-line"><span>مطبوع اليوم</span><strong id="kpiPrinted">0</strong></div>\n          <div class="mini-line"><span>ملغي</span><strong id="kpiVoid">0</strong></div>\n          <div class="mini-line"><span>مكرر</span><strong id="kpiDup">0</strong></div>\n        </div>\n\n        <!-- الأزرار بالترتيب المطلوب -->\n        <button id="btnScan" class="btn primary full">⚡ فحص اليوم</button>\n        <div id="scanProg" class="scan-prog hidden"><div id="scanProgFill" class="scan-prog-fill"></div><span id="scanProgPct" class="scan-prog-pct">0%</span></div>\n\n        <button id="btnSummaryPdf" class="btn neutral full">📄 ملخص الفحص PDF</button>\n        <div id="summaryBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">اختر الوحدة للملخص</span>\n            <button id="btnSumCancel" class="chip-btn">✕</button>\n          </div>\n          <select id="sumUnit" class="input full mt-4"></select>\n          <div id="sumTid" class="hint mt-4">الماكينة: —</div>\n          <button id="btnSumPrint" class="btn primary full mt-4">📄 فتح الملخص PDF</button>\n        </div>\n\n        <button id="btnQuickManual" class="btn neutral full">➕ معاملة يدوية</button>\n        <div id="manualBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">معاملة يدوية PDF</span>\n            <button id="btnManualCancel" class="chip-btn">✕</button>\n          </div>\n          <input id="mAmount" type="number" step="0.01" placeholder="المبلغ + Enter *" class="input full mt-4">\n          <input id="mName" type="text" placeholder="اسم المؤمن له (اختياري)" class="input full mt-4">\n          <input id="mPlate" type="text" placeholder="رقم اللوحة (اختياري)" class="input full mt-4">\n          <select id="mUnit" class="input full mt-4"></select>\n          <button id="btnAddManual" class="btn primary full mt-4">توليد وطباعة (Enter)</button>\n        </div>\n\n        <button id="btnViewRecords" class="btn neutral full">🔍 عرض السجل</button>\n\n        <button id="btnReprintLast" class="btn neutral full">🖨️ طباعة الأخير</button>\n\n        <div id="archStatus" class="arch-pill">—</div>\n\n        <div class="settings-row">\n          <span>الرجوع التلقائي للبوابة</span>\n          <select id="selIdle" class="input">\n            <option value="0">إيقاف</option>\n            <option value="40">40 ثانية</option>\n            <option value="120">دقيقتان</option>\n          </select>\n        </div>\n      </div>\n    </section>\n\n    <!-- TAB 2: RECORDS -->\n    <section id="tab-records" class="tab-pane">\n      <div class="card compact">\n        <input id="recSearch" type="text" placeholder="بحث اسم، لوحة، شاسيه، مبلغ..." class="input full">\n        <select id="recFilter" class="input full mt-4">\n          <option value="all">كل الحالات</option>\n          <option value="ok">سليم</option>\n          <option value="manual">يدوي</option>\n          <option value="dup">مكرر</option>\n          <option value="void">ملغي</option>\n        </select>\n        <div id="recStats" class="hint mt-4">0 سجل</div>\n      </div>\n      <div id="recList" class="list-box"></div>\n    </section>\n\n    <!-- TAB 3: ARCHIVE -->\n    <section id="tab-archive" class="tab-pane">\n      <div class="card compact">\n        <input id="archQuery" type="text" placeholder="بحث في الأرشيف..." class="input full">\n        <button id="btnArchSearch" class="btn primary full mt-4">🔎 بحث</button>\n        <div id="archAuthRow" class="mt-4">\n          <input id="archPwd" type="password" placeholder="كلمة مرور المشرف" class="input full">\n          <button id="btnArchUnlock" class="btn neutral full mt-4">دخول المشرف</button>\n        </div>\n        <div id="archRoleHint" class="hint mt-4">آخر 7 أيام (للمشرف: الكل)</div>\n      </div>\n      <div id="archResults" class="list-box"></div>\n    </section>\n  </main>\n\n  <footer class="footer">\n    <span id="footVer">A2R • Ahmed Ramadan</span>\n  </footer>\n\n  <script src="sidepanel.js"></script>\n</body>\n</html>\n',
+    'sidepanel.css': '* { box-sizing: border-box; margin: 0; padding: 0; }\n:root {\n  --bg: #202124;\n  --surface: #292A2D;\n  --surface-hover: #35363A;\n  --input: #171717;\n  --border: #3C4043;\n  --text: #E8EAED;\n  --muted: #9AA0A6;\n  --accent: #8AB4F8;\n  --accent-bg: #1A73E8;\n  --accent-bg-h: #1B66C9;\n  --green: #81C995;\n  --warn: #FDD663;\n  --danger: #F28B82;\n}\nbody {\n  font-family: "Segoe UI", Roboto, Tahoma, sans-serif;\n  background: var(--bg);\n  color: var(--text);\n  font-size: 11px;\n  display: flex;\n  flex-direction: column;\n  height: 100vh;\n  overflow: hidden;\n  -webkit-font-smoothing: antialiased;\n}\n.topbar {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 6px 6px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.brand { display: flex; align-items: center; gap: 5px; }\n.logo { font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: 0.4px; }\n.badge { font-size: 8.5px; font-weight: 600; padding: 1px 5px; border-radius: 99px; }\n.badge.online { background: rgba(129, 201, 149, 0.14); color: var(--green); }\n.badge.offline { background: rgba(242, 139, 130, 0.14); color: var(--danger); }\n.top-actions { display: flex; gap: 3px; }\n.icon-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 10.5px;\n  display: flex; align-items: center; justify-content: center; transition: background 0.15s;\n}\n.icon-btn:hover { background: var(--surface-hover); color: var(--text); }\n.icon-btn.close-btn:hover { background: rgba(242, 139, 130, 0.18); color: var(--danger); }\n\n.tabs {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 3px;\n  padding: 5px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.tab-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 14px; padding: 5px 2px; font-weight: 600; font-size: 10px; cursor: pointer;\n  transition: background 0.15s, color 0.15s;\n}\n.tab-btn:hover { background: var(--surface); color: var(--text); }\n.tab-btn.active {\n  background: rgba(138, 180, 248, 0.16);\n  color: var(--accent);\n  border-color: rgba(138, 180, 248, 0.35);\n}\n\n.content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 5px; }\n.content::-webkit-scrollbar { width: 4px; }\n.content::-webkit-scrollbar-thumb { background: #4A4D51; border-radius: 4px; }\n.tab-pane { display: none; }\n.tab-pane.active { display: block; }\n\n.stack { display: flex; flex-direction: column; gap: 6px; }\n.hidden { display: none !important; }\n\n.card {\n  background: var(--surface); border: 1px solid var(--border);\n  border-radius: 8px; padding: 7px 6px; margin-bottom: 6px;\n}\n.card.compact { padding: 6px; }\n.card-title { font-size: 10px; font-weight: 600; color: var(--accent); }\n.hint { font-size: 8.5px; color: var(--muted); }\n.center { text-align: center; }\n\n.row-between { display: flex; align-items: center; justify-content: space-between; }\n.full { width: 100%; }\n.mt-4 { margin-top: 5px; }\n\n.input {\n  background: var(--input); color: var(--text); border: 1px solid var(--border);\n  border-radius: 6px; padding: 6px 6px; font-size: 10px; outline: none; width: 100%;\n  transition: border-color 0.15s;\n}\n.input:focus { border-color: var(--accent); }\n.input::placeholder { color: #7F868C; }\n\n/* أزرار بنمط جوجل كروم الداكن */\n.btn {\n  border: 1px solid var(--border); border-radius: 18px; padding: 8px 6px; min-height: 34px;\n  color: var(--text); font-weight: 600; font-size: 10.5px; line-height: 1.25;\n  cursor: pointer; text-align: center; display: flex; align-items: center;\n  justify-content: center; gap: 4px; word-break: break-word;\n  transition: background 0.15s, border-color 0.15s;\n}\n.btn.primary {\n  background: var(--accent-bg); border-color: var(--accent-bg); color: #FFFFFF;\n}\n.btn.primary:hover { background: var(--accent-bg-h); border-color: var(--accent-bg-h); }\n.btn.neutral { background: var(--surface); color: var(--text); }\n.btn.neutral:hover { background: var(--surface-hover); border-color: #5F6368; }\n.btn:disabled { opacity: 0.5; cursor: not-allowed; }\n\n.chip-btn {\n  background: var(--surface-hover); color: var(--text); border: 1px solid var(--border);\n  border-radius: 12px; padding: 1px 6px; font-size: 9px; font-weight: 600; cursor: pointer;\n}\n.chip-btn:hover { border-color: var(--accent); color: var(--accent); }\n\n.kpi-card {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 7px;\n}\n.kpi-title { font-size: 9px; color: var(--muted); font-weight: 600; }\n.kpi-val { font-size: 15px; font-weight: 700; margin-top: 2px; direction: ltr; text-align: right; color: var(--text); }\n.green-txt { color: var(--green); }\n\n.kpi-mini-stack {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; font-size: 9.5px;\n}\n.mini-line { display: flex; justify-content: space-between; color: var(--muted); }\n.mini-line strong { color: var(--text); font-weight: 600; }\n\n.arch-pill {\n  background: transparent; border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 4px; font-size: 8.5px; font-weight: 600; text-align: center; color: var(--green);\n}\n\n.match-result { font-size: 9.5px; font-weight: 600; margin-top: 4px; min-height: 12px; }\n.match-ok { color: var(--green); }\n.match-short { color: var(--danger); }\n.match-extra { color: var(--warn); }\n\n.list-box { display: flex; flex-direction: column; gap: 5px; }\n.rec-item {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 5px; border-right: 3px solid var(--accent);\n}\n.rec-item.kind-dup { background: rgba(242, 139, 130, 0.12); border-right-color: var(--danger); }\n.rec-item.kind-void { background: rgba(197, 138, 249, 0.12); border-right-color: #C58AF9; }\n.rec-item.kind-manual { background: rgba(138, 180, 248, 0.1); border-right-color: var(--accent); }\n.rec-item.kind-missing, .rec-item.kind-wrong { background: rgba(253, 214, 99, 0.1); border-right-color: var(--warn); }\n\n.rec-top { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 9.5px; gap: 3px; }\n.rec-amt { color: var(--green); font-size: 10px; white-space: nowrap; }\n.rec-item.kind-void .rec-amt { color: #D7AEFB; text-decoration: line-through; }\n.rec-meta { font-size: 8.5px; color: var(--muted); margin-top: 2px; line-height: 1.3; word-break: break-word; }\n.rec-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }\n.rec-actions button {\n  width: 100%; padding: 4px 4px; font-size: 9.5px; border-radius: 12px; border: 1px solid var(--border);\n  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;\n}\n.rec-actions button:hover { background: var(--surface-hover); border-color: var(--accent); }\n.rec-actions button.btn-v { color: var(--danger); }\n.rec-actions button.btn-r { color: var(--green); }\n\n.denom-stack { display: flex; flex-direction: column; gap: 3px; }\n.denom-item { display: flex; align-items: center; gap: 3px; font-size: 9.5px; }\n.denom-item span { width: 32px; color: var(--muted); font-weight: 600; }\n.denom-item input { flex: 1; text-align: center; padding: 3px 2px; }\n.cash-summary {\n  background: var(--input); border: 1px solid var(--border); border-radius: 6px;\n  padding: 5px; font-size: 9.5px; display: flex; flex-direction: column; gap: 2px;\n}\n\n.toast {\n  position: fixed; bottom: 24px; left: 5px; right: 5px; z-index: 99;\n  background: #303134; color: var(--text); border: 1px solid var(--border);\n  box-shadow: 0 2px 8px rgba(0,0,0,0.45);\n  border-radius: 8px; padding: 6px 6px; font-size: 9.5px; font-weight: 600; text-align: center;\n}\n\n.footer {\n  padding: 4px 5px; background: var(--bg); border-top: 1px solid var(--border);\n  text-align: center; font-size: 8.5px; color: var(--muted); font-weight: 500;\n}\n\n/* تكيف تلقائي عند تكبير عرض الشريط الجانبي بالسحب */\n@media (min-width: 210px) {\n  body { font-size: 12px; }\n  .logo { font-size: 13.5px; }\n  .badge { font-size: 10px; padding: 2px 7px; }\n  .tab-btn { font-size: 11px; padding: 6px 4px; }\n  .kpi-title { font-size: 10.5px; }\n  .kpi-val { font-size: 19px; }\n  .btn { font-size: 11.5px; min-height: 36px; padding: 9px 10px; }\n  .input { font-size: 11.5px; padding: 7px 8px; }\n  .rec-top { font-size: 11.5px; }\n  .rec-amt { font-size: 12px; }\n  .rec-meta { font-size: 10px; }\n  .rec-actions { flex-direction: row; }\n}\n\n/* v2.8: شريط تقدم الفحص + صف سبب الإلغاء + صف الإعدادات + زر تثبيت الموقع */\n.scan-prog { position: relative; background: var(--input); border: 1px solid var(--border); border-radius: 99px; height: 14px; overflow: hidden; }\n.scan-prog-fill { height: 100%; width: 0%; background: var(--accent-bg); transition: width 0.3s ease; }\n.scan-prog-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; color: var(--text); direction: ltr; }\n.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 9px; color: var(--muted); font-weight: 600; padding: 2px 1px; }\n.settings-row select { width: auto; padding: 3px 4px; }\n.icon-btn.pinned { color: var(--accent); border-color: rgba(138,180,248,0.4); }\n.void-row { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }\n.void-row .void-btns { display: flex; gap: 3px; }\n.void-row .void-btns button { flex: 1; padding: 4px 2px; font-size: 9px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; }\n.void-row .void-btns button.btn-confirm { color: var(--danger); }\n.void-row .void-btns button:hover { background: var(--surface-hover); border-color: var(--accent); }\n',
+    'sidepanel.js': 'const API = "http://127.0.0.1:47221";\nconst IS_SLIM = new URLSearchParams(location.search).get("mode") === "slim";\n\nlet state = {\n  connected: false,\n  systemSum: 0,\n  records: [],\n  units: [],\n  terminals: {},\n  isSupervisor: false,\n  metaLoaded: false,\n  initialSynced: false,\n  isProcessing: false,\n};\n\nconst $ = (id) => document.getElementById(id);\n\nfunction showToast(msg, ms = 2400) {\n  const el = $("toast");\n  el.textContent = msg;\n  el.classList.remove("hidden");\n  clearTimeout(el._t);\n  el._t = setTimeout(() => el.classList.add("hidden"), ms);\n}\n\nfunction fmtMoney(n) {\n  return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n\nfunction todayISO() {\n  const d = new Date();\n  const y = d.getFullYear();\n  const m = String(d.getMonth() + 1).padStart(2, "0");\n  const day = String(d.getDate()).padStart(2, "0");\n  return `${y}-${m}-${day}`;\n}\n\nasync function apiGet(path) {\n  const r = await fetch(API + path, { cache: "no-store" });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nasync function apiPost(path, body = {}) {\n  const r = await fetch(API + path, {\n    method: "POST",\n    headers: { "Content-Type": "application/json" },\n    body: JSON.stringify(body),\n  });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nfunction setConnected(ok, version = "") {\n  state.connected = ok;\n  const b = $("connBadge");\n  if (ok) {\n    b.textContent = "● متصل";\n    b.className = "badge online";\n    if (version) $("footVer").textContent = `A2R ${version} • Ahmed Ramadan`;\n  } else {\n    b.textContent = "● مغلق";\n    b.className = "badge offline";\n  }\n}\n\nfunction populateSelects() {\n  if (state.metaLoaded) return;\n  const fill = (sel, items, placeholder) => {\n    if (!sel) return;\n    sel.innerHTML = "";\n    const opt0 = document.createElement("option");\n    opt0.value = "";\n    opt0.textContent = placeholder;\n    sel.appendChild(opt0);\n    items.forEach((v) => {\n      const o = document.createElement("option");\n      o.value = v;\n      o.textContent = v;\n      sel.appendChild(o);\n    });\n  };\n  fill($("mUnit"), state.units, "وحدة المرور (اختياري)");\n  fill($("sumUnit"), state.units, "اختر الوحدة (إجباري)");\n  state.metaLoaded = true;\n}\n\nfunction applyStatus(d) {\n  setConnected(true, d.version || "");\n  if (d.units && d.units.length) {\n    state.units = d.units;\n    state.terminals = d.terminals || {};\n    populateSelects();\n  }\n  state.isSupervisor = !!d.is_supervisor;\n  $("kpiPrinted").textContent = String(d.printed_today || 0);\n\n  const s = d.summary || {};\n  state.systemSum = Number(s.total_sum || 0);\n  $("kpiCount").textContent = String(s.total_count || 0);\n  $("kpiSum").textContent = fmtMoney(state.systemSum);\n  $("kpiVoid").textContent = String(s.void_count || 0);\n  $("kpiDup").textContent = String(s.duplicates || 0);\n\n  const archEl = $("archStatus");\n  if (d.archive_done_today) {\n    archEl.textContent = `✓ الأرشفة مكتملة${d.archive_time ? " (" + d.archive_time + ")" : ""}`;\n    archEl.style.color = "#81C995";\n  } else {\n    archEl.textContent = "● الأرشفة جاهزة";\n    archEl.style.color = "#9AA0A6";\n  }\n\n  if (state.isSupervisor) {\n    $("archAuthRow").style.display = "none";\n    $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n  }\n\n  // شريط تقدم الفحص (v2.8)\n  state.isProcessing = !!d.is_processing;\n  const progEl = $("scanProg");\n  if (progEl) {\n    if (state.isProcessing) {\n      const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));\n      progEl.classList.remove("hidden");\n      $("scanProgFill").style.width = pct + "%";\n      $("scanProgPct").textContent = pct + "%";\n    } else {\n      progEl.classList.add("hidden");\n    }\n  }\n}\n\nasync function refreshStatus() {\n  try {\n    const d = await apiGet("/api/status");\n    applyStatus(d);\n    if (!state.initialSynced) {\n      state.initialSynced = true;\n      const cnt = Number((d.summary || {}).total_count || 0);\n      if (cnt === 0 && !d.is_processing) {\n        apiPost("/api/scan", { date: todayISO() })\n          .then(async (res) => {\n            if (res && res.ok) {\n              const d2 = await apiGet("/api/status");\n              applyStatus(d2);\n              await refreshRecords();\n            }\n          })\n          .catch(() => {});\n      }\n    }\n    return true;\n  } catch (_) {\n    setConnected(false);\n    return false;\n  }\n}\n\nasync function refreshRecords() {\n  try {\n    const d = await apiGet("/api/records");\n    state.records = d.records || [];\n    renderRecords();\n  } catch (_) {}\n}\n\nfunction renderRecords() {\n  const q = ($("recSearch").value || "").trim().toLowerCase();\n  const filt = $("recFilter").value;\n  const list = $("recList");\n  list.innerHTML = "";\n\n  let shown = 0;\n  let shownSum = 0;\n  state.records.forEach((r) => {\n    if (filt !== "all" && r.kind !== filt) return;\n    if (q) {\n      const hay = `${r.unit} ${r.plate} ${r.insured} ${r.amount} ${r.chassis} ${r.motor} ${r.file} ${r.status_text}`.toLowerCase();\n      if (!hay.includes(q)) return;\n    }\n    shown++;\n    if (!r.is_void) shownSum += Number(r.amount || 0);\n\n    const card = document.createElement("div");\n    card.className = `rec-item kind-${r.kind || "ok"}`;\n\n    const top = document.createElement("div");\n    top.className = "rec-top";\n    const title = document.createElement("span");\n    title.textContent = `#${r.idx} ${r.plate !== "-" ? r.plate : r.insured}`;\n    const amt = document.createElement("span");\n    amt.className = "rec-amt";\n    amt.textContent = fmtMoney(r.amount);\n    top.append(title, amt);\n\n    const meta = document.createElement("div");\n    meta.className = "rec-meta";\n    meta.textContent = `${r.insured} | ${r.time} · ${r.status_text}`;\n\n    const acts = document.createElement("div");\n    acts.className = "rec-actions";\n\n    const bOpen = document.createElement("button");\n    bOpen.textContent = "📄 فتح";\n    bOpen.addEventListener("click", () => apiPost("/api/open_file", { file: r.file }).catch(() => showToast("تعذر الفتح")));\n\n    const bPrint = document.createElement("button");\n    bPrint.textContent = "🖨️ طباعة";\n    bPrint.addEventListener("click", async () => {\n      try {\n        const res = await apiPost("/api/reprint", { file: r.file });\n        showToast(res.ok ? "✓ أُرسل للطابعة" : "تعذرت الطباعة");\n      } catch (_) { showToast("البرنامج مغلق"); }\n    });\n\n    const bVoid = document.createElement("button");\n    if (r.is_void) {\n      bVoid.className = "btn-r";\n      bVoid.textContent = "↩️ استرجاع";\n      bVoid.addEventListener("click", async () => {\n        try {\n          await apiPost("/api/unvoid", { file: r.file });\n          showToast("✓ تم الاسترجاع");\n          await refreshStatus();\n          await refreshRecords();\n        } catch (_) { showToast("تعذر الاسترجاع"); }\n      });\n    } else {\n      bVoid.className = "btn-v";\n      bVoid.textContent = "❌ إلغاء";\n      bVoid.addEventListener("click", () => {\n        const old = card.querySelector(".void-row");\n        if (old) { old.remove(); return; }\n        const row = document.createElement("div");\n        row.className = "void-row";\n        const inp = document.createElement("input");\n        inp.className = "input";\n        inp.placeholder = `سبب إلغاء #${r.idx} (${fmtMoney(r.amount)} ج.م)`;\n        const btns = document.createElement("div");\n        btns.className = "void-btns";\n        const bOk = document.createElement("button");\n        bOk.className = "btn-confirm";\n        bOk.textContent = "تأكيد الإلغاء";\n        const bNo = document.createElement("button");\n        bNo.textContent = "تراجع";\n        bNo.addEventListener("click", () => row.remove());\n        bOk.addEventListener("click", async () => {\n          bOk.disabled = true;\n          try {\n            await apiPost("/api/void", { file: r.file, reason: inp.value.trim() });\n            showToast("✓ تم الإلغاء");\n            await refreshStatus();\n            await refreshRecords();\n          } catch (_) {\n            showToast("تعذر الإلغاء");\n            bOk.disabled = false;\n          }\n        });\n        btns.append(bOk, bNo);\n        row.append(inp, btns);\n        card.appendChild(row);\n        inp.focus();\n      });\n    }\n\n    acts.append(bOpen, bPrint, bVoid);\n    card.append(top, meta, acts);\n    list.appendChild(card);\n  });\n\n  $("recStats").textContent = `${shown} سجل | ${fmtMoney(shownSum)} ج.م`;\n  if (!shown) {\n    const empty = document.createElement("div");\n    empty.className = "hint center mt-4";\n    empty.textContent = state.records.length ? "لا توجد نتائج" : "اضغط (⚡ فحص اليوم)";\n    list.appendChild(empty);\n  }\n}\n\nasync function loadArchiveDays() {\n  try {\n    const d = await apiGet("/api/archive/days");\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.days || []).forEach((item) => {\n      const card = document.createElement("div");\n      card.className = "rec-item" + (item.dup ? " kind-dup" : item.missing ? " kind-missing" : "");\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      top.innerHTML = `<span>📅 ${item.day}</span><span class="rec-amt">${fmtMoney(item.total)}</span>`;\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `العدد: ${item.ops} | ملغي: ${item.void} | يدوي: ${item.manual}`;\n      card.append(top, meta);\n      box.appendChild(card);\n    });\n    if (!(d.days || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد أيام مؤرشفة</div>\';\n    }\n  } catch (_) {}\n}\n\nasync function doArchiveSearch() {\n  const q = ($("archQuery").value || "").trim();\n  if (!q) return loadArchiveDays();\n  try {\n    const d = await apiGet(`/api/archive/search?q=${encodeURIComponent(q)}`);\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.results || []).forEach((r) => {\n      const card = document.createElement("div");\n      card.className = `rec-item ${r.is_void ? "kind-void" : r.is_manual ? "kind-manual" : ""}`;\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      const t1 = document.createElement("span");\n      t1.textContent = `${r.day} ${r.plate !== "-" ? r.plate : ""}`;\n      const t2 = document.createElement("span");\n      t2.className = "rec-amt";\n      t2.textContent = fmtMoney(r.amount);\n      top.append(t1, t2);\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `${r.insured} | ${r.time}`;\n      const acts = document.createElement("div");\n      acts.className = "rec-actions";\n      const bOpen = document.createElement("button");\n      bOpen.textContent = "📄 فتح الإيصال";\n      bOpen.addEventListener("click", () => apiPost("/api/open_file", { path: r.path }).catch(() => showToast("تعذر الفتح")));\n      acts.appendChild(bOpen);\n      card.append(top, meta, acts);\n      box.appendChild(card);\n    });\n    if (!(d.results || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد نتائج</div>\';\n    }\n  } catch (_) {\n    showToast("تعذر البحث");\n  }\n}\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  if (IS_SLIM) {\n    $("btnCloseSlim").classList.remove("hidden");\n    $("btnCloseSlim").addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_CLOSE_SIDEBAR" }, "*");\n    });\n    const pinBtn = $("btnPinSite");\n    pinBtn.classList.remove("hidden");\n    pinBtn.addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_TOGGLE_SITE" }, "*");\n    });\n    window.parent.postMessage({ type: "A2R_QUERY_SITE" }, "*");\n    window.addEventListener("message", (ev) => {\n      if (!ev || !ev.data || ev.data.type !== "A2R_SITE_STATE") return;\n      pinBtn.classList.toggle("pinned", !!ev.data.pinned);\n      pinBtn.title = ev.data.fixed\n        ? "الإضافة تعمل دائمًا على بوابة المرور"\n        : (ev.data.pinned ? "الإضافة مثبتة على هذا الموقع — اضغط للإيقاف" : "تشغيل الإضافة تلقائيًا على هذا الموقع");\n    });\n  }\n\n  // إعداد الرجوع التلقائي للبوابة (v2.8)\n  const selIdle = $("selIdle");\n  if (selIdle) {\n    try {\n      chrome.storage.local.get({ a2r_idle_sec: 40 }, (res) => {\n        if (chrome.runtime.lastError) return;\n        const v = Number(res.a2r_idle_sec);\n        selIdle.value = String(isNaN(v) ? 40 : v);\n      });\n    } catch (_) {}\n    selIdle.addEventListener("change", () => {\n      try {\n        chrome.storage.local.set({ a2r_idle_sec: Number(selIdle.value) });\n        showToast("✓ تم حفظ إعداد الرجوع التلقائي");\n      } catch (_) {}\n    });\n  }\n  let _lastAct = 0;\n  const _pingAct = () => {\n    const now = Date.now();\n    if (now - _lastAct < 2000) return;\n    _lastAct = now;\n    try { chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {}); } catch (_) {}\n    if (IS_SLIM) window.parent.postMessage({ type: "A2R_USER_ACTIVITY" }, "*");\n  };\n  ["mousedown", "keydown", "input", "wheel", "mousemove"].forEach((ev) => {\n    window.addEventListener(ev, _pingAct, { passive: true, capture: true });\n  });\n\n  document.querySelectorAll(".tab-btn").forEach((btn) => {\n    btn.addEventListener("click", () => {\n      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));\n      document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));\n      btn.classList.add("active");\n      $("tab-" + btn.dataset.tab).classList.add("active");\n      if (btn.dataset.tab === "records") refreshRecords();\n      if (btn.dataset.tab === "archive") loadArchiveDays();\n    });\n  });\n\n  // 1. فحص اليوم\n  $("btnScan").addEventListener("click", async () => {\n    const b = $("btnScan");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفحص...";\n    try {\n      const res = await apiPost("/api/scan", { date: todayISO() });\n      if (res.ok) {\n        await refreshStatus();\n        await refreshRecords();\n        showToast(`✓ ${res.total_count} عملية (${fmtMoney(res.total_sum)})`);\n      } else {\n        showToast(res.error || "لا توجد إيصالات اليوم");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق — شغّل A2R Console");\n    } finally {\n      b.disabled = false;\n      b.textContent = "⚡ فحص اليوم";\n    }\n  });\n\n  // 2. ملخص الفحص PDF\n  $("btnSummaryPdf").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n    $("summaryBox").classList.toggle("hidden");\n  });\n  $("btnSumCancel").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n  });\n  $("sumUnit").addEventListener("change", () => {\n    const tid = state.terminals[$("sumUnit").value] || "";\n    $("sumTid").textContent = tid ? `الماكينة: ${tid}` : "الماكينة: —";\n  });\n  $("btnSumPrint").addEventListener("click", async () => {\n    const unit = ($("sumUnit").value || "").trim();\n    if (!unit) return showToast("اختر الوحدة أولاً");\n    const b = $("btnSumPrint");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفتح...";\n    try {\n      const res = await apiPost("/api/summary_pdf", { unit, print: false });\n      if (res.ok) {\n        $("summaryBox").classList.add("hidden");\n        showToast("✓ تم فتح ملخص الفحص PDF");\n      } else {\n        showToast(res.error || "تعذر إنشاء الملخص");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "📄 فتح الملخص PDF";\n    }\n  });\n\n  // 3. معاملة يدوية (فتح فوري + تنفيذ بـ Enter)\n  $("btnQuickManual").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n    const box = $("manualBox");\n    box.classList.toggle("hidden");\n    if (!box.classList.contains("hidden")) {\n      setTimeout(() => { if ($("mAmount")) $("mAmount").focus(); }, 40);\n    }\n  });\n  $("btnManualCancel").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n  });\n\n  async function submitManualReceipt() {\n    const b = $("btnAddManual");\n    if (b.disabled) return;\n    const amount = ($("mAmount").value || "").trim();\n    if (!amount) return showToast("أدخل المبلغ أولاً");\n    b.disabled = true;\n    b.textContent = "⏳ جاري التنفيذ...";\n    try {\n      const res = await apiPost("/api/manual", {\n        amount,\n        insured: $("mName").value.trim(),\n        plate: $("mPlate").value.trim(),\n        unit: $("mUnit").value.trim(),\n      });\n      if (res.ok) {\n        $("mAmount").value = "";\n        $("mName").value = "";\n        $("mPlate").value = "";\n        showToast(`✓ إيصال يدوي (${fmtMoney(res.amount)})`);\n        if (res.pdf_url) {\n          try {\n            chrome.runtime.sendMessage({ type: "A2R_OPEN_TAB", url: res.pdf_url }).catch(() => {\n              window.open(res.pdf_url, "_blank");\n            });\n          } catch (_) {\n            window.open(res.pdf_url, "_blank");\n          }\n        }\n        await refreshStatus();\n        await refreshRecords();\n        $("mAmount").focus();\n      } else {\n        showToast(res.error || "مبلغ غير صالح");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "توليد وطباعة (Enter)";\n    }\n  }\n  $("btnAddManual").addEventListener("click", submitManualReceipt);\n  ["mAmount", "mName", "mPlate", "mUnit"].forEach((id) => {\n    $(id).addEventListener("keydown", (e) => {\n      if (e.key === "Enter") {\n        e.preventDefault();\n        submitManualReceipt();\n      }\n    });\n  });\n\n  // 4. عرض السجل\n  $("btnViewRecords").addEventListener("click", () => {\n    const tabBtn = document.querySelector(\'.tab-btn[data-tab="records"]\');\n    if (tabBtn) tabBtn.click();\n  });\n\n  // 5. طباعة الأخير\n  $("btnReprintLast").addEventListener("click", async () => {\n    try {\n      const res = await apiPost("/api/reprint_last");\n      showToast(res.ok ? "✓ تمت إعادة طباعة الأخير" : (res.error || "لا يوجد إيصال اليوم"));\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  $("btnTopOpenApp").addEventListener("click", () => {\n    apiPost("/api/open_app", { mode: "show" }).catch(() => showToast("البرنامج مغلق"));\n  });\n\n  $("recSearch").addEventListener("input", renderRecords);\n  $("recFilter").addEventListener("change", renderRecords);\n\n  $("btnArchSearch").addEventListener("click", doArchiveSearch);\n  $("archQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") doArchiveSearch(); });\n  $("btnArchUnlock").addEventListener("click", async () => {\n    const pwd = ($("archPwd").value || "").trim();\n    if (!pwd) return;\n    try {\n      const res = await apiPost("/api/auth", { password: pwd });\n      if (res.ok && res.is_supervisor) {\n        state.isSupervisor = true;\n        $("archPwd").value = "";\n        $("archAuthRow").style.display = "none";\n        $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n        showToast("✓ تم تفعيل المشرف");\n        loadArchiveDays();\n      } else {\n        showToast(res.error || "كلمة المرور غير صحيحة");\n      }\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  // تحديث الحالة: يتوقف وهي مخفية، ويتسارع أثناء الفحص (v2.8)\n  let pollTimer = null;\n  function schedulePoll() {\n    clearTimeout(pollTimer);\n    if (document.hidden) return;\n    pollTimer = setTimeout(pollTick, state.isProcessing ? 1000 : 4000);\n  }\n  async function pollTick() {\n    await refreshStatus();\n    schedulePoll();\n  }\n  document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      clearTimeout(pollTimer);\n    } else {\n      refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n    }\n  });\n  refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n});\n',
+}
+_CHROME_EXT_BIN_FILES = {
+    'icons/icon16.png': 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADIUlEQVR42k2TW28UZQCGn++bme7u0J3uTrft9gAptAKVQ0lqiAEhniDqhVz5C/wJeieX/gZvDCam0R/QeCAoomLDRdEEKwIttHTb0sMeOt2dmZ3z50UT9b1/nufqFTdufK7434QQeL6HEGAWDpEpEIlPJgww8kiVgvoP0QGUUigUmtBothp04haGoRHGQwyaKdcGllj388zXhxGmRabp/8Z0gFwuhxCCenOHbtZBMyRCE0TSY8yBr6OjBJUy4YhNKHuZ7G6RCI04ig4ES0vL7O232HU3GBs5TH/JJowCGvU1dD3P4YFxbve9ye7yY7L9GvXdRapDg4yMjqJHccRPt39mef0Rnr7HlYtXKZ8pMzf3Dasr20xU4OOpkxz3xrn/w0224hzf+gHTjVnOX34bGYUxYRRg22VMo0iURWzUazx89ogTM9Ncy5lszD/H3vqRD93vOGELPj2bEpBjdeUpMggCPN/FrvZRKORxWvtYlsWVNy5zcuIUr4wmzNRC7lrvUzUD3ml8z2BiYQYeCQLpeR4gKeZKGIZGp+NS7rV57613cZw6N+84zI1+QFYZxdk0mCw6fNH+lVgvcO7MqQNBmqQgFFkkcNseGBlrq5vcu3cXvVhCnH6dvqRFflux0CeZnEqIlUEYBsh2p02up4cHfz3A9V1SGZNlGff//J1uc5/CR1e5NNHg+NYifw91sXyDI9l5hJ7w7OkKuu/5CCmZeull1jZXCcKAF+vbrK3XsAcGKK/H6C9uMZYd47FnMbkAXj5D5XvQpYZsNlv4vseFmdewShau12G19hyn7RClbX678wdf3XJJcxX6exW/DCfUSiVUEOAHAeL69U+U3/U5Nn6UJ7WH7DR2qFT6cTyHnlQjGr6EZRfRqmc5vfYZdTuj2J5mc7NGoZBHzM5+qYQQpGmKs+fgpi2EBqSAbnIh8Fg8co6GbfKqucD2k2GEbmAYGlmm0MMwRCmFlJJ8IU/XKRCELkpGZLFA9aZcdObZ8grsJRaRBD2NiePo4ExCCIQQABiGQXWoShiEuN19dN2keSimqRLqST+6ITFEilIg5QHzD2xtghGyFQRPAAAAAElFTkSuQmCC',
+    'icons/icon48.png': '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',
+    'icons/icon128.png': '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',
+}
+
+def ensure_chrome_extension_extracted():
+    """ينشئ/يحدّث مجلد إضافة كروم A2R (الشريط الجانبي + إدارة التبويبات) داخل مجلد الأرشيف الاحتياطي المخفي في Documents."""
+    try:
+        import base64
+        os.makedirs(ARCHIVE_BACKUP_DIR, exist_ok=True)
+        _hide_path(ARCHIVE_BACKUP_DIR)
+        os.makedirs(os.path.join(CHROME_EXT_DIR, "icons"), exist_ok=True)
+        for rel, content in _CHROME_EXT_TEXT_FILES.items():
+            fp = os.path.join(CHROME_EXT_DIR, rel)
+            raw = content.encode("utf-8")
+            need = (not os.path.exists(fp)) or (os.path.getsize(fp) != len(raw))
+            if not need:
+                try:
+                    with open(fp, "rb") as fh:
+                        need = (fh.read() != raw)
+                except Exception:
+                    need = True
+            if need:
+                with open(fp, "wb") as fh:
+                    fh.write(raw)
+        for rel, b64s in _CHROME_EXT_BIN_FILES.items():
+            fp = os.path.join(CHROME_EXT_DIR, rel)
+            raw = base64.b64decode(b64s)
+            need = (not os.path.exists(fp)) or (os.path.getsize(fp) != len(raw))
+            if not need:
+                try:
+                    with open(fp, "rb") as fh:
+                        need = (fh.read() != raw)
+                except Exception:
+                    need = True
+            if need:
+                with open(fp, "wb") as fh:
+                    fh.write(raw)
+        return CHROME_EXT_DIR
+    except Exception as e:
+        log_exception("ensure_chrome_extension_extracted", e)
+        return ""
+
+def build_summary_pdf_file(info, pdf_path, chosen_unit, chosen_tid):
+    """يبني إيصال ملخص الفحص PDF (نفس تصميم البرنامج الرسمي) للاستخدام من البرنامج والإضافة معًا."""
+    PAGE_W, PAGE_H = 226, 480
+    c = canvas.Canvas(pdf_path, pagesize=(PAGE_W, PAGE_H))
+    font_name = "Helvetica-Bold"
+    for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+        if os.path.exists(f_cand):
+            try:
+                pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
+                font_name = "ReceiptArabic"
+                break
+            except Exception as _e: _log_silent("build_summary_pdf_file#1", _e)
+
+    def _ar(txt):
+        try: return get_display(arabic_reshaper.reshape(str(txt)))
+        except Exception: return str(txt)
+
+    c.setStrokeColorRGB(0.15, 0.35, 0.55)
+    c.setLineWidth(1.5)
+    c.rect(6, 6, PAGE_W - 12, PAGE_H - 12)
+
+    c.setFont(font_name, 15)
+    c.setFillColorRGB(0.05, 0.25, 0.55)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 32, _ar("إيصال ملخص الفحص"))
+    c.setFont("Helvetica-Bold", 12)
+    c.setFillColorRGB(0.15, 0.15, 0.15)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 52, f"A2R Operations Console {APP_VERSION}")
+
+    c.setStrokeColorRGB(0.6, 0.6, 0.6)
+    c.line(14, PAGE_H - 64, PAGE_W - 14, PAGE_H - 64)
+
+    y = PAGE_H - 92
+    rows = [
+        ("وحدة المرور", info.get('unit', '-')),
+        ("تاريخ التقرير", info.get('date_label', '-')),
+        ("إجمالي العمليات", f"{info.get('total_count', 0):,}"),
+        ("إيصالات إلكترونية", f"{info.get('pdf_count', 0):,}"),
+        ("معاملات يدوية", f"{info.get('manual_count', 0):,}"),
+        ("معاملات ملغية", f"{info.get('void_count', 0):,}"),
+    ]
+
+    for lbl, val in rows:
+        c.setFillColorRGB(0.94, 0.96, 0.98)
+        c.rect(12, y - 6, PAGE_W - 24, 24, fill=True, stroke=False)
+        c.setFont(font_name, 10)
+        c.setFillColorRGB(0.25, 0.25, 0.25)
+        c.drawRightString(PAGE_W - 18, y + 2, _ar(lbl))
+        c.setFont(font_name, 11)
+        c.setFillColorRGB(0.0, 0.0, 0.0)
+        c.drawString(18, y + 2, _ar(val))
+        y -= 30
+
+    c.setFillColorRGB(0.08, 0.48, 0.28)
+    c.roundRect(12, y - 18, PAGE_W - 24, 46, 5, fill=True, stroke=False)
+    c.setFont(font_name, 11)
+    c.setFillColorRGB(1, 1, 1)
+    c.drawRightString(PAGE_W - 20, y + 8, _ar("إجمالي مبالغ السيستم:"))
+    c.setFont("Helvetica-Bold", 15)
+    c.drawCentredString(PAGE_W / 2, y - 9, f"{info.get('total_sum', 0):,.2f} EGP")
+
+    _draw_summary_unit_block(c, font_name, _ar, PAGE_W, chosen_unit, chosen_tid)
+
+    c.setStrokeColorRGB(0.7, 0.7, 0.7)
+    c.line(14, 46, PAGE_W - 14, 46)
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(PAGE_W / 2, 30, f"Printed: {datetime.datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+    c.drawCentredString(PAGE_W / 2, 16, f"Alexandria • {APP_OWNER} • {APP_VERSION}")
+    c.save()
+
+def start_local_chrome_bridge(app):
+    """جسر محلي خفيف يعمل على 127.0.0.1:47221 فقط (أوفلاين بالكامل) لربط الشريط الجانبي لكروم ببرنامج A2R بدون حذف أي ميزة."""
+    try:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import urlparse, parse_qs
+    except Exception as e:
+        log_exception("bridge_import", e)
+        return None
+
+    bridge_state = {"supervisor": False}
+
+    class _A2RBridgeHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def _send_json(self, data, code=200):
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self._send_json({"ok": True}, 200)
+
+        def _read_body(self):
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                if n <= 0 or n > 1_000_000:
+                    return {}
+                return json.loads(self.rfile.read(n).decode("utf-8", "replace"))
+            except Exception:
+                return {}
+
+        def _find_rec(self, fname):
+            if not fname:
+                return None
+            for r in list(app.last_detailed_records or []):
+                if r.get("file") == fname or os.path.basename(r.get("path", "")) == fname:
+                    return r
+            return None
+
+        def do_GET(self):
+            try:
+                parsed = urlparse(self.path)
+                p = parsed.path
+                qs = parse_qs(parsed.query)
+
+                if p == "/api/ping":
+                    return self._send_json({"ok": True, "version": APP_VERSION, "owner": APP_OWNER})
+
+                if p == "/api/pdf":
+                    fn = os.path.basename((qs.get("file", [""])[0] or "").strip())
+                    if not fn or not fn.lower().endswith(".pdf"):
+                        return self._send_json({"ok": False, "error": "invalid file"}, 400)
+                    fpath = os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, fn)
+                    if not os.path.exists(fpath):
+                        rec = self._find_rec(fn)
+                        fpath = (rec or {}).get("path", "")
+                    if not fpath or not os.path.exists(fpath):
+                        return self._send_json({"ok": False, "error": "not found"}, 404)
+                    with open(fpath, "rb") as fh:
+                        pdf_bytes = fh.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Disposition", f'inline; filename="{fn}"')
+                    self.send_header("Content-Length", str(len(pdf_bytes)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(pdf_bytes)
+                    return
+
+                if p == "/api/status":
+                    info = dict(app.last_summary_info or {})
+                    try:
+                        _prog = float(app.progress_bar.get())
+                    except Exception:
+                        _prog = 0.0
+                    cur_date = datetime.date.today().isoformat()
+                    try:
+                        cur_date = f"{int(app.cb_y.get()):04d}-{int(app.cb_m.get()):02d}-{int(app.cb_d.get()):02d}"
+                    except Exception:
+                        pass
+                    return self._send_json({
+                        "ok": True,
+                        "version": APP_VERSION,
+                        "date": cur_date,
+                        "folder": app._watch_path or DEFAULT_RECEIPTS_DIR,
+                        "auto_print": bool(app.auto_print_enabled),
+                        "auto_sync": bool(app.auto_sync_enabled),
+                        "printed_today": int(app.printed_count_today or 0),
+                        "is_processing": bool(app.is_processing),
+                        "progress": _prog,
+                        "is_supervisor": bool(app.is_supervisor or bridge_state["supervisor"]),
+                        "archive_done_today": bool(app._archive_done_today()),
+                        "archive_time": app._archive_done_time(),
+                        "summary": {
+                            "total_count": int(info.get("total_count", 0)),
+                            "total_sum": float(info.get("total_sum", 0.0)),
+                            "pdf_count": int(info.get("pdf_count", 0)),
+                            "manual_count": int(info.get("manual_count", 0)),
+                            "void_count": int(info.get("void_count", 0)),
+                            "void_sum": float(info.get("void_sum", 0.0)),
+                            "duplicates": int(info.get("duplicates", 0)),
+                            "unit": info.get("unit", UNSPEC),
+                            "date_label": info.get("date_label", ""),
+                        },
+                        "units": UNITS_LIST,
+                        "terminals": UNIT_TERMINALS,
+                        "employees": EMPLOYEES_LIST,
+                    })
+
+                if p == "/api/records":
+                    out = []
+                    for i, r in enumerate(list(app.last_detailed_records or []), 1):
+                        out.append({
+                            "idx": i,
+                            "unit": r.get("unit", "-"),
+                            "plate": r.get("plate", "-"),
+                            "insured": r.get("insured", "-"),
+                            "amount": float(r.get("amount", 0.0)),
+                            "time": r.get("time", "-"),
+                            "chassis": r.get("chassis", "-"),
+                            "motor": r.get("motor", "-"),
+                            "file": r.get("file", ""),
+                            "status_text": r.get("status_text", ""),
+                            "kind": r.get("kind", "ok"),
+                            "is_void": bool(r.get("is_void", False)),
+                            "is_manual": bool(r.get("is_manual", False)),
+                        })
+                    return self._send_json({"ok": True, "records": out})
+
+                if p == "/api/archive/days":
+                    is_adm = bool(app.is_supervisor or bridge_state["supervisor"])
+                    cutoff = "" if is_adm else (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+                    stats = archive_day_stats(archive_load_rows())
+                    if cutoff:
+                        stats = [x for x in stats if x["day"] >= cutoff]
+                    return self._send_json({"ok": True, "days": stats[:60]})
+
+                if p == "/api/archive/search":
+                    q = (qs.get("q", [""])[0] or "").strip()
+                    is_adm = bool(app.is_supervisor or bridge_state["supervisor"])
+                    cutoff = "" if is_adm else (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+                    rows = archive_search(q, include_void=True, limit=120, min_day=cutoff)
+                    out = []
+                    for row in rows:
+                        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = row[:10]
+                        out.append({
+                            "path": path, "day": day, "file": fname, "unit": unit,
+                            "plate": plate, "insured": insured, "amount": float(amount),
+                            "time": rtime, "is_manual": bool(is_manual), "is_void": bool(is_void),
+                        })
+                    return self._send_json({"ok": True, "results": out})
+
+                return self._send_json({"ok": False, "error": "not found"}, 404)
+            except Exception as e:
+                log_exception("bridge_get", e)
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+
+        def do_POST(self):
+            try:
+                p = urlparse(self.path).path
+                data = self._read_body()
+
+                if p == "/api/scan":
+                    d_str = (data.get("date") or "").strip()
+                    td = parse_flex_date(d_str) or datetime.date.today()
+                    folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    if not os.path.isdir(folder):
+                        return self._send_json({"ok": False, "error": "مجلد الإيصالات غير موجود"})
+                    if not os.path.exists(PDFTOTEXT_EXE):
+                        return self._send_json({"ok": False, "error": "pdftotext.exe غير موجود"})
+                    if not app.processing_lock.acquire(blocking=False):
+                        return self._send_json({"ok": False, "error": "جاري الفحص بالفعل..."})
+                    try:
+                        app.is_processing = True
+                        recs = collect_records(folder, td)
+                        date_label = td.strftime("%d.%m.%Y")
+                        if not recs:
+                            app.run_on_main(app.clear_results)
+                            return self._send_json({"ok": False, "error": f"لا توجد إيصالات بتاريخ {date_label}"})
+                        device_unit = annotate_records(recs)
+                        info, units_summary = build_summary(recs, device_unit, date_label)
+                        report_path = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{td.strftime('%d-%m-%Y')}.xlsx")
+                        out_file = write_report(recs, report_path) if OPENPYXL_AVAILABLE else report_path
+                        app.last_generated_file = out_file
+                        app.system_total_sum = info["total_sum"]
+                        app.last_detailed_records = recs
+                        app.last_units_summary = units_summary
+                        app.last_summary_info = info
+                        def _sync_ui():
+                            try:
+                                app.cb_d.set(f"{td.day:02d}")
+                                app.cb_m.set(f"{td.month:02d}")
+                                app.cb_y.set(str(td.year))
+                                app.progress_bar.set(1.0)
+                                app.lbl_progress_pct.configure(text="100%")
+                                app.lbl_cnt.configure(text=f"{info['total_count']:,}")
+                                app.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+                                app._render_status_bar(info['total_count'], info['total_sum'])
+                                app.check_pos()
+                            except Exception as _e:
+                                _log_silent("bridge_scan_ui", _e)
+                        app.run_on_main(_sync_ui)
+                        return self._send_json({
+                            "ok": True, "total_count": info["total_count"], "total_sum": info["total_sum"]
+                        })
+                    finally:
+                        app.is_processing = False
+                        if app.processing_lock.locked():
+                            app.processing_lock.release()
+
+                if p == "/api/toggle":
+                    def _apply_sw():
+                        try:
+                            if "auto_print" in data:
+                                app.auto_print_enabled = bool(data["auto_print"])
+                                if app.auto_print_enabled: app.sw_autoprint.select()
+                                else: app.sw_autoprint.deselect()
+                            if "auto_sync" in data:
+                                app.auto_sync_enabled = bool(data["auto_sync"])
+                                if app.auto_sync_enabled: app.sw_autosync.select()
+                                else: app.sw_autosync.deselect()
+                            app.update_toggle_appearance()
+                        except Exception as _e:
+                            _log_silent("bridge_toggle", _e)
+                    app.run_on_main(_apply_sw)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/reprint_last":
+                    target = app.last_printed_pdf if (app.last_printed_pdf and os.path.exists(app.last_printed_pdf)) else None
+                    if not target:
+                        folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                        today_d = datetime.date.today()
+                        best_mt, best_p = 0.0, None
+                        if os.path.isdir(folder):
+                            with os.scandir(folder) as it:
+                                for ent in it:
+                                    if not ent.is_file(): continue
+                                    fl = ent.name.lower()
+                                    if not fl.endswith(".pdf") or fl.endswith(("_cropped.pdf", "_summary.pdf")): continue
+                                    if not (fl.startswith("quote_receipt_") or MANUAL_NAME_RE.match(ent.name)): continue
+                                    if ent.name.lstrip("_") in _VOID_KEYS: continue
+                                    st = ent.stat()
+                                    if datetime.date.fromtimestamp(st.st_mtime) == today_d and st.st_mtime > best_mt:
+                                        best_mt, best_p = st.st_mtime, ent.path
+                        target = best_p
+                    if not target or not os.path.exists(target):
+                        return self._send_json({"ok": False, "error": "لا يوجد إيصال مطبوع اليوم"})
+                    app.last_printed_pdf = target
+                    ok = app.send_to_thermal_printer_57x90(target)
+                    return self._send_json({"ok": bool(ok)})
+
+                if p == "/api/reprint":
+                    rec = self._find_rec(data.get("file", ""))
+                    fpath = (rec or {}).get("path", "") or os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, data.get("file", ""))
+                    if not fpath or not os.path.exists(fpath):
+                        return self._send_json({"ok": False, "error": "الملف غير موجود"})
+                    ok = app.send_to_thermal_printer_57x90(fpath)
+                    return self._send_json({"ok": bool(ok)})
+
+                if p == "/api/open_file":
+                    fpath = (data.get("path") or "").strip()
+                    if not fpath:
+                        rec = self._find_rec(data.get("file", ""))
+                        fpath = (rec or {}).get("path", "") or os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, data.get("file", ""))
+                    if fpath and os.path.exists(fpath):
+                        os.startfile(fpath)
+                        return self._send_json({"ok": True})
+                    return self._send_json({"ok": False, "error": "الملف غير موجود"})
+
+                if p == "/api/void":
+                    rec = self._find_rec(data.get("file", ""))
+                    if not rec:
+                        return self._send_json({"ok": False, "error": "المعاملة غير موجودة"})
+                    key = void_key(rec.get("file", "") or rec.get("path", ""))
+                    reason = (data.get("reason") or "").strip()
+                    add_void(key, rec["amount"], rec.get("plate", "-"), reason)
+                    rec["is_void"] = True
+                    rec["void_reason"] = reason
+                    app.run_on_main(app.refresh_after_void_change)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/unvoid":
+                    rec = self._find_rec(data.get("file", ""))
+                    if not rec:
+                        return self._send_json({"ok": False, "error": "المعاملة غير موجودة"})
+                    remove_void(void_key(rec.get("file", "") or rec.get("path", "")))
+                    rec["is_void"] = False
+                    rec["void_reason"] = ""
+                    app.run_on_main(app.refresh_after_void_change)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/manual":
+                    amt = parse_manual_amount(data.get("amount"))
+                    if amt is None:
+                        return self._send_json({"ok": False, "error": "مبلغ غير صالح"})
+                    if not REPORTLAB_AVAILABLE:
+                        return self._send_json({"ok": False, "error": "ReportLab غير مثبت"})
+                    dest = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    file_base, now_dt = unique_manual_filename(dest, amt, datetime.datetime.now())
+                    full_path = os.path.join(dest, file_base)
+                    u_val = (data.get("unit") or "").strip() or "-"
+                    p_val = (data.get("plate") or "").strip() or "-"
+                    n_val = (data.get("insured") or "").strip() or "-"
+                    app.printed_receipts_set.add(file_base)
+                    create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
+                    try:
+                        conn = db_connect()
+                        try:
+                            conn.execute(
+                                "INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+                                (u_val, p_val, n_val, amt, now_dt.strftime("%d-%m-%Y %H%M%S"), file_base),
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    except Exception as ex_db:
+                        log_exception("bridge_manual_db", ex_db)
+                    if app.auto_print_enabled:
+                        try: app._print_queue.put(full_path)
+                        except Exception as _e: _log_silent("bridge_manual_print", _e)
+                    return self._send_json({"ok": True, "amount": amt, "file": file_base, "pdf_url": f"http://{LOCAL_BRIDGE_HOST}:{LOCAL_BRIDGE_PORT}/api/pdf?file={file_base}"})
+
+                if p == "/api/slip":
+                    emp_val = (data.get("emp") or "").strip()
+                    unit_val = (data.get("unit") or "").strip()
+                    tid_val = UNIT_TERMINALS.get(unit_val, "")
+                    date_val = datetime.date.today().strftime("%d/%m/%Y")
+                    def _print_slip_bg():
+                        try:
+                            pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+                            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
+                                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                                if not os.path.exists(sumatra_path):
+                                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                                if os.path.exists(sumatra_path):
+                                    subprocess.run(
+                                        [sumatra_path, "-print-to-default", "-print-settings", "shrink", "-silent", pdf_path],
+                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90
+                                    )
+                                elif sys.platform == "win32":
+                                    os.startfile(pdf_path, "print")
+                        except Exception as e:
+                            log_exception("bridge_slip_bg", e)
+                    threading.Thread(target=_print_slip_bg, daemon=True).start()
+                    return self._send_json({"ok": True})
+
+                if p == "/api/archive_now":
+                    folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    moved = app._run_archive_sweep(folder)
+                    if moved is None:
+                        return self._send_json({"ok": False, "error": "الأرشفة تعمل بالفعل"})
+                    app._mark_archive_done_today()
+                    app._start_archive_maintenance(folder)
+                    app.run_on_main(app._refresh_mini_archive_label)
+                    return self._send_json({"ok": True, "moved": int(moved or 0)})
+
+                if p == "/api/open_app":
+                    app.show_from_system_tray()
+                    return self._send_json({"ok": True})
+
+                if p == "/api/summary_pdf":
+                    if not REPORTLAB_AVAILABLE:
+                        return self._send_json({"ok": False, "error": "ReportLab غير مثبت"})
+                    unit = (data.get("unit") or "").strip()
+                    if unit not in UNIT_TERMINALS:
+                        return self._send_json({"ok": False, "error": "يرجى اختيار الوحدة أولاً"})
+                    tid = UNIT_TERMINALS.get(unit, "")
+                    # لو الفحص لسه متعملش النهارده نعمله تلقائيًا قبل الطباعة
+                    if not app.last_summary_info:
+                        td = datetime.date.today()
+                        folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                        if os.path.isdir(folder) and os.path.exists(PDFTOTEXT_EXE) and app.processing_lock.acquire(blocking=False):
+                            try:
+                                recs = collect_records(folder, td)
+                                if recs:
+                                    du = annotate_records(recs)
+                                    info_, us_ = build_summary(recs, du, td.strftime("%d.%m.%Y"))
+                                    rp = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{td.strftime('%d-%m-%Y')}.xlsx")
+                                    app.last_generated_file = write_report(recs, rp) if OPENPYXL_AVAILABLE else rp
+                                    app.system_total_sum = info_["total_sum"]
+                                    app.last_detailed_records = recs
+                                    app.last_units_summary = us_
+                                    app.last_summary_info = info_
+                            finally:
+                                if app.processing_lock.locked():
+                                    app.processing_lock.release()
+                    if not app.last_summary_info:
+                        return self._send_json({"ok": False, "error": "لا توجد إيصالات اليوم لعمل الملخص"})
+                    info = dict(app.last_summary_info)
+                    day_iso = _day_iso_from_label(info.get("date_label", "")) or datetime.date.today().isoformat()
+                    summary_unit_save(day_iso, unit, tid)
+                    app._refresh_archive_day_summary(day_iso)
+                    base_file = app.last_generated_file or os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{datetime.date.today().strftime('%d-%m-%Y')}.xlsx")
+                    pdf_path = os.path.splitext(base_file)[0] + "_Summary.pdf"
+                    build_summary_pdf_file(info, pdf_path, unit, tid)
+                    printed = False
+                    if data.get("print", False):
+                        printed = bool(app.send_to_thermal_printer_57x90(pdf_path))
+                    if not printed:
+                        try: os.startfile(pdf_path)
+                        except Exception as _e: _log_silent("bridge_summary_open", _e)
+                    return self._send_json({"ok": True, "printed": printed, "path": pdf_path})
+
+                if p == "/api/auth":
+                    rem = sup_lock_remaining()
+                    if rem > 0:
+                        return self._send_json({"ok": False, "error": f"مقفول مؤقتًا ({rem}ث)"})
+                    val = (data.get("password") or "").strip().lower()
+                    if is_supervisor_password(val):
+                        sup_register_success()
+                        bridge_state["supervisor"] = True
+                        return self._send_json({"ok": True, "is_supervisor": True})
+                    sup_register_fail()
+                    return self._send_json({"ok": False, "error": "كلمة المرور غير صحيحة"})
+
+                return self._send_json({"ok": False, "error": "not found"}, 404)
+            except Exception as e:
+                log_exception("bridge_post", e)
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+
+    try:
+        srv = ThreadingHTTPServer((LOCAL_BRIDGE_HOST, LOCAL_BRIDGE_PORT), _A2RBridgeHandler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+    except Exception as e:
+        log_exception("start_local_chrome_bridge", e)
+        return None
+
+
+_FTS5_SUPPORTED = None
+
+def _has_fts5(conn):
+    global _FTS5_SUPPORTED
+    if _FTS5_SUPPORTED is not None:
+        return _FTS5_SUPPORTED
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(path UNINDEXED, search_text, tokenize='unicode61')")
+        _FTS5_SUPPORTED = True
+    except Exception as e:
+        _log_silent("fts5_init", e)
+        _FTS5_SUPPORTED = False
+    return _FTS5_SUPPORTED
+
+def _norm_fts_text(unit, plate, insured, fname, chassis, motor):
+    parts = [unit, plate, insured, fname, chassis, motor]
+    tokens = []
+    for p in parts:
+        s = clean_arabic(str(p or "")).lower()
+        for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+            s = s.replace(a, b)
+        s_sp = re.sub(r"[^0-9a-zء-ي]+", " ", s).strip()
+        s_cp = re.sub(r"\s+", "", s_sp)
+        if s_sp and s_sp != "-":
+            tokens.append(s_sp)
+        if s_cp and s_cp != s_sp and s_cp != "-":
+            tokens.append(s_cp)
+    return " ".join(tokens)
+
 def _ensure_archive_index():
     conn = db_connect()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS archive_index (
             path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
             insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
-            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER
+            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER,
+            chassis TEXT DEFAULT '-', motor TEXT DEFAULT '-'
         )
     ''')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_index)").fetchall()}
+    if "chassis" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN chassis TEXT DEFAULT '-'")
+    if "motor" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN motor TEXT DEFAULT '-'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_unit ON archive_index(unit)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_amount ON archive_index(amount)")
+    if _has_fts5(conn):
+        fts_cnt = conn.execute("SELECT COUNT(*) FROM archive_fts").fetchone()[0]
+        rec_cnt = conn.execute("SELECT COUNT(*) FROM archive_index WHERE is_receipt = 1").fetchone()[0]
+        if rec_cnt > 0 and fts_cnt == 0:
+            rows = conn.execute(
+                "SELECT path, unit, plate, insured, file, IFNULL(chassis,'-'), IFNULL(motor,'-') "
+                "FROM archive_index WHERE is_receipt = 1").fetchall()
+            conn.executemany(
+                "INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                [(r[0], _norm_fts_text(r[1], r[2], r[3], r[4], r[5], r[6])) for r in rows]
+            )
     conn.commit()
     return conn
 
@@ -5553,8 +2364,11 @@ def archive_index_update(folder_path, progress=None):
         existing = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT path, mtime, size FROM archive_index")}
         current = {p for p, _ in files}
         stale = [(p,) for p in existing if p not in current]
+        use_fts = _has_fts5(conn)
         if stale:
             conn.executemany("DELETE FROM archive_index WHERE path = ?", stale)
+            if use_fts:
+                conn.executemany("DELETE FROM archive_fts WHERE path = ?", stale)
 
         todo = []
         for p, day in files:
@@ -5564,24 +2378,55 @@ def archive_index_update(folder_path, progress=None):
             if old and abs(old[0] - st.st_mtime) < 1 and old[1] == st.st_size: continue
             todo.append((p, day, st))
 
-        total = len(todo)
-        for i, (p, day, st) in enumerate(todo, 1):
-            rec = None
+        def _read_one(item):
+            p_, day_, st_ = item
             try:
-                if p.lower().endswith(".txt"): rec = read_txt_record(p, datetime.date.fromisoformat(day))
-                else: rec = read_pdf_record(p, manual_map)
-            except Exception as e: log_exception(f"archive_index:{os.path.basename(p)}", e)
+                if p_.lower().endswith(".txt"):
+                    return p_, day_, st_, read_txt_record(p_, datetime.date.fromisoformat(day_))
+                return p_, day_, st_, read_pdf_record(p_, manual_map)
+            except Exception as e:
+                log_exception(f"archive_index:{os.path.basename(p_)}", e)
+                return p_, day_, st_, None
+
+        def _store_one(p, day, st, rec):
             fname = os.path.basename(p)
             if rec:
+                ch = str(rec.get("chassis") or "-")
+                mo = str(rec.get("motor") or "-")
                 row = (p, day, fname, rec["unit"], rec["plate"], rec["insured"], float(rec["amount"]),
-                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size)
+                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size, ch, mo)
             else:
-                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size)
-            conn.execute("INSERT OR REPLACE INTO archive_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
-            done_new += 1
-            if i % 40 == 0:
-                conn.commit()
-                if progress: progress(i, total)
+                ch, mo = "-", "-"
+                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size, ch, mo)
+            conn.execute(
+                "INSERT OR REPLACE INTO archive_index "
+                "(path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, is_receipt, mtime, size, chassis, motor) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            if use_fts:
+                conn.execute("DELETE FROM archive_fts WHERE path = ?", (p,))
+                if rec:
+                    conn.execute("INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                                 (p, _norm_fts_text(rec["unit"], rec["plate"], rec["insured"], fname, ch, mo)))
+
+        total = len(todo)
+        if total > 3:
+            workers = min(4, max(2, os.cpu_count() or 2))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for i, fut in enumerate(as_completed([ex.submit(_read_one, it) for it in todo]), 1):
+                    p, day, st, rec = fut.result()
+                    _store_one(p, day, st, rec)
+                    done_new += 1
+                    if i % 40 == 0:
+                        conn.commit()
+                        if progress: progress(i, total)
+        else:
+            for i, it in enumerate(todo, 1):
+                p, day, st, rec = _read_one(it)
+                _store_one(p, day, st, rec)
+                done_new += 1
+                if i % 40 == 0:
+                    conn.commit()
+                    if progress: progress(i, total)
         conn.commit()
         if progress and total: progress(total, total)
 
@@ -5732,8 +2577,7 @@ _ARCH_SEARCH_CACHE = {"sig": None, "rows": []}
 _ARCH_SEARCH_LOCK = threading.Lock()
 
 def _archive_search_rows():
-    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file) محسوبة مرة واحدة.
-    بتتجدد بس لما الفهرس يتغيّر (بصمة: عدد الصفوف ومجاميع mtime/is_void/amount)."""
+    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file/chassis/motor/unit) محسوبة مرة واحدة كـ Fallback."""
     conn = _ensure_archive_index()
     try:
         sig = conn.execute("SELECT COUNT(*), IFNULL(SUM(mtime),0), IFNULL(SUM(is_void),0), "
@@ -5742,30 +2586,161 @@ def _archive_search_rows():
             if _ARCH_SEARCH_CACHE["sig"] == sig:
                 return _ARCH_SEARCH_CACHE["rows"]
         rows = conn.execute(
-            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, "
+            "IFNULL(chassis,'-'), IFNULL(motor,'-') "
             "FROM archive_index WHERE is_receipt = 1").fetchall()
     finally:
         conn.close()
-    prepared = [(r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2])) for r in rows]
+    prepared = [
+        (r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2]),
+         _norm_search(r[10]), _norm_search(r[11]), _norm_search(r[3]))
+        for r in rows
+    ]
     with _ARCH_SEARCH_LOCK:
         _ARCH_SEARCH_CACHE["sig"] = sig
         _ARCH_SEARCH_CACHE["rows"] = prepared
     return prepared
 
-def archive_search(query, include_void=True, limit=3000, min_day=""):
-    q = _norm_search(query)
-    if not q: return []
-    amt = None
-    try: amt = float(str(query).strip().replace(",", ""))
-    except Exception as _e: _log_silent("archive_search#1", _e)
+def _parse_amount_query(raw_q):
+    """يدعم مبلغ محدد (521.57) أو نطاق مبلغ (500-1000 أو 500..1000)."""
+    s = str(raw_q or "").strip().replace(",", "")
+    if not s:
+        return None, None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:-|\.\.)\s*(\d+(?:\.\d+)?)", s)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        return (lo, hi) if lo <= hi else (hi, lo)
+    try:
+        v = float(s)
+        return v - 0.005, v + 0.005
+    except Exception:
+        return None, None
+
+def archive_units_list(min_day=""):
+    conn = _ensure_archive_index()
+    try:
+        if min_day:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND day >= ? AND unit != '' ORDER BY unit",
+                (min_day,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND unit != '' ORDER BY unit").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+def archive_search(query="", include_void=True, limit=3000, min_day="", max_day="", unit_filter="", status_filter="all"):
+    raw_q = str(query or "").strip()
+    q_norm = _norm_search(raw_q)
+    amt_lo, amt_hi = _parse_amount_query(raw_q)
+    has_filter = bool(min_day or max_day or unit_filter or (status_filter and status_filter != "all"))
+    if not q_norm and amt_lo is None and not has_filter:
+        return []
+
+    where = ["a.is_receipt = 1"]
+    params = []
+    if not include_void and status_filter != "void":
+        where.append("a.is_void = 0")
+    if status_filter == "void":
+        where.append("a.is_void = 1")
+    elif status_filter == "manual":
+        where.append("a.is_void = 0 AND a.is_manual = 1")
+    elif status_filter == "ok":
+        where.append("a.is_void = 0 AND a.is_manual = 0")
+    if min_day:
+        where.append("a.day >= ?")
+        params.append(min_day)
+    if max_day:
+        where.append("a.day <= ?")
+        params.append(max_day)
+    if unit_filter:
+        where.append("a.unit = ?")
+        params.append(unit_filter)
+
+    conn = _ensure_archive_index()
+    try:
+        # 1. بحث بالفلاتر فقط أو بالمبلغ/النطاق مباشرة عبر فهرس SQLite
+        if not q_norm or amt_lo is not None:
+            sql_where = list(where)
+            sql_params = list(params)
+            if amt_lo is not None:
+                # لو رقم واحد: نطابق المبلغ أو نسمح بمطابقة جزء من اللوحة/الشاسيه/الملف
+                if abs(amt_hi - amt_lo) <= 0.02 and q_norm:
+                    pass  # هنكمل للبحث النصي + المبلغ تحت
+                else:
+                    sql_where.append("a.amount BETWEEN ? AND ?")
+                    sql_params.extend([amt_lo, amt_hi])
+                    sql = (
+                        "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                        "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                        "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                        " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                    )
+                    sql_params.append(limit)
+                    return conn.execute(sql, sql_params).fetchall()
+            else:
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                sql_params.append(limit)
+                return conn.execute(sql, sql_params).fetchall()
+
+        # 2. بحث فوري عبر SQLite FTS5 (يدعم الكلمات المتعددة والبادئات) + مطابقة المبلغ لو رقم
+        if _has_fts5(conn):
+            raw_tokens = [t for t in re.split(r"[\s\-_]+", clean_arabic(raw_q).lower()) if t]
+            norm_tokens = []
+            for tk in raw_tokens:
+                for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+                    tk = tk.replace(a, b)
+                tk = re.sub(r"[^0-9a-zء-ي]", "", tk)
+                if tk:
+                    norm_tokens.append(tk)
+            if norm_tokens:
+                fts_match = " AND ".join(f'"{tk}"*' for tk in norm_tokens)
+                fts_where = list(where)
+                fts_params = list(params)
+                if amt_lo is not None:
+                    fts_where.append("(a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?) OR a.amount BETWEEN ? AND ?)")
+                    fts_params.extend([fts_match, amt_lo, amt_hi])
+                else:
+                    fts_where.append("a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?)")
+                    fts_params.append(fts_match)
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(fts_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                fts_params.append(limit)
+                rows = conn.execute(sql, fts_params).fetchall()
+                if rows:
+                    return rows
+    except Exception as e:
+        log_exception("archive_search_fts", e)
+    finally:
+        conn.close()
+
+    # 3. Fallback: بحث جزئي داخل الكلمة (substring) عبر الكاش المطبّع (مثلاً آخر 4 أرقام من الشاسيه)
     out = []
-    for r, n_plate, n_insured, n_file in _archive_search_rows():
-        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = r
-        if is_void and not include_void: continue
-        if min_day and day < min_day: continue   # وضع اليوزر: آخر أيام محددة بس
-        hit = q in n_plate or q in n_insured or q in n_file
-        if not hit and amt is not None and abs(amount - amt) < 0.005: hit = True
-        if hit: out.append(r)
+    for r, n_plate, n_insured, n_file, n_chassis, n_motor, n_unit in _archive_search_rows():
+        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void, ch, mo = r
+        if is_void and not include_void and status_filter != "void": continue
+        if status_filter == "void" and not is_void: continue
+        if status_filter == "manual" and (is_void or not is_manual): continue
+        if status_filter == "ok" and (is_void or is_manual): continue
+        if min_day and day < min_day: continue
+        if max_day and day > max_day: continue
+        if unit_filter and unit != unit_filter: continue
+        hit = (q_norm in n_plate or q_norm in n_insured or q_norm in n_file
+               or q_norm in n_chassis or q_norm in n_motor or q_norm in n_unit)
+        if not hit and amt_lo is not None and amt_lo <= amount <= amt_hi:
+            hit = True
+        if hit:
+            out.append(r)
     out.sort(key=lambda r: (r[1], r[7]), reverse=True)
     return out[:limit]
 
@@ -5782,6 +2757,12 @@ _SWEEP_LOCK = threading.Lock()
 
 _CACHE_LIMIT = 20000
 _CACHE_LOCK = threading.Lock()
+_CACHE_MISS = object()
+
+def _cache_get(cache, key):
+    """قراءة آمنة مع التعدد (Threads) من الكاش، ترجع _CACHE_MISS لو المفتاح غير موجود."""
+    with _CACHE_LOCK:
+        return cache.get(key, _CACHE_MISS)
 
 def _cache_put(cache, key, val):
     """تخزين مؤقت بحد أقصى: لما يعدّي الحد بنشيل أقدم نصف الإدخالات (القاموس بيحفظ ترتيب الإضافة).
@@ -5791,6 +2772,23 @@ def _cache_put(cache, key, val):
         if len(cache) > _CACHE_LIMIT:
             for k in list(cache)[:_CACHE_LIMIT // 2]:
                 cache.pop(k, None)
+
+def _is_pdf_ready(path):
+    """يتحقق أن ملف الـ PDF اكتملت كتابته بالكامل (يبدأ بـ %PDF- وينتهي بـ %%EOF وقابل للقراءة) قبل الطباعة."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if not head.startswith(b"%PDF-"):
+                return False
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size <= 1000:
+                return False
+            fh.seek(max(0, size - 2048))
+            tail = fh.read(2048)
+            return b"%%EOF" in tail
+    except OSError:
+        return False
 
 def _unique_dest(dest):
     """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
@@ -5836,8 +2834,8 @@ def archive_sweep(folder_path, progress=None):
         except OSError: continue
         mdate = datetime.date.fromtimestamp(stt.st_mtime)
         ck = (path, stt.st_mtime, stt.st_size)
-        file_date = _SWEEP_CACHE.get(ck)
-        if file_date is None:
+        file_date = _cache_get(_SWEEP_CACHE, ck)
+        if file_date is _CACHE_MISS:
             try: file_date = _sweep_file_date(path, fname, manual_map, mdate)
             except Exception as e:
                 log_exception(f"sweep_date:{fname}", e)
@@ -5989,7 +2987,11 @@ def archive_reindex(folder_path, days=None, progress=None):
         try:
             if days is None:
                 conn.execute("DELETE FROM archive_index")
+                if _has_fts5(conn):
+                    conn.execute("DELETE FROM archive_fts")
             else:
+                if _has_fts5(conn):
+                    conn.executemany("DELETE FROM archive_fts WHERE path IN (SELECT path FROM archive_index WHERE day = ?)", [(d,) for d in days])
                 conn.executemany("DELETE FROM archive_index WHERE day = ?", [(d,) for d in days])
             conn.commit()
         finally:
@@ -6019,815 +3021,8 @@ def archive_reindex(folder_path, days=None, progress=None):
     finally:
         _ARCHIVE_LOCK.release()
 
-# ================= أدوات POS (التقفيل + إيصالات الدفع) — بدون واتساب =================
 import hashlib as _hl, hmac as _hm
 import math as _math
-
-POS_TERMINALS = {  # tid: (orderNum, excelRow, unitName)
-    "50335710": (1, 2, "أبيس"), "50335993": (2, 2, "أبيس"), "50335987": (3, 2, "أبيس"),
-    "50325716": (4, 3, "برج العرب"), "50335998": (5, 3, "برج العرب"),
-    "50335994": (6, 3, "برج العرب"), "50335711": (7, 3, "برج العرب"),
-    "50382298": (8, 4, "المنتزه"), "50382315": (9, 4, "المنتزه"), "50383712": (10, 4, "المنتزه"),
-    "50382306": (11, 5, "محرم بك"), "50382316": (12, 5, "محرم بك"),
-    "50382308": (13, 6, "العجمي"), "50383706": (14, 6, "العجمي"),
-    "50382300": (15, 7, "القباري"), "50383702": (16, 8, "مصطفى كامل"),
-    "50382312": (17, 9, "مديرية الأمن"), "50383699": (18, 10, "ميناء الإسكندرية"),
-    "50383700": (19, 11, "خدمات مصر"),
-}
-POS_NUM_TO_TID = {v[0]: k for k, v in POS_TERMINALS.items()}
-POS_TID_FIX = {"50336994": "50335994", "50336711": "50335711", "50336998": "50335998",
-               "50302316": "50382316", "50382318": "50382315", "50330987": "50335987",
-               "60382308": "50382308"}
-POS_MERCHANT_CODE = {"22": 2, "23": 3, "24": 4, "25": 5, "26": 6, "27": 7, "28": 8, "29": 9, "30": 10, "31": 11}
-POS_NAME_HINTS = [
-    (["ABYSS", "ABIS"], 2), (["BURJ", "BORG"], 3), (["MONTZAH", "TOSUN"], 4),
-    (["MUHRAM", "MOHARAM"], 5), (["AJAMI", "AGAMI"], 6), (["KABBARY", "KABARY"], 7),
-    (["MUSTAFA", "KAMEL"], 8), (["MODRYT", "MODERYT"], 9),
-    (["ALEXANDRIA PORT", "ESMAT"], 10), (["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
-]
-POS_ROW_NAMES = {2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك", 6: "العجمي",
-                 7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن", 10: "ميناء الإسكندرية", 11: "خدمات مصر"}
-
-# ---------- الباسورد الإضافي (محفوظ كـ PBKDF2 hash مش نص ظاهر) ----------
-_POS_SALT = bytes.fromhex("a2b7c41d9e3f5a60718293a4b5c6d7e8")
-_POS_HASH = "22c4833cb10419941ea6389532d40d9f4a6d11b07cfcc87dd6ea7a57cb2b3670"
-_POS_STATE = {"until": 0.0, "fails": 0, "locked_until": 0.0}
-
-def _pos_hash(pw):
-    return _hl.pbkdf2_hmac("sha256", pw.encode("utf-8"), _POS_SALT, 200_000).hex()
-
-def pos_check_password(pw):
-    """يرجّع (ok, msg). 3 محاولات غلط = قفل 60 ثانية."""
-    now = time.time()
-    if now < _POS_STATE["locked_until"]:
-        return False, T2(f"مقفول مؤقتًا. حاول بعد {int(_POS_STATE['locked_until'] - now)} ثانية.",
-                         f"Locked. Try again in {int(_POS_STATE['locked_until'] - now)}s.")
-    if _hm.compare_digest(_pos_hash(pw or ""), _POS_HASH):
-        _POS_STATE["fails"] = 0
-        _POS_STATE["until"] = now + 15 * 60
-        return True, ""
-    _POS_STATE["fails"] += 1
-    if _POS_STATE["fails"] >= 3:
-        _POS_STATE["fails"] = 0
-        _POS_STATE["locked_until"] = now + 60
-        return False, T2("3 محاولات غلط — اتقفل لمدة دقيقة.", "3 wrong attempts — locked for 1 minute.")
-    return False, T2("الباسورد غلط.", "Wrong password.")
-
-def pos_is_unlocked():
-    return time.time() < _POS_STATE["until"]
-
-# ---------- مساعدات الأرقام ----------
-def _r2(v): return round(float(v) + 1e-9, 2)
-
-def _most_common(vals):
-    if not vals: return None
-    counts = {}
-    for v in vals: counts[v] = counts.get(v, 0) + 1
-    best = None
-    for k, c in counts.items():
-        if best is None or c > best[1]: best = (k, c)
-    return best
-
-class OcrLine:
-    __slots__ = ("text", "left", "right", "top", "bottom")
-    def __init__(self, text, left, right, top, bottom):
-        self.text, self.left, self.right, self.top, self.bottom = text, left, right, top, bottom
-    @property
-    def cy(self): return (self.top + self.bottom) / 2
-    @property
-    def h(self): return max(1.0, self.bottom - self.top)
-
-def pos_rows_text(lines):
-    ls = sorted(lines, key=lambda l: l.cy)
-    rows = []
-    for l in ls:
-        if rows:
-            last = rows[-1]
-            cy = sum(e.cy for e in last) / len(last)
-            h = sum(e.h for e in last) / len(last)
-            if abs(l.cy - cy) < h * 0.6:
-                last.append(l); continue
-        rows.append([l])
-    return "\n".join("  ".join(e.text for e in sorted(r, key=lambda e: e.left)) for r in rows) + "\n"
-
-def pos_reading_text(lines): return "\n".join(l.text for l in lines)
-
-_POS_MARKERS = [re.compile(p, re.I) for p in (
-    r"TERMINAL", r"GRAND|TOTALS?", r"NATIONAL\s*BANK|\bNBE\b", r"BATCH", r"MERCHANT",
-    r"SUCCESSF|CLOSED", r"\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ", r"THANK\s*YOU", r"NET\s*AMOUNT", r"\bSALE\b")]
-def pos_receipt_score(text): return sum(1 for r in _POS_MARKERS if r.search(text))
-
-def pos_split_columns(lines):
-    if len(lines) < 8: return [lines]
-    min_l = min(l.left for l in lines); max_r = max(l.right for l in lines)
-    w = max_r - min_l
-    if w <= 0: return [lines]
-    srt = sorted(lines, key=lambda l: l.left)
-    for tol in (0.03, 0.02, 0.01):
-        groups, cur_r = [], -1e18
-        for l in srt:
-            if not groups or l.left - cur_r > w * tol:
-                groups.append([l]); cur_r = l.right
-            else:
-                groups[-1].append(l); cur_r = max(cur_r, l.right)
-        big = [g for g in groups if (max(e.right for e in g) - min(e.left for e in g)) >= w * 0.12 and len(g) >= 6]
-        if 2 <= len(big) <= 4 and all(pos_receipt_score(pos_reading_text(g)) >= 3 for g in big):
-            return big
-    return [lines]
-
-_AMOUNT_RE = re.compile(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)")
-_BRAND_RE = re.compile(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", re.I)
-_CUT_RE = re.compile(r"THANK\s*YOU|Hotline|App\s*Version", re.I)
-
-def pos_amounts_in(raw):
-    text = re.sub(r"\bB(\d{2,3}[.,]\d{2})\b", lambda m: "8" + m.group(1), raw)
-    out = []
-    for m in _AMOUNT_RE.finditer(text):
-        try: v = float(m.group(1).replace(",", "") + "." + m.group(2))
-        except ValueError: continue
-        if 0.5 <= v <= 5_000_000: out.append(_r2(v))
-    return out
-
-def pos_parse_receipt(txt):
-    t = _CUT_RE.split(txt)[0]
-    gm = re.search(r"GRAND|TOTALS", t, re.I)
-    pre = t[:gm.start()] if gm else t
-    post = t[gm.start():] if gm else ""
-    bms = list(_BRAND_RE.finditer(pre))
-    sections = []
-    if bms:
-        for i, m in enumerate(bms):
-            end = bms[i + 1].start() if i + 1 < len(bms) else len(pre)
-            sections.append(pre[m.end():end])
-    else:
-        sm = re.search(r"SUCCESSFULL?Y|CLOSED", pre, re.I)
-        if sm: pre = pre[sm.end():]
-        sections.append(pre)
-    bvals = []
-    for sec in sections:
-        net = []
-        for ln in sec.split("\n"):
-            if re.search(r"NET\s*AMOUNT", ln, re.I): net += pos_amounts_in(ln)
-        mc = _most_common(net) or _most_common(pos_amounts_in(sec))
-        if mc: bvals.append(mc[0])
-    grand = pos_amounts_in(post)
-    bsum = _r2(sum(bvals)) if bvals else None
-    return {"grand": grand, "bsum": bsum, "bvals": bvals}
-
-def pos_decide(results):
-    for r in results:
-        b = r["bsum"]
-        if b and b > 0 and any(abs(g - b) < 0.005 for g in r["grand"]): return b, True
-    for r in results:
-        b = r["bsum"]
-        if b and b > 0 and len(r["bvals"]) >= 2:
-            for g in r["grand"]:
-                sa, sb = f"{g:.2f}", f"{b:.2f}"
-                if len(sa) == len(sb) and sum(1 for x, y in zip(sa, sb) if x != y) == 1:
-                    if r["grand"].count(g) >= 2: return g, True   # الإجمالي اتقرا أكتر من مرة بنفس القيمة = أوثق من مجموع الكروت
-                    return b, True
-    for r in results:
-        c = _most_common(r["grand"])
-        if c and c[1] >= 2 and r["bsum"] is None: return c[0], False
-    pool = []
-    for r in results:
-        pool.extend(r["grand"])
-        if r["bsum"] and r["bsum"] > 0: pool.append(r["bsum"])
-    c = _most_common(pool)
-    return (c[0], False) if c else (0.0, False)
-
-def pos_sum_closure(texts):
-    cnt = {}
-    for t in texts:
-        tt = _CUT_RE.split(t)[0]
-        local = {}
-        for a in pos_amounts_in(tt): local[a] = local.get(a, 0) + 1
-        for k, v in local.items():
-            if v > cnt.get(k, 0): cnt[k] = v
-    c = sorted(k for k, v in cnt.items() if v >= 2)
-    if len(c) < 3 or len(c) > 14: return None
-    for gi in range(len(c) - 1, 1, -1):
-        g, others = c[gi], c[:gi]
-        n = len(others)
-        for mask in range(1, 1 << n):
-            bits = 0; s = 0.0
-            for i in range(n):
-                if mask & (1 << i): bits += 1; s += others[i]
-            if bits >= 2 and abs(s - g) < 0.005: return g
-    return None
-
-def pos_ocr_piece(lines):
-    texts = [pos_rows_text(lines), pos_reading_text(lines)]
-    sc = pos_sum_closure(texts)
-    if sc is not None: return texts, sc, True
-    val, ok = pos_decide([pos_parse_receipt(t) for t in texts])
-    return texts, val, ok
-
-def pos_classify(text):
-    up = text.upper()
-    pay = sum(1 for p in (r"R{1,2}N\W{0,3}\d{9,}", r"\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}", r"APPROVED",
-                          r"AUTH\W{0,3}\d{6}", r"I\s*AUTHORI[SZ]E", r"MERCHANT\s*COPY", r"CLESS|CHIP\s*ONLINE")
-              if re.search(p, up))
-    batch = sum(1 for p in (r"BATCH\s*CLOS", r"SUCCESSF", r"GRAND\s*TOTAL", r"TOTAL\s*NET", r"THANK\s*YOU",
-                            r"NBE\s*NETWORK", r"HOTLINE") if re.search(p, up))
-    if pay >= 2 and batch < 2: return "payment"
-    if batch >= 1: return "batch"
-    return "other"
-
-def pos_batch_no(texts):
-    allv = []
-    for t in texts:
-        allv += [m.group(1) for m in re.finditer(r"BATCH\s*NO\D{0,6}(\d{4,7})", t, re.I)]
-    mc = _most_common(allv)
-    return mc[0] if mc else None
-
-# ---------- الماكينة / الوحدة / التاريخ ----------
-def _tid_labeled(t):
-    m = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", t, re.I)
-    if not m: return None
-    raw = re.sub(r"\D", "", m.group(1).replace("/", "7"))
-    if len(raw) < 8: return None
-    cands = [raw[-8:]] + [raw[i:i + 8] for i in range(len(raw) - 7)]
-    if len(raw) == 9: cands += [raw[:i] + raw[i + 1:] for i in range(9)]   # خانة زيادة من الـ OCR
-    for d in cands:
-        d = POS_TID_FIX.get(d, d)
-        if d in POS_TERMINALS: return d
-    return None
-
-def _tid_loose(t):
-    for tid in POS_TERMINALS:
-        if tid in t: return tid
-    for m in re.finditer(r"\b(503\d{5})\b", t):
-        c = POS_TID_FIX.get(m.group(1), m.group(1))
-        if c in POS_TERMINALS: return c
-    return None
-
-def pos_find_terminal(texts):
-    for t in texts:
-        r = _tid_labeled(t)
-        if r: return r
-    for t in texts:
-        r = _tid_loose(t)
-        if r: return r
-    return None
-
-def pos_find_terminal_fuzzy(texts, target_row=None):
-    pool = [k for k, v in POS_TERMINALS.items() if target_row is None or v[1] == target_row]
-    dist = {}
-    for t in texts:
-        for run in re.finditer(r"\d[\d /]{6,14}\d", t):
-            digits = re.sub(r"\D", "", run.group(0).replace("/", "7"))
-            for i in range(0, len(digits) - 7):
-                cand = digits[i:i + 8]
-                if not (cand.startswith("50") or cand.startswith("60")): continue
-                for tid in pool:
-                    d = sum(1 for a, b in zip(cand, tid) if a != b)
-                    if d < dist.get(tid, 99): dist[tid] = d
-    if not dist: return None
-    best = min(dist.values())
-    winners = [k for k, v in dist.items() if v == best]
-    return winners[0] if best <= 1 and len(winners) == 1 else None
-
-def pos_find_unit_extra(texts):
-    for t in texts:
-        m = re.search(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", t, re.I)
-        cands = []
-        if m: cands.append(re.sub(r"\D", "", m.group(1).replace("/", "7")))
-        cands.append(re.sub(r"\D", "", t))
-        for d in cands:
-            mm = re.search(r"11470?(2[2-9]|3[01])084", d)
-            if mm and mm.group(1) in POS_MERCHANT_CODE: return POS_MERCHANT_CODE[mm.group(1)]
-    for t in texts:
-        up = t.upper()
-        for words, row in POS_NAME_HINTS:
-            if any(w in up for w in words): return row
-    return None
-
-def pos_find_date(texts):
-    for t in texts:
-        m = re.search(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t, re.I)
-        if m: return f"{int(m.group(3))}.{int(m.group(2))}"
-    return None
-
-def pos_analyze_lines(all_lines):
-    pieces = pos_split_columns(all_lines)
-    multi = len(pieces) > 1
-    all_texts, batches, all_ok, seen = [], [], True, set()
-    for pc in pieces:
-        texts, val, ok = pos_ocr_piece(pc)
-        all_texts += texts
-        if val <= 0: all_ok = False; continue
-        b = pos_batch_no(texts)
-        key = (b, val)
-        if b is not None and key in seen: continue
-        seen.add(key); batches.append(val); all_ok = all_ok and ok
-    total = _r2(sum(batches)); ok = all_ok and bool(batches)
-    if multi and not ok:
-        texts, val, o2 = pos_ocr_piece(all_lines)
-        all_texts += texts
-        if val > 0 and (o2 or not batches):
-            total, ok, batches = val, o2, [val]
-    date = pos_find_date(all_texts)
-    tid = pos_find_terminal(all_texts); how = "terminal"; row = None; name = None
-    if tid is None:
-        u0 = pos_find_unit_extra(all_texts)
-        tid = pos_find_terminal_fuzzy(all_texts, u0); how = "fuzzy"
-    if tid is not None:
-        info = POS_TERMINALS[tid]; row, name = info[1], info[2]
-    else:
-        how = "none"; u = pos_find_unit_extra(all_texts)
-        if u is not None: row, name, how = u, POS_ROW_NAMES.get(u), "name/merchant"
-    return {"tid": tid, "how": how, "row": row, "unit": name, "val": total, "ok": ok,
-            "batches": batches, "date": date, "texts": all_texts}
-
-def pos_merge_second(a, b):
-    """يدمج القراءة التانية في الأولى. يرجّع قيمة تانية متعارضة (للمراجعة) أو None."""
-    if a["tid"] is None and b["tid"] is not None:
-        for k in ("tid", "row", "unit", "how"): a[k] = b[k]
-    elif a["row"] is None and b["row"] is not None:
-        for k in ("row", "unit", "how"): a[k] = b[k]
-    if not a["date"]: a["date"] = b["date"]
-    if b["val"] <= 0: return None
-    if a["val"] <= 0:
-        a["val"], a["ok"], a["batches"] = b["val"], b["ok"], list(b["batches"]); return None
-    if abs(a["val"] - b["val"]) < 0.005: return None
-    if not a["ok"] and b["ok"]:
-        a["val"], a["ok"], a["batches"] = b["val"], True, list(b["batches"]); return None
-    if a["ok"] and not b["ok"]: return None
-    a["ok"] = False
-    return b["val"]
-
-# ---------- محرك OCR (RapidOCR ← Tesseract) ----------
-_OCR = {"engine": None, "name": None, "tried": False, "err": ""}
-
-def _find_tesseract():
-    cands = []
-    for base in (os.path.dirname(os.path.abspath(sys.argv[0])), getattr(sys, "_MEIPASS", "")):
-        if base: cands += [os.path.join(base, "tesseract", "tesseract.exe"), os.path.join(base, "tesseract.exe")]
-    w = shutil.which("tesseract")
-    if w: cands.append(w)
-    cands += [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]
-    for c in cands:
-        if c and os.path.isfile(c): return c
-    return None
-
-def pos_ocr_init():
-    """يجهّز أول محرك متاح. يرجّع اسمه أو None (والسبب في _OCR['err'])."""
-    if _OCR["tried"] and _OCR["name"]: return _OCR["name"]
-    _OCR["tried"] = True
-    errs = []
-    # import ثابت (مش __import__) علشان PyInstaller يشوفه ويضمّه في الـ exe
-    try:
-        from rapidocr_onnxruntime import RapidOCR as _R1
-        _OCR["engine"], _OCR["name"], _OCR["err"] = _R1(), "rapidocr1", ""
-        return "rapidocr1"
-    except Exception as e:
-        errs.append(f"rapidocr_onnxruntime: {type(e).__name__}: {e}")
-    try:
-        from rapidocr import RapidOCR as _R3
-        _OCR["engine"], _OCR["name"], _OCR["err"] = _R3(), "rapidocr3", ""
-        return "rapidocr3"
-    except Exception as e:
-        errs.append(f"rapidocr: {type(e).__name__}: {e}")
-    try:
-        import pytesseract
-        exe = _find_tesseract()
-        if exe:
-            pytesseract.pytesseract.tesseract_cmd = exe
-            pytesseract.get_tesseract_version()
-            _OCR["engine"], _OCR["name"] = pytesseract, "tesseract"
-            _OCR["err"] = ""
-            return "tesseract"
-        errs.append("tesseract.exe not found")
-    except Exception as e:
-        errs.append(f"pytesseract: {type(e).__name__}: {e}")
-    _OCR["err"] = "\n".join(errs)
-    try: log_exception("pos_ocr_init", Exception(_OCR["err"]))
-    except Exception as _e: _log_silent("pos_ocr_init#1", _e)
-    return None
-
-def pos_prepare_image(img, enhance=False):
-    from PIL import Image, ImageOps, ImageFilter
-    img = ImageOps.exif_transpose(img).convert("L")
-    w, h = img.size
-    mx = max(w, h)
-    if mx > 3200:
-        s = 3200 / mx; img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
-    elif w < 1000 and not enhance:
-        img = img.resize((w * 2, h * 2), Image.LANCZOS)
-    if enhance:
-        img = img.resize((int(img.width * 1.5), int(img.height * 1.5)), Image.LANCZOS)
-        img = ImageOps.autocontrast(img, cutoff=2).filter(ImageFilter.UnsharpMask(2, 150, 3))
-    else:
-        img = ImageOps.autocontrast(img, cutoff=1)
-    return img
-
-def pos_ocr_lines(pil_img, enhance=False):
-    """صورة PIL → قايمة OcrLine بمواقعها."""
-    name = pos_ocr_init()
-    if not name:
-        raise RuntimeError(T2("مفيش محرك OCR. ثبّت: pip install rapidocr_onnxruntime (أو Tesseract).",
-                              "No OCR engine. Install: pip install rapidocr_onnxruntime (or Tesseract)."))
-    from PIL import ImageOps
-    base = ImageOps.exif_transpose(pil_img)
-    img = pos_prepare_image(base, enhance)
-    sc = img.width / float(base.width)      # الإحداثيات بترجع بالنسبة للصورة الأصلية مش المكبّرة
-    out = []
-    if name.startswith("rapidocr"):
-        import numpy as np
-        arr = np.array(img.convert("RGB"))
-        res = _OCR["engine"](arr)
-        if name == "rapidocr1":
-            items = res[0] or []
-            for box, txt, _sc in items:
-                xs = [p[0] for p in box]; ys = [p[1] for p in box]
-                if str(txt).strip(): out.append(OcrLine(str(txt).strip(), min(xs) / sc, max(xs) / sc, min(ys) / sc, max(ys) / sc))
-        else:
-            boxes = getattr(res, "boxes", None); txts = getattr(res, "txts", None)
-            if boxes is not None and txts is not None:
-                for box, txt in zip(boxes, txts):
-                    xs = [p[0] for p in box]; ys = [p[1] for p in box]
-                    if str(txt).strip(): out.append(OcrLine(str(txt).strip(), min(xs) / sc, max(xs) / sc, min(ys) / sc, max(ys) / sc))
-        return out
-    # tesseract
-    pt = _OCR["engine"]
-    psm = 6 if img.height > img.width * 1.4 else 3
-    d = pt.image_to_data(img, lang="eng", config=f"--oem 1 --psm {psm}", output_type=pt.Output.DICT)
-    groups = {}
-    for i, txt in enumerate(d["text"]):
-        txt = (txt or "").strip()
-        if not txt or float(d["conf"][i]) < 0: continue
-        k = (d["block_num"][i], d["par_num"][i], d["line_num"][i])
-        l, t, w, h = d["left"][i], d["top"][i], d["width"][i], d["height"][i]
-        g = groups.setdefault(k, {"w": [], "l": l, "r": l + w, "t": t, "b": t + h})
-        g["w"].append(txt); g["l"] = min(g["l"], l); g["r"] = max(g["r"], l + w)
-        g["t"] = min(g["t"], t); g["b"] = max(g["b"], t + h)
-    for g in groups.values():
-        out.append(OcrLine(" ".join(g["w"]), g["l"] / sc, g["r"] / sc, g["t"] / sc, g["b"] / sc))
-    return out
-
-def pos_pdf_pages(pdf_path, dpi=200, max_pages=400):
-    """صفحات PDF كصور PIL (pypdfium2)."""
-    try:
-        import pypdfium2 as pdfium
-    except ImportError:
-        raise RuntimeError(T2("محتاج: pip install pypdfium2", "Need: pip install pypdfium2"))
-    pdf = pdfium.PdfDocument(pdf_path)
-    try:
-        for i in range(min(len(pdf), max_pages)):
-            page = pdf[i]
-            w, h = page.get_size()
-            scale = dpi / 72.0
-            if max(w, h) * scale > 3000: scale = 3000 / max(w, h)
-            yield page.render(scale=scale).to_pil().convert("RGB")
-    finally:
-        try: pdf.close()
-        except Exception as _e: _log_silent("pos_pdf_pages#1", _e)
-
-POS_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
-
-def pos_collect_files(paths, exts):
-    """يقبل ملفات وفولدرات (مرتبة أو لأ). يرجّع قايمة ملفات."""
-    out = []
-    for p in paths:
-        if os.path.isdir(p):
-            for dp, _dn, fns in os.walk(p):
-                for f in fns:
-                    if f.lower().endswith(exts) and not f.startswith("."): out.append(os.path.join(dp, f))
-        elif os.path.isfile(p) and p.lower().endswith(exts):
-            out.append(p)
-    seen, res = set(), []
-    for f in sorted(out, key=lambda x: (os.path.dirname(x), os.path.basename(x).lower())):
-        if f not in seen: seen.add(f); res.append(f)
-    return res
-
-
-# ================= إيصالات الدفع: عدّ + تعريف الماكينة + التسمية =================
-_PDATE_RE = re.compile(r"(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})")
-
-def _pos_day_key(text):
-    for m in _PDATE_RE.finditer(text):
-        mo, d = int(m.group(2)), int(m.group(3))
-        if 1 <= mo <= 12 and 1 <= d <= 31: return f"{d}.{mo}"
-    return None
-
-def _pos_anchor_of(t):
-    """None = مفيش RRN | 12 رقم = RRN كامل | 'P' = RRN ناقص."""
-    m = re.search(r"R{1,2}N\W{0,3}((?:\d\s?){9,12})", t, re.I) or re.search(r"(?<!\d)(63(?:\d\s?){7,10})(?!\d)", t)
-    if not m: return None
-    d = re.sub(r"\s", "", m.group(1))
-    if len(d) < 9: return None
-    if len(d) == 12 and d.startswith("63"): return d
-    return "P"
-
-class PosCollector:
-    def __init__(self):
-        self.pages, self.texts, self.page_h = [], [], 3000.0
-    def new_page(self, page_h):
-        self.pages.append([]); self.page_h = float(page_h)
-    def add(self, rrn, day, l, r, cy):
-        for a in self.pages[-1]:
-            if a["l"] < r and l < a["r"] and abs(a["cy"] - cy) < self.page_h * 0.012:
-                a["rrn"] = a["rrn"] or rrn; a["day"] = a["day"] or day; return
-        self.pages[-1].append({"rrn": rrn, "day": day, "l": l, "r": r, "cy": cy})
-    def collect(self, lines, x0=0.0, scale=1.0):
-        self.texts.append(pos_reading_text(lines))
-        dates = [l for l in lines if _pos_day_key(l.text)]
-        for l in lines:
-            a = _pos_anchor_of(l.text)
-            if a is None: continue
-            day = _pos_day_key(l.text)
-            if day is None:
-                best, bd = None, 1e18
-                for d in dates:
-                    dy = abs(d.cy - l.cy)
-                    if dy > l.h * 5: continue
-                    if not (d.left < l.right + 60 and l.left < d.right + 60): continue
-                    if dy < bd: bd, best = dy, d
-                if best: day = _pos_day_key(best.text)
-            self.add(None if a == "P" else a, day, x0 + l.left / scale, x0 + l.right / scale, l.cy / scale)
-    def finish(self):
-        r = {"full": 0, "partial": 0, "rrn_day": {}, "non_payment": False, "tid": None, "day": None,
-             "month": None, "other_day": [], "seq_min": None, "seq_max": None, "seq_missing": []}
-        seen, days, partial_days = set(), {}, []
-        for a in (x for p in self.pages for x in p):
-            if a["rrn"]:
-                if a["rrn"] not in seen:
-                    seen.add(a["rrn"]); r["full"] += 1; r["rrn_day"][a["rrn"]] = a["day"]
-                    if a["day"]: days[a["day"]] = days.get(a["day"], 0) + 1
-            else:
-                r["partial"] += 1
-                if a["day"]: partial_days.append(a["day"]); days[a["day"]] = days.get(a["day"], 0) + 1
-        allt = "\n".join(self.texts)
-        r["non_payment"] = bool(re.search(r"GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF", allt, re.I))
-        r["tid"] = pos_identify_tid(allt)
-        if not days:
-            for m in _PDATE_RE.finditer(allt):
-                k = _pos_day_key(m.group(0))
-                if k: days[k] = days.get(k, 0) + 1
-        if days:
-            best = max(days.items(), key=lambda kv: kv[1])[0]
-            r["day"], r["month"] = best.split(".")
-            for rrn, d in r["rrn_day"].items():
-                if d and d != best: r["other_day"].append(f"إيصال {rrn[6:]} بتاريخ {d}")
-            for d in partial_days:
-                if d != best: r["other_day"].append(f"إيصال (رقمه مش واضح) بتاريخ {d}")
-        nums = sorted(int(k[6:]) for k in r["rrn_day"])
-        if len(nums) >= 2:
-            best_start, best_len, start = 0, 1, 0
-            for i in range(1, len(nums) + 1):
-                if i == len(nums) or nums[i] - nums[i - 1] > 15:
-                    if i - start > best_len: best_len, best_start = i - start, start
-                    start = i
-            cl = nums[best_start:best_start + best_len]
-            r["seq_min"], r["seq_max"] = cl[0], cl[-1]
-            have = set(cl)
-            r["seq_missing"] = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
-        r["count"] = r["full"] + r["partial"]
-        return r
-
-def pos_identify_tid(text):
-    votes = {}
-    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
-        c = POS_TID_FIX.get(m.group(1), m.group(1))
-        if c in POS_TERMINALS: votes[c] = votes.get(c, 0) + 1
-    if votes: return max(votes.items(), key=lambda kv: kv[1])[0]
-    return pos_find_terminal([text]) or pos_find_terminal_fuzzy([text])
-
-def pos_machine_new_name(tid, day, month):
-    order, row, unit = POS_TERMINALS[tid]
-    same = sorted((v[0] for v in POS_TERMINALS.values() if v[1] == row))
-    k = same.index(order) + 1
-    parts = [str(order), re.sub(r"\s+", ".", unit.strip())]
-    if len(same) > 1: parts.append(str(k))
-    parts += ["يوم", str(day), str(month)]
-    return ".".join(parts)
-
-def pos_count_pdf(pdf_path, progress=None, stop=None):
-    """يعدّ إيصالات الدفع في PDF ويعرّف الماكينة واليوم. صفحة كاملة + 5 شرائح رأسية متداخلة."""
-    from PIL import Image
-    col = PosCollector()
-    n_pages = 0
-    for page in pos_pdf_pages(pdf_path):
-        if stop and stop(): break
-        n_pages += 1
-        if progress: progress(f"صفحة {n_pages}")
-        w, h = page.size
-        col.new_page(h)
-        col.collect(pos_ocr_lines(page), 0, 1.0)
-        n = 5; cw = w / n
-        for i in range(n):
-            x0 = max(0, int(round(i * cw - cw * 0.12))); x1 = min(w, int(round((i + 1) * cw + cw * 0.12)))
-            strip = page.crop((x0, 0, x1, h))
-            strip = strip.resize((int(strip.width * 1.5), int(strip.height * 1.5)), Image.LANCZOS)
-            col.collect(pos_ocr_lines(strip), x0, 1.5)
-    res = col.finish()
-    res["pages"] = n_pages
-    return res
-
-# ================= التقفيل: قراءة الصور → ترقيم → PDF + إكسيل =================
-def _pos_same_day(a, b): return a.get("date") == b.get("date") or a.get("date") is None or b.get("date") is None
-
-def pos_apply_tid(item, tid):
-    info = POS_TERMINALS[tid]
-    item["tid"], item["order"], item["row"], item["unit"] = tid, info[0], info[1], info[2]
-
-def pos_closing_scan(files, auto_rotate=True, progress=None, stop=None, work_dir=None):
-    """يقرا صور/صفحات PDF (من أي مكان وبأي ترتيب). يرجّع (items, warnings, excluded_names)."""
-    from PIL import Image, ImageOps
-    work_dir = work_dir or tempfile.mkdtemp(prefix="a2r_pos_")
-    os.makedirs(work_dir, exist_ok=True)
-    work = []
-    for f in files:
-        if f.lower().endswith(".pdf"):
-            n = 0
-            for pg in pos_pdf_pages(f):
-                n += 1
-                p = os.path.join(work_dir, f"src_{len(work)}_p{n}.png"); pg.save(p)
-                work.append((p, f"{os.path.basename(f)} (ص{n})"))
-        else:
-            work.append((f, os.path.basename(f)))
-    items, warnings, excluded = [], [], []
-    for i, (path, label) in enumerate(work):
-        if stop and stop(): break
-        if progress: progress(i, len(work), label)
-        try:
-            img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-            lines = pos_ocr_lines(img); text = pos_reading_text(lines)
-            is_rec = pos_receipt_score(text) >= 2 or pos_find_terminal([text]) is not None
-            skip_pay = False
-            if is_rec and pos_classify(text) == "payment": is_rec, skip_pay = False, True
-            cur = img
-            if not is_rec and not skip_pay and auto_rotate:
-                for deg in (90, 270, 180):
-                    im2 = img.rotate(deg, expand=True)
-                    l2 = pos_ocr_lines(im2); t2 = pos_reading_text(l2)
-                    if (pos_receipt_score(t2) >= 2 or pos_find_terminal([t2]) is not None) and pos_classify(t2) != "payment":
-                        lines, cur, is_rec = l2, im2, True; break
-            if not is_rec:
-                if skip_pay: excluded.append(label)
-                continue
-            a = pos_analyze_lines(lines)
-            alt = None
-            if (not a["ok"]) or a["tid"] is None or a["row"] is None or a["val"] <= 0:
-                try: alt = pos_merge_second(a, pos_analyze_lines(pos_ocr_lines(cur, enhance=True)))
-                except Exception as e: log_exception("pos_second_read", e)
-            if a["tid"] is None:                      # اسم الملف رقم الماكينة (1..19)؟
-                stem = os.path.splitext(os.path.basename(path))[0]
-                if stem.isdigit() and int(stem) in POS_NUM_TO_TID:
-                    ft = POS_NUM_TO_TID[int(stem)]
-                    if a["row"] is None or POS_TERMINALS[ft][1] == a["row"]:
-                        a["tid"], a["how"] = ft, "file-number"
-            outp = os.path.join(work_dir, f"rc_{len(items)}.jpg"); cur.save(outp, quality=92)
-            it = {"path": outp, "label": label, "tid": None, "order": None, "row": a["row"], "unit": a["unit"],
-                  "amount": a["val"], "date": a["date"], "ok": a["ok"], "how": a["how"], "alt": alt,
-                  "batches": a["batches"], "skip": False, "suffix": None, "conflict": False, "orig_tid": None, "include": True}
-            if a["tid"]: pos_apply_tid(it, a["tid"])
-            items.append(it)
-        except Exception as e:
-            log_exception(f"pos_closing:{label}", e)
-            warnings.append(f"{label}: فشلت القراءة")
-    return items, warnings, excluded
-
-def pos_closing_number(items, warnings):
-    """تكرار + ترقيم الماكينات + تحذيرات (نفس منطق التطبيق)."""
-    prio = {"manual": 0, "terminal": 0, "fuzzy": 1, "file-number": 2}
-    with_tid = sorted([r for r in items if r["tid"]], key=lambda r: (prio.get(r["how"], 3), items.index(r)))
-    taken = {}
-    for r in with_tid:
-        n = r["order"]; prev = taken.get(n)
-        if prev is None: taken[n] = r
-        elif r["amount"] > 0 and abs(prev["amount"] - r["amount"]) < 0.005 and _pos_same_day(prev, r):
-            r["skip"] = True
-            warnings.append(f"{r['label']}: نفس الماكينة {n} ونفس المبلغ {r['amount']:.2f} (إيصال مكرر) - تم استبعاده")
-        else:
-            r["orig_tid"], r["tid"], r["conflict"] = r["tid"], None, True
-    used = set()
-    def give_suffix(r):
-        k = 2
-        while (r["orig_tid"], k) in used: k += 1
-        used.add((r["orig_tid"], k))
-        pos_apply_tid(r, r["orig_tid"]); r["suffix"], r["how"] = k, "extra-batch"
-    for r in items:
-        if r["skip"] or r["tid"] or r["row"] is None: continue
-        if r["conflict"] and r["how"] in ("terminal", "fuzzy"): give_suffix(r); continue
-        free = [n for n in range(1, 20) if POS_TERMINALS[POS_NUM_TO_TID[n]][1] == r["row"] and n not in taken]
-        if free:
-            n = free[0]; pos_apply_tid(r, POS_NUM_TO_TID[n]); taken[n] = r
-            r["how"] = "conflict" if r["conflict"] else "auto-number"
-        elif r["orig_tid"]: give_suffix(r)
-    kept = [r for r in items if not r["skip"]]
-    votes = [r["date"] for r in kept if r["date"]]
-    main_date = _most_common(votes)[0] if votes else None
-    for r in kept:
-        nm = r["label"]
-        if main_date and r["date"] and r["date"] != main_date:
-            warnings.append(f"{nm}: تاريخ الإيصال {r['date']} بينما أغلب الإيصالات {main_date}")
-        if r["row"] is not None and r["amount"] > 0:
-            if not r["ok"]: warnings.append(f"{nm}: {r['unit']} = {r['amount']:.2f} (راجع المبلغ يدويًا)")
-            if r["alt"] is not None: warnings.append(f"{nm}: القراءة التانية للمبلغ {r['alt']:.2f} مختلفة عن {r['amount']:.2f} - راجع الصورة")
-            if r["how"] == "extra-batch": warnings.append(f"{nm}: الماكينة {r['order']} ظهرت بمبلغ مختلف - اتحسبت كباتش إضافي {r['suffix']}")
-            elif r["how"] in ("auto-number", "conflict"): warnings.append(f"{nm}: رقم الماكينة اتحدد تلقائيًا ({r['order']}) - اتأكد منه")
-            elif r["how"] not in ("terminal", "fuzzy", "manual"): warnings.append(f"{nm}: الوحدة اتحددت بالاسم/الميرشانت فقط")
-        else:
-            warnings.append(f"{nm}: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل")
-    return items
-
-def _pos_find_template(extra_dirs=()):
-    names = ("الاسكندريه 00.xlsx", "الاسكندريه_00.xlsx", "template.xlsx")
-    dirs = [os.path.dirname(os.path.abspath(sys.argv[0])), getattr(sys, "_MEIPASS", ""), DOCUMENTS_DIR, *extra_dirs]
-    for d in dirs:
-        for n in names:
-            if d and os.path.isfile(os.path.join(d, n)): return os.path.join(d, n)
-    return None
-
-def _pos_images_to_pdf(paths, out_pdf):
-    from PIL import Image
-    W, H, M = 1240, 1754, 60       # A4 @150dpi
-    pages = []
-    for p in paths:
-        try:
-            im = Image.open(p).convert("RGB")
-            s = min((W - 2 * M) / im.width, (H - 2 * M) / im.height)
-            im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))), Image.LANCZOS)
-            pg = Image.new("RGB", (W, H), "white"); pg.paste(im, ((W - im.width) // 2, (H - im.height) // 2))
-            pages.append(pg)
-        except Exception as e: log_exception(f"pos_pdf_page:{p}", e)
-    if not pages: return False
-    pages[0].save(out_pdf, "PDF", resolution=150.0, save_all=True, append_images=pages[1:])
-    return True
-
-def pos_closing_build(items, out_dir, template_path=None):
-    """يطلع: PDF مجمّع + صور مرقّمة + إكسيل من القالب. يرجّع dict بالنتايج."""
-    os.makedirs(out_dir, exist_ok=True)
-    kept = [r for r in items if not r["skip"] and r.get("include", True)]
-    cnt = {}
-    for r in kept:
-        if r["date"]: cnt[r["date"]] = cnt.get(r["date"], 0) + 1
-    report_date = max(cnt.items(), key=lambda kv: kv[1])[0] if cnt else "اليوم"
-    kept.sort(key=lambda r: (r["order"] if r["order"] is not None else 99, r["suffix"] or 1))
-    main = [r for r in kept if r["date"] is None or r["date"] == report_date]
-    others = {}
-    for r in kept:
-        if r["date"] and r["date"] != report_date: others.setdefault(r["date"], []).append(r)
-    res = {"report_date": report_date, "pdfs": [], "xlsx": None, "images_dir": None, "totals": {}, "notes": []}
-    img_dir = os.path.join(out_dir, "صور الإيصالات"); os.makedirs(img_dir, exist_ok=True)
-    res["images_dir"] = img_dir
-    used_names = set()
-    for r in kept:
-        if r["order"] is None: continue
-        sfx = f"_{r['suffix']}" if r["suffix"] else ""
-        nm, k = f"{r['order']}{sfx}", 2
-        while nm in used_names: nm = f"{r['order']}{sfx}_{k}"; k += 1     # تعديل يدوي ممكن يعمل نفس الرقم مرتين
-        used_names.add(nm)
-        dst = os.path.join(img_dir, nm + ".jpg")
-        try: shutil.copy2(r["path"], dst)
-        except Exception as e: log_exception("pos_copy_img", e)
-    main_pdf = os.path.join(out_dir, f"الاسكندريه {report_date}.pdf")
-    if _pos_images_to_pdf([r["path"] for r in main], main_pdf): res["pdfs"].append(main_pdf)
-    for d, lst in others.items():
-        f = os.path.join(out_dir, f"الاسكندريه {d}.pdf")
-        if _pos_images_to_pdf([r["path"] for r in lst], f): res["pdfs"].append(f)
-    totals = {r: 0.0 for r in range(2, 12)}
-    for r in main:
-        if r["row"] is not None and r["amount"] > 0: totals[r["row"]] += r["amount"]
-    res["totals"] = {k: _r2(v) for k, v in totals.items()}
-    tpl = template_path or _pos_find_template()
-    if not tpl or not os.path.isfile(tpl):
-        res["notes"].append("قالب الإكسيل (الاسكندريه 00.xlsx) مش موجود — الإكسيل متعملش.")
-    elif not OPENPYXL_AVAILABLE:
-        res["notes"].append("openpyxl مش متثبتة — الإكسيل متعملش.")
-    else:
-        try:
-            wb = openpyxl.load_workbook(tpl); ws = wb.worksheets[0]
-            for rw in range(2, 12):
-                ws[f"D{rw}"] = res["totals"][rw]
-                ws[f"F{rw}"] = f"=D{rw}+IF(ISBLANK(E{rw}),0,E{rw})"
-            try: wb.calculation.fullCalcOnLoad = True
-            except Exception as _e: _log_silent("pos_closing_build#1", _e)
-            xf = os.path.join(out_dir, f"الاسكندريه {report_date}.xlsx"); wb.save(xf); res["xlsx"] = xf
-        except Exception as e:
-            log_exception("pos_fill_template", e); res["notes"].append(f"فشل ملء القالب: {e}")
-    return res
-
-def pos_make_tree(parent, t, columns, headers, widths):
-    style = ttk.Style()
-    try: style.theme_use("clam")
-    except Exception as _e: _log_silent("pos_make_tree#1", _e)
-    style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
-                    font=(FONT_FAMILY, 10, "bold"), rowheight=28)
-    style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"], font=(FONT_FAMILY, 11, "bold"), relief="flat")
-    style.map("A2R.Treeview", background=[("selected", t["primary"])], foreground=[("selected", "#FFFFFF")])
-    fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-    fr.pack(fill="both", expand=True, padx=12, pady=(4, 2))
-    tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
-    for c in columns:
-        tree.heading(c, text=headers[c]); tree.column(c, width=widths.get(c, 90), anchor="center")
-    for kind, (bg, fg) in TAG_COLORS[t["mode"]].items():
-        tree.tag_configure(kind, background=bg, foreground=fg)
-    vsb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview); vsb.pack(side="right", fill="y", padx=2, pady=2)
-    tree.configure(yscrollcommand=vsb.set); tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
-    return tree
 
 # باسورد المشرف: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مفيش نص صريح في الكود.
 # لتغييره: شغّل make_admin_hash.py والصق السطرين الناتجين مكان _SUP_SALT و _SUP_HASH.
@@ -6859,13 +3054,29 @@ def sup_register_fail():
 def sup_register_success():
     _SUP_STATE["fails"] = 0
     _SUP_STATE["locks"] = 0
-EMPLOYEE_PASSWORDS = [
-    "ahmedramadan", "a2r", "ahmed.r",
-    "1531", "20262", "2026", "16061993", "1558", "1964",
-    "2212", "1672", "30881999", "1990", "27121996", "1012",
-    "160388", "505022", "20272", "0100elkok", "12345", "8110"
-]
-EMPLOYEE_HASHES = {hashlib.sha256(p.encode('utf-8')).hexdigest() for p in EMPLOYEE_PASSWORDS}
+EMPLOYEE_HASHES = {
+    "05c8bd5d4dcdb18b690e160fd7a5c5190ee9ce7eb565d88f8e7b1f81b5f25bf6",
+    "06ff8a72d6c750f6190e3be9beee93480751e63429b79a4a9a3409d537cf4710",
+    "158a323a7ba44870f23d96f1516dd70aa48e9a72db4ebb026b0a89e212a208ab",
+    "165940940a02a187e4463ff467090930038c5af8fc26107bf301e714f599a1da",
+    "1c6bf6cd5656b79a9cd667582d2b31a6bcdd071acd1f1fdc0bb653df031fe409",
+    "2759755265efab6b9a509e4c2662aead97747c0b5ad16694dd72fef521b5d1aa",
+    "38aaaa2726ae59363be8267ddf3c887e125abf3872a221c3048c931b73563e4e",
+    "5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5",
+    "65ec295e41007d643b557a13a2d8fda976f887ab352ee51debba9417914e686e",
+    "67a375e4ddcdb509545a752ea82be28b546ded87431078fe6fc1ead202f5815c",
+    "922da9fd247cabfaa88ac472af4e4910cab8b5a5cd1f243ce15a9cd80b844384",
+    "9a54ca89652e118aef6d89047338e990240c40ec810f3f5dd00f191acd7feff2",
+    "9b59026d8817985b390666d0fe1695b63d9be2e7a60e3c07274193642eda3247",
+    "a4f1a218260b2efd0b86780410a4e0ec643bd33dcadc9ae2c6d8e2282ae01115",
+    "a7be8e1fe282a37cd666e0632b17d933fa13f21addf4798fc0455bc166e2488c",
+    "ad5055ce5b414306010f3e844346b669fbf99b47b5f9f3a4e589c86a216fdcaf",
+    "aeba47c17ca09557808c333b49af210a0209aff6b4334fa7192aaed69c5f36dd",
+    "aff4d166083896b1584b9b3ed2b89cce8c9abe10fe384342d1ed2e73114c819e",
+    "ec9b8e7a0da6fa1d24ebb7546db2f67ca2320b110c93ede3c5c5d3ef13ebe1ab",
+    "ed823ec32c5d4e9ca9dd968bb0fe9366b7d904ce0cae615308ddd5b89f0e6a3a",
+    "f1294f35f19846cd012506eadcc13ecda95eb7ddc6c661bc1b9402c4b00eb703",
+}
 
 COMPANY_WORDS_RE = re.compile(r"مجمع|التأمين|التامين|الإلزامي|الالزامي|^للمركبات$|^المركبات$")
 TIME_RE = re.compile(
@@ -7511,8 +3722,20 @@ def parse_receipt_variants(txt):
     return best
 
 
+def _text_parse_complete(f):
+    return (
+        _receipt_ok(f)
+        and f.get("plate", "-") != "-"
+        and f.get("unit", UNSPEC) != UNSPEC
+        and float(f.get("amount") or 0) > 0
+        and f.get("dt") is not None
+        and f.get("chassis", "-") != "-"
+    )
+
 def parse_receipt(path, txt):
     old = parse_receipt_text(txt)
+    if _text_parse_complete(old):
+        return old
     bb, bb_lines, dbg = None, [], {}
     try:
         bb, bb_lines, dbg = parse_receipt_bbox(path, txt)
@@ -7613,8 +3836,9 @@ def read_pdf_record(path, manual_map):
             dt = parse_vault_dt(ca) or datetime.datetime.fromtimestamp(st.st_mtime)
             return make_record(path, unit, p or "-", n or "-", a, dt, mdate, True)
         key = (path, st.st_mtime, st.st_size, "manual")
-        if key in _PARSE_CACHE:
-            return dict(_PARSE_CACHE[key])
+        cached_m = _cache_get(_PARSE_CACHE, key)
+        if cached_m is not _CACHE_MISS:
+            return dict(cached_m)
         txt = run_pdftotext(path)
         unit = detect_unit_from_text(txt) or UNSPEC
         tm = TIME_RE.search(txt)
@@ -7625,8 +3849,8 @@ def read_pdf_record(path, manual_map):
         return rec
 
     key = (path, st.st_mtime, st.st_size)
-    if key in _PARSE_CACHE:
-        cached = _PARSE_CACHE[key]
+    cached = _cache_get(_PARSE_CACHE, key)
+    if cached is not _CACHE_MISS:
         return dict(cached) if cached else None
     txt = run_pdftotext(path)
     if not is_receipt_text(txt):
@@ -7707,12 +3931,28 @@ def collect_records(folder_path, target_date, progress=None):
     records = []
     done = 0
 
-    for pdf in pdf_files:
-        done += 1
-        if progress: progress(done, total, os.path.basename(pdf))
-        rec = read_pdf_record(pdf, manual_map)
-        if rec and rec["actual_date"] == target_date:
-            records.append(refresh_void_flag(rec))
+    if len(pdf_files) > 3:
+        workers = min(4, max(2, os.cpu_count() or 2))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fut_map = {ex.submit(read_pdf_record, pdf, manual_map): pdf for pdf in pdf_files}
+            for fut in as_completed(fut_map):
+                pdf = fut_map[fut]
+                done += 1
+                if progress: progress(done, total, os.path.basename(pdf))
+                try:
+                    rec = fut.result()
+                except Exception as e:
+                    log_exception(f"collect_pdf:{os.path.basename(pdf)}", e)
+                    rec = None
+                if rec and rec["actual_date"] == target_date:
+                    records.append(refresh_void_flag(rec))
+    else:
+        for pdf in pdf_files:
+            done += 1
+            if progress: progress(done, total, os.path.basename(pdf))
+            rec = read_pdf_record(pdf, manual_map)
+            if rec and rec["actual_date"] == target_date:
+                records.append(refresh_void_flag(rec))
 
     for tfile in txt_files:
         done += 1
@@ -7961,22 +4201,26 @@ def get_print_time_bottom(pdf_path):
 
 PRINT_TARGET_W_PT = 57 / 25.4 * 72   # عرض الطباعة المطلوب: 57 مم
 
-def scale_pdf_to_print_width(src_pdf, target_w=None):
-    """نسخة مؤقتة من الـ PDF مصغّرة لعرض 57 مم. الإيصالات بتتصمم بعرض 80 مم، وكان الحجم النهائي بيتحدد من
-    مقاس الورق المعرّف في كل جهاز (fit): 57x90 بيطلّع الحجم الصح، و80 مم بيطلّعه كبير. دلوقتي البرنامج هو اللي
-    بيحدد الحجم. بترجع None لو الصفحة أصلًا بعرض 57 مم أو أقل، أو لو pypdf مش متاح (وساعتها الطباعة زي ما كانت)."""
+def scale_pdf_to_print_width(src_pdf, target_w=None, target_h=None):
+    """ينشئ نسخة مؤقتة من الـ PDF بمقاس الورق المختار (عرض وطول) مع الحفاظ على التناسب.
+    يدعم التصغير والتكبير ليعكس أي تعديل في مقاس الطباعة فعليًا بدون الحاجة لصلاحيات أدمن."""
     if not PYPDF_AVAILABLE:
         return None
     if target_w is None:
-        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72   # عرض الورق المختار (بيتغيّر من زرار المقاس)
+        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72.0
+    if target_h is None:
+        target_h = _PRINT_PAPER_MM[1] / 25.4 * 72.0
     try:
         reader = PdfReader(src_pdf)
         if not reader.pages:
             return None
-        w = float(reader.pages[0].mediabox.width)
-        if w <= target_w + 2:
+        pw = float(reader.pages[0].mediabox.width)
+        ph = float(reader.pages[0].mediabox.height)
+        if pw <= 0 or ph <= 0:
             return None
-        f = target_w / w
+        f = min(target_w / pw, target_h / ph)
+        if abs(f - 1.0) < 0.01:
+            return None
         writer = PdfWriter()
         for pg in reader.pages:
             pg.scale_by(f)
@@ -7990,6 +4234,76 @@ def scale_pdf_to_print_width(src_pdf, target_w=None):
         log_exception("scale_pdf_to_print_width", e)
         return None
 
+def create_test_print_pdf(filepath, w_mm, h_mm):
+    """إيصال اختبار صغير بإطار واضح ومقاس الورقة بالمم للتحقق الفوري من مقاس الطباعة."""
+    if not REPORTLAB_AVAILABLE:
+        return False
+    pt = 72.0 / 25.4
+    pw, ph = float(w_mm) * pt, float(h_mm) * pt
+    c = canvas.Canvas(filepath, pagesize=(pw, ph))
+    m = 4.0
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1.5)
+    c.rect(m, m, max(10, pw - 2 * m), max(10, ph - 2 * m))
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", max(8, min(13, pw * 0.08)))
+    c.drawCentredString(pw / 2, ph * 0.66, "A2R TEST PRINT")
+    c.setFont("Helvetica-Bold", max(8, min(14, pw * 0.09)))
+    c.drawCentredString(pw / 2, ph * 0.48, f"{_fmt_mm(w_mm)} x {_fmt_mm(h_mm)} mm")
+    c.setFont("Helvetica", max(6, min(9, pw * 0.055)))
+    c.drawCentredString(pw / 2, ph * 0.28, datetime.datetime.now().strftime("%d-%m-%Y  %H:%M"))
+    c.save()
+    return True
+
+def _make_print_copy_pypdf(src_pdf):
+    """بديل آمن للقص باستخدام pypdf في حال كانت بنية ملف الـ PDF مضغوطة أو غير متوافقة مع التعديل المباشر."""
+    if not PYPDF_AVAILABLE:
+        return None
+    try:
+        reader = PdfReader(src_pdf)
+        if not reader.pages:
+            return None
+        pg = reader.pages[0]
+        x0, y0 = float(pg.mediabox.left), float(pg.mediabox.bottom)
+        x1, y1 = float(pg.mediabox.right), float(pg.mediabox.top)
+
+        new_y0 = None
+        try:
+            contents = pg.get_contents()
+            raw_c = contents.get_data() if contents is not None else b""
+            qr_top = _find_qr_top(raw_c)
+            if qr_top is not None:
+                new_y0 = qr_top + 4.5
+        except Exception as _e:
+            _log_silent("make_print_copy_pypdf#qr", _e)
+
+        if new_y0 is None:
+            info = get_print_time_bottom(src_pdf)
+            if info:
+                new_y0 = y1 - (info[0] + 12.0)
+
+        if new_y0 is None:
+            return None
+        new_y0 = max(y0, new_y0)
+        if new_y0 >= y1 - 40:
+            return None
+
+        pg.mediabox.lower_left = (x0, new_y0)
+        pg.mediabox.upper_right = (x1, y1)
+        pg.cropbox.lower_left = (x0, new_y0)
+        pg.cropbox.upper_right = (x1, y1)
+
+        writer = PdfWriter()
+        writer.add_page(pg)
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, os.path.basename(src_pdf))
+        with open(dst, "wb") as fh:
+            writer.write(fh)
+        return dst
+    except Exception as e:
+        log_exception("make_print_copy_pypdf", e)
+        return None
+
 def make_print_copy(src_pdf):
     try:
         data = bytearray(open(src_pdf, "rb").read())
@@ -7998,10 +4312,12 @@ def make_print_copy(src_pdf):
             if re.search(rb"/Type\s*/Page(?![A-Za-z])", m.group(1)):
                 page_obj = m
                 break
-        if not page_obj: return None
+        if not page_obj:
+            return _make_print_copy_pypdf(src_pdf)
         page_body = bytes(data[page_obj.start(1):page_obj.end(1)])
         mb = re.search(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]", page_body)
-        if not mb: return None
+        if not mb:
+            return _make_print_copy_pypdf(src_pdf)
         x0, y0, x1, y1 = [float(v) for v in mb.groups()]
 
         new_y0 = None
@@ -8013,9 +4329,11 @@ def make_print_copy(src_pdf):
             if info:
                 new_y0 = y1 - (info[0] + 12.0)
 
-        if new_y0 is None: return None
+        if new_y0 is None:
+            return _make_print_copy_pypdf(src_pdf)
         new_y0 = max(y0, new_y0)
-        if new_y0 >= y1 - 40: return None
+        if new_y0 >= y1 - 40:
+            return None
 
         new_y1 = y1
 
@@ -8030,7 +4348,8 @@ def make_print_copy(src_pdf):
         old_len = reg_end - reg_start
         new = b"/MediaBox " + box + b" /CropBox " + box
         if len(new) > old_len: new = b"/MediaBox " + box
-        if len(new) > old_len: return None
+        if len(new) > old_len:
+            return _make_print_copy_pypdf(src_pdf)
 
         new = new + b" " * (old_len - len(new))
         data[reg_start:reg_end] = new
@@ -8042,47 +4361,56 @@ def make_print_copy(src_pdf):
         return dst
     except Exception as e:
         log_exception("make_print_copy", e)
-        return None
+        return _make_print_copy_pypdf(src_pdf)
 
 class ElevateLoginGate(ctk.CTkToplevel):
     def __init__(self, parent, on_success):
         super().__init__(parent)
+        _set_win_alpha(self, 0.0)
         self.parent = parent
         self.on_success = on_success
         self.title("A2R Authorization")
         self.resizable(False, False)
         set_window_icon_safe(self)
-        center_window_relative(self, parent, 360, 205)
 
         t = THEMES[parent.current_theme_name]
         self.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(self, text="A2R OPERATIONS", font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 1))
-        ctk.CTkLabel(self, text=tr("login_prompt"), font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 6))
+        ctk.CTkFrame(self, height=3, corner_radius=0, fg_color=t["danger_btn"]).pack(fill="x")
 
-        f_entry = ctk.CTkFrame(self, fg_color="transparent")
-        f_entry.pack(fill="x", padx=24, pady=4)
+        card = ctk.CTkFrame(self, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="x", padx=14, pady=(10, 6))
 
-        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", font=(FONT_FAMILY, 13, "bold"),
+        ctk.CTkLabel(card, text="A2R OPERATIONS", height=24, font=(FONT_FAMILY, 16, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
+        ctk.CTkLabel(card, text=tr("login_prompt"), height=18, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+
+        f_entry = ctk.CTkFrame(card, fg_color="transparent")
+        f_entry.pack(fill="x", padx=16, pady=2)
+
+        self.e_pwd = ctk.CTkEntry(f_entry, show="•", justify="center", height=34, font=(FONT_FAMILY, 13, "bold"),
                                   text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_pwd.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_pwd.bind("<Return>", lambda e: self.check_pwd())
         attach_context_menu(self.e_pwd)
 
         self.pwd_visible = False
-        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=35, command=self.toggle_eye, fg_color=t["card"], text_color=t["text"])
+        self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=40, height=34, corner_radius=9, command=self.toggle_eye,
+                                     fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF")
         self.btn_eye.pack(side="right")
 
-        self.lbl_err = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_err.pack(pady=(1, 0))
+        self.lbl_err = ctk.CTkLabel(card, text="", height=16, text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_err.pack(pady=(2, 0))
 
-        btn_enter = ctk.CTkButton(self, text=tr("btn_full_console"), font=FONT_BTN_MAIN,
-                                  fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF", command=self.check_pwd)
-        btn_enter.pack(fill="x", padx=24, pady=(6, 4))
+        btn_enter = ctk.CTkButton(card, text=tr("btn_full_console"), font=FONT_BTN_MAIN, height=34, corner_radius=10,
+                                  fg_color=t["danger_btn"], hover_color=t["danger_btn_hover"], text_color="#FFFFFF",
+                                  command=self.check_pwd)
+        btn_enter.pack(fill="x", padx=16, pady=(4, 12))
 
-        ctk.CTkLabel(self, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
-                     font=(FONT_FAMILY, 9, "bold"), text_color="#64748B").pack(pady=(4, 6))
-        self.after(150, self.e_pwd.focus_set)
+        ctk.CTkLabel(self, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=18,
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(pady=(0, 8))
+        fit_and_center(self, parent, 365, min_height=225, focus_widget=self.e_pwd)
+        try: self.grab_set()
+        except Exception as _e: _log_silent("ElevateLoginGate#grab", _e)
 
     def toggle_eye(self):
         if self.pwd_visible:
@@ -8117,42 +4445,6 @@ class ElevateLoginGate(ctk.CTkToplevel):
             try: winsound.MessageBeep(winsound.MB_ICONHAND)
             except Exception as _e: _log_silent("check_pwd#1", _e)
 
-class AdminPasswordDialog(ctk.CTkToplevel):
-    def __init__(self, parent, on_success):
-        super().__init__(parent)
-        self.title("Admin Access Required")
-        self.resizable(False, False)
-        set_window_icon_safe(self)
-        center_window_relative(self, parent, 320, 160)
-        t = THEMES[parent.current_theme_name]
-        self.configure(fg_color=t["bg"])
-
-        ctk.CTkLabel(self, text="🔒 Admin Password for Excel", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
-        self.e = ctk.CTkEntry(self, show="•", justify="center", font=(FONT_FAMILY, 12, "bold"))
-        self.e.pack(padx=20, pady=4, fill="x")
-        self.e.focus_set()
-        attach_context_menu(self.e)
-
-        def _chk(event=None):
-            rem = sup_lock_remaining()
-            if rem > 0:
-                messagebox.showerror("Access Denied", T2(f"مقفول مؤقتًا. حاول بعد {rem} ثانية.", f"Locked. Try again in {rem}s."))
-                self.destroy()
-                return
-            if is_supervisor_password(self.e.get()):
-                sup_register_success()
-                self.destroy()
-                on_success()
-            else:
-                sup_register_fail()
-                try: winsound.MessageBeep(winsound.MB_ICONHAND)
-                except Exception as _e: _log_silent("_chk#1", _e)
-                messagebox.showerror("Access Denied", tr("restricted_admin"))
-                self.destroy()
-
-        self.e.bind("<Return>", _chk)
-        ctk.CTkButton(self, text="Unlock", font=FONT_BTN_SUB, fg_color=t["primary"], command=_chk).pack(pady=8)
-
 class CustomTkinterApp(ctk.CTk):
     def validate_numeric_input(self, val):
         if val == "": return True
@@ -8160,6 +4452,7 @@ class CustomTkinterApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+        _set_win_alpha(self, 0.0)   # شفافية مؤقتة أثناء بناء العناصر لتفتح النافذة مكتملة في إطار واحد بدون اختفاء أو تقطيع
         self.title(f"A2R Operations Console - {APP_OWNER}")
         self.resizable(False, False)
         
@@ -8167,12 +4460,18 @@ class CustomTkinterApp(ctk.CTk):
         self.minsize(440, 210)
         set_window_icon_safe(self)
 
-        global CURRENT_LANG
-        self.current_lang = "en"
-        CURRENT_LANG = "en"
-        self.current_theme_name = "Aero Dark"
+        global CURRENT_LANG, SOUND_MUTED
+        _cfg = _read_app_config()
+        _saved_lang = _cfg.get("lang")
+        self.current_lang = _saved_lang if _saved_lang in LANGUAGES else "en"
+        CURRENT_LANG = self.current_lang
+        _saved_theme = _cfg.get("theme")
+        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Modern Dark"
+        if "sound_muted" in _cfg:
+            SOUND_MUTED = bool(_cfg.get("sound_muted"))
 
         self.is_mini_mode = True
+        # المزامنة والطباعة الفورية تعملان دائمًا مع كل تشغيل للجهاز/البرنامج
         self.auto_sync_enabled = True
         self.auto_print_enabled = True
 
@@ -8184,6 +4483,8 @@ class CustomTkinterApp(ctk.CTk):
         self.last_summary_info = {}
 
         self.printed_count_today = 0
+        self._printed_count_day = datetime.date.today()
+        self.last_printed_pdf = None
         self.processing_lock = threading.Lock()
         self.is_processing = False
         self.last_pdf_state_sig = ""
@@ -8242,8 +4543,18 @@ class CustomTkinterApp(ctk.CTk):
         else:
             self.switch_to_mini_view()
 
-    def on_app_close(self):
-        self.hide_to_system_tray()
+        # تنزيل/تحديث إضافة كروم تلقائيًا داخل مجلد الأرشيف الاحتياطي في Documents + تشغيل الجسر المحلي (127.0.0.1)
+        threading.Thread(target=ensure_chrome_extension_extracted, daemon=True).start()
+        self._bridge_server = start_local_chrome_bridge(self)
+
+        # مزامنة فورية صامتة لإجمالي اليوم فور التشغيل (حتى يظهر الرقم الفعلي مباشرة في الإضافة)
+        self.after(1500, lambda: self.start_thread() if (self.auto_sync_enabled and not self.is_processing) else None)
+
+        # تشغيل الأرشفة التلقائية الكاملة فور إقلاع الجهاز/التطبيق (حتى في وضع الميني أو بجوار الساعة)
+        self._refresh_mini_archive_label()
+        self._archive_tick_started = True
+        self.after(2500, self.auto_archive_on_login)
+        self.after(600000, self._archive_tick)
 
     def _init_tray_icon(self):
         try:
@@ -8258,24 +4569,6 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             self.tray_icon = None
             log_exception("init_tray_icon", e)
-
-    def _trigger_daily_full_archive_once(self):
-        today_tag = datetime.date.today().strftime("%Y-%m-%d")
-        try:
-            conn = db_connect()
-            c = conn.cursor()
-            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
-            row = c.fetchone()
-            last_date = row[0] if row else ""
-            if last_date != today_tag:
-                target_folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-                if os.path.exists(target_folder) and os.path.isdir(target_folder):
-                    self._silent_archive_all_historical(target_folder)
-                c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
-                conn.commit()
-            conn.close()
-        except Exception as e:
-            log_exception("trigger_daily_full_archive_once", e)
 
     def _run_archive_sweep(self, folder_path, progress=None, stage=None):
         """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان.
@@ -8318,10 +4611,6 @@ class CustomTkinterApp(ctk.CTk):
         finally:
             self.after(600000, self._archive_tick)
 
-    def _silent_archive_all_historical(self, folder_path):
-        self._run_archive_sweep(folder_path)
-        self._start_archive_maintenance(folder_path)
-
     def _cancel_auto_minimize(self):
         if self._auto_minimize_timer:
             try:
@@ -8338,8 +4627,25 @@ class CustomTkinterApp(ctk.CTk):
         if not self.is_mini_mode and self.state() == "normal":
             self._schedule_auto_minimize(30000)
 
+    def _has_open_child_windows(self):
+        """يتحقق إذا كانت هناك أي نافذة فرعية مفتوحة (حاسبة الكاش، الإضافة اليدوية، الأرشيف، عرض السجلات، إلخ)."""
+        try:
+            for w in self.winfo_children():
+                if isinstance(w, (tk.Toplevel, ctk.CTkToplevel)):
+                    try:
+                        if w.winfo_exists() and w.state() != "withdrawn":
+                            return True
+                    except Exception:
+                        pass
+        except Exception as _e:
+            _log_silent("_has_open_child_windows", _e)
+        return False
+
     def _auto_minimize_to_taskbar(self):
         try:
+            if self._has_open_child_windows():
+                self._schedule_auto_minimize(15000)
+                return
             if self.state() == "normal":
                 self.iconify()
         except Exception as _e:
@@ -8385,6 +4691,7 @@ class CustomTkinterApp(ctk.CTk):
         def _restore():
             self.deiconify()
             self.state("normal")
+            _set_win_alpha(self, 1.0)
             if self.is_mini_mode:
                 self.switch_to_mini_view()
             else:
@@ -8402,6 +4709,9 @@ class CustomTkinterApp(ctk.CTk):
 
     def quit_app_completely(self, icon=None, item=None):
         self._cancel_auto_minimize()
+        if getattr(self, "_bridge_server", None):
+            try: self._bridge_server.shutdown()
+            except Exception as _e: _log_silent("quit_bridge", _e)
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
@@ -8423,10 +4733,10 @@ class CustomTkinterApp(ctk.CTk):
         self._cancel_auto_minimize()
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
         self._paper_win = win
         win.title(T2("مقاس الطباعة", "Print Size"))
         win.resizable(False, False)
-        center_window_relative(win, self, 360, 330)
         win.configure(fg_color=t["bg"])
         try: win.transient(self)
         except Exception as _e: _log_silent("fix_printer_paper_action#1", _e)
@@ -8455,6 +4765,13 @@ class CustomTkinterApp(ctk.CTk):
         _fill(*_PRINT_PAPER_MM)
         def _preset(a, b):
             sel["name"] = ""
+            # لو فيه مقاس مطابق جوه درايفر الطابعة نختاره تلقائيًا
+            for lab, (nm, pw, ph) in papers_map.items():
+                if abs(pw - a) <= 3 and abs(ph - b) <= 3:
+                    sel["name"] = nm
+                    try: cb_papers.set(lab)
+                    except Exception as _e: _log_silent("fp_preset#cb", _e)
+                    break
             _fill(a, b)
         for (pw, ph) in PRINT_PAPER_PRESETS_MM:
             ctk.CTkButton(f_pre, text=f"{_fmt_mm(pw)} × {_fmt_mm(ph)}", width=90, height=28, font=FONT_BTN_SUB,
@@ -8467,9 +4784,9 @@ class CustomTkinterApp(ctk.CTk):
         ctk.CTkLabel(win, text=T2("مقاسات الطابعة الافتراضية", "Default printer paper sizes"),
                      font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(10, 2))
         cb_papers = ctk.CTkComboBox(win, values=[T2("... بقرا المقاسات من الطابعة", "... reading printer sizes")],
-                                    height=30, font=FONT_ENTRY, state="readonly",
-                                    fg_color=t["input"], border_color=t["border"], text_color=t["text"])
+                                    height=32, font=FONT_ENTRY, state="readonly")
         cb_papers.set(T2("... بقرا المقاسات من الطابعة", "... reading printer sizes"))
+        style_combo(cb_papers, t)
         cb_papers.pack(fill="x", padx=16)
 
         def _on_pick(choice):
@@ -8567,14 +4884,61 @@ class CustomTkinterApp(ctk.CTk):
                 self.run_on_main(_done)
             threading.Thread(target=_apply_printer, daemon=True).start()
 
-        btn_save = ctk.CTkButton(win, text=T2("حفظ", "Save"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
-                                 hover_color=t["warning"], text_color="#FFFFFF", command=_save)
-        btn_save.pack(fill="x", padx=16, pady=(8, 0))
+        def _test_print():
+            try:
+                w = float(e_w.get().strip().replace(",", "."))
+                h = float(e_h.get().strip().replace(",", "."))
+            except Exception:
+                lbl_err.configure(text=T2("اكتب أرقام صحيحة للعرض والطول", "Enter valid numbers for width and height"))
+                return
+            if not (20 <= w <= 300 and 20 <= h <= 600):
+                lbl_err.configure(text=T2("المقاس خارج المدى المسموح", "Size out of range"))
+                return
+            save_print_paper(w, h, sel["name"])
+            self.btn_fix_printer.configure(text=self._paper_btn_text())
+            try: btn_test.configure(state="disabled", text=T2("⏳ جاري الطباعة...", "⏳ Printing..."))
+            except Exception as _e: _log_silent("fp_test#dis", _e)
+
+            def _bg():
+                ok = False
+                try:
+                    os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+                    tp = os.path.join(PRINT_TEMP_DIR, "a2r_test_size.pdf")
+                    if create_test_print_pdf(tp, w, h):
+                        ok = self.send_to_thermal_printer_57x90(tp, is_test=True)
+                except Exception as e:
+                    log_exception("test_print", e)
+                def _fin():
+                    try:
+                        if win.winfo_exists():
+                            btn_test.configure(state="normal", text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"))
+                            if ok:
+                                play_sound_matched()
+                                lbl_err.configure(text=T2("✓ تم إرسال ورقة الاختبار للطابعة", "✓ Test page sent to printer"), text_color=t["success"])
+                            else:
+                                lbl_err.configure(text=T2("تعذرت الطباعة — تأكد من الطابعة", "Print failed — check printer"), text_color=t["danger"])
+                    except Exception as _e: _log_silent("fp_test#fin", _e)
+                self.run_on_main(_fin)
+            threading.Thread(target=_bg, daemon=True).start()
+
+        f_fp_tools = ctk.CTkFrame(win, fg_color="transparent")
+        f_fp_tools.pack(fill="x", padx=16, pady=(8, 4))
+        btn_test = ctk.CTkButton(f_fp_tools, text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"), font=FONT_BTN_SUB,
+                                 height=32, corner_radius=9, fg_color=t["primary"], hover_color=t["primary_hover"],
+                                 text_color="#FFFFFF", command=_test_print)
+        btn_test.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkButton(f_fp_tools, text=T2("⚙️ إعدادات الدرايفر", "⚙️ Driver Settings"), font=FONT_BTN_SUB,
+                      height=32, corner_radius=9, fg_color=t["secondary"], hover_color=t["secondary_hover"],
+                      text_color="#FFFFFF", command=lambda: threading.Thread(target=open_default_printer_preferences, daemon=True).start()
+                      ).pack(side="right", fill="x", expand=True, padx=(4, 0))
+
+        btn_save = ctk.CTkButton(win, text=T2("حفظ وتطبيق", "Save & Apply"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+                                 fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF", command=_save)
+        btn_save.pack(fill="x", padx=16, pady=(4, 10))
         win.bind("<Return>", _save)
         win.bind("<Escape>", lambda e: _close())
         win.protocol("WM_DELETE_WINDOW", _close)
-        try: e_w.focus_set()
-        except Exception as _e: _log_silent("fix_printer_paper_action#3", _e)
+        fit_and_center(win, self, 365, min_height=340, focus_widget=e_w)
 
     def reprint_receipt_record(self, rec):
         fpath = rec.get("path", "")
@@ -8598,6 +4962,63 @@ class CustomTkinterApp(ctk.CTk):
         else:
             messagebox.showerror("Error", f"File not found: {rec.get('file', '')}")
 
+    def reprint_last_receipt(self):
+        """إعادة طباعة آخر إيصال تم طباعته (أو أحدث إيصال في المجلد اليوم لو البرنامج لسه مفتوح)."""
+        self._cancel_auto_minimize()
+        target = self.last_printed_pdf if (self.last_printed_pdf and os.path.exists(self.last_printed_pdf)) else None
+        if not target:
+            p = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            if p and os.path.isdir(p):
+                today_d = datetime.date.today()
+                best_mt, best_p = 0.0, None
+                try:
+                    with os.scandir(p) as it:
+                        for ent in it:
+                            if not ent.is_file(): continue
+                            fn = ent.name
+                            fn_l = fn.lower()
+                            if not fn_l.endswith(".pdf") or fn_l.endswith("_cropped.pdf") or fn_l.endswith("_summary.pdf"):
+                                continue
+                            if not (fn_l.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fn)):
+                                continue
+                            if fn.lstrip("_") in _VOID_KEYS:
+                                continue
+                            st = ent.stat()
+                            if datetime.date.fromtimestamp(st.st_mtime) == today_d and st.st_mtime > best_mt:
+                                best_mt, best_p = st.st_mtime, ent.path
+                except Exception as e:
+                    log_exception("reprint_last_scan", e)
+                target = best_p
+
+        if not target or not os.path.exists(target):
+            messagebox.showinfo(T2("تنبيه", "Notice"),
+                                T2("لا يوجد إيصال مطبوع اليوم لإعادة طباعته.", "No receipt printed today to reprint."))
+            if self.is_mini_mode:
+                self._schedule_auto_minimize(5000)
+            return
+
+        self.last_printed_pdf = target
+        try: self.btn_mini_reprint.configure(state="disabled")
+        except Exception as _e: _log_silent("reprint_last#dis", _e)
+
+        def _work():
+            ok = self.send_to_thermal_printer_57x90(target)
+            def _done():
+                try: self.btn_mini_reprint.configure(state="normal")
+                except Exception as _e: _log_silent("reprint_last#en", _e)
+                if ok:
+                    play_sound_matched()
+                    self._tray_notify(T2(f"تمت إعادة طباعة: {os.path.basename(target)}",
+                                         f"Reprinted: {os.path.basename(target)}"))
+                else:
+                    messagebox.showerror("Error", T2("تعذرت الطباعة. اتأكد من الطابعة وحاول تاني.",
+                                                     "Printing failed. Check the printer and try again."))
+                if self.is_mini_mode:
+                    self._schedule_auto_minimize(5000)
+            self.run_on_main(_done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def _sync_watch_path(self):
         try: self._watch_path = self.get_clean_path()
         except Exception as _e: _log_silent("_sync_watch_path#1", _e)
@@ -8605,8 +5026,13 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as _e: _log_silent("_sync_watch_path#2", _e)
 
     def request_full_console(self):
+        old = getattr(self, "_login_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("request_full_console#exists", _e)
         self._cancel_auto_minimize()
-        ElevateLoginGate(self, self.unlock_full_console)
+        self._login_win = ElevateLoginGate(self, self.unlock_full_console)
 
     def unlock_full_console(self, is_supervisor):
         self.is_supervisor = is_supervisor
@@ -8618,26 +5044,22 @@ class CustomTkinterApp(ctk.CTk):
             w.configure(state="normal")
 
         self.btn_excel.pack_forget()
-        self.btn_pos_close.pack_forget()
-        self.btn_pos_pay.pack_forget()
-        if getattr(self, "btn_pos_tools", None) is not None:
-            self.btn_pos_tools.pack_forget()
+        self.btn_arch_full.pack_forget()
         self.btn_chrome.pack_forget()
         if is_supervisor:
             self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
             self.f_role_btn.configure(border_color="#EF4444")
-            if getattr(self, "btn_pos_tools", None) is not None:
-                self.btn_pos_tools.pack(side="left", padx=2)
-            else:
-                self.btn_excel.pack(side="left", padx=2)
-                self.btn_pos_close.pack(side="left", padx=2)
-                self.btn_pos_pay.pack(side="left", padx=2)
+            self.btn_arch_full.pack(side="left", padx=2)
+            self.btn_excel.pack(side="left", padx=2)   # زر الإكسيل حصري للمشرف — كان مضروب pack_forget من غير ما يترجع
         else:
             self.badge_role.configure(text="● USER", text_color="#10B981")
             self.f_role_btn.configure(border_color="#10B981")
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
+        # حساب إجمالي إيصالات اليوم الموجودة فور الدخول للنسخة الكاملة بدون انتظار نزول ملف جديد
+        if self.auto_sync_enabled and not self.is_processing:
+            self.after(250, self.start_thread)
         # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
         self.after(400, self.auto_archive_on_login)
         if not getattr(self, "_archive_tick_started", False):
@@ -8723,11 +5145,30 @@ class CustomTkinterApp(ctk.CTk):
             _ARCHIVE_LOCK.release()
         return built
 
+    def _refresh_mini_archive_label(self):
+        lbl = getattr(self, "lbl_mini_archive", None)
+        if lbl is None:
+            return
+        try:
+            t = THEMES[self.current_theme_name]
+            if getattr(self, "_auto_archive_running", False):
+                lbl.configure(text=T2("⏳ الأرشفة التلقائية: جاري التحديث...", "⏳ Auto-Archive: Updating..."),
+                              text_color=t["warning"])
+            elif self._archive_done_today():
+                tm = self._archive_done_time()
+                suf = f" ({tm})" if tm else ""
+                lbl.configure(text=T2(f"● الأرشفة التلقائية: مكتملة اليوم ✓{suf}", f"● Auto-Archive: Completed today ✓{suf}"),
+                              text_color=t["success"])
+            else:
+                lbl.configure(text=T2("● الأرشفة التلقائية: جاهزة في الخلفية", "● Auto-Archive: Ready in background"),
+                              text_color=t["text_muted"])
+        except Exception as _e:
+            _log_silent("refresh_mini_archive_label", _e)
+
     def auto_archive_on_login(self):
-        """عند دخول الوضع الكامل (يوزر أو مشرف)، في الخلفية بدون أي نافذة:
-        - لو الأرشفة الكاملة لسه ماتعملتش النهارده: كنس كل الملفات القديمة للأرشيف + استكمال أي سمري/إكسيل ناقص لكل الأيام.
-        - لو اتعملت: يفحص بس الأيام اللي ناقصها سمري أو إكسيل ويبنيها (من غير كنس).
-        إشعار بجوار الساعة لما يخلص لو اتعمل شغل."""
+        """تعمل تلقائيًا فور تشغيل الجهاز/البرنامج (في الميني أو بجوار الساعة) وحتى في أول تشغيل للتطبيق:
+        - كنس كل ملفات الأيام السابقة للأرشيف + توليد إيصال السمري وإكسيل اليوم لكل يوم مؤرشف.
+        - استكمال أي سمري أو إكسيل ناقص لأيام مؤرشفة سابقًا + تحديث فهرس البحث FTS5 في الخلفية."""
         folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
         if not folder or not os.path.isdir(folder):
             return
@@ -8735,6 +5176,7 @@ class CustomTkinterApp(ctk.CTk):
             return
         done_today = self._archive_done_today()
         self._auto_archive_running = True
+        self._refresh_mini_archive_label()
 
         def work():
             swept, ok, filled = 0, False, 0
@@ -8744,13 +5186,16 @@ class CustomTkinterApp(ctk.CTk):
                     if r is not None:             # None = كنسة تانية شغالة، هنحاول تاني في الدورة الجاية
                         swept, ok = r, True
                 filled = self._archive_fill_missing(folder) or 0
-                if ok:
+                if ok or (not done_today and filled >= 0):
                     self._mark_archive_done_today()
+                    self._start_archive_maintenance(folder)
+                elif filled > 0:
                     self._start_archive_maintenance(folder)
             except Exception as e:
                 log_exception("auto_archive_on_login", e)
             finally:
                 self._auto_archive_running = False
+            self.run_on_main(self._refresh_mini_archive_label)
             if ok or filled:
                 self.run_on_main(lambda: self._notify_archive_done(swept, filled))
 
@@ -8777,47 +5222,75 @@ class CustomTkinterApp(ctk.CTk):
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
+        if show:
+            _set_win_alpha(self, 0.0)
         self.body_full.pack_forget()
         self.b_bar.pack_forget()
         self.btn_back_to_mini.pack_forget()
         self.f_role_btn.pack_forget()
         
-        self.btn_elevate.pack(side="right", padx=(6, 0))
         self.body_mini.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+        self._refresh_mini_archive_label()
 
+        sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 440, 210
-        self.minsize(440, 210)
-        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        self.update_idletasks()
+        width = 425
+        req_h = int(self.winfo_reqheight() / sc)
+        height = max(210, req_h + 6)
+        self.minsize(width, height)
+        x = max(0, (sw - int(width * sc)) // 2)
+        y = max(0, (sh - int(height * sc)) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.update_idletasks()
 
         if not show:
+            _set_win_alpha(self, 1.0)
             return
 
-        self.deiconify()
-        self.state("normal")
+        try:
+            if self.state() != "normal":
+                self.deiconify()
+                self.state("normal")
+        except Exception as _e:
+            _log_silent("switch_to_mini#show", _e)
+        self.update()
+        _set_win_alpha(self, 1.0)
         self.lift()
         self.focus_force()
         self._schedule_auto_minimize(5000)
 
     def switch_to_full_view(self):
         self.is_mini_mode = False
+        _set_win_alpha(self, 0.0)
         self.body_mini.pack_forget()
-        self.btn_elevate.pack_forget()
         
         self.btn_back_to_mini.pack(side="right", padx=(6, 0))
         self.f_role_btn.pack(side="right", padx=(6, 0))
         self.b_bar.pack(fill="x", side="bottom")
         self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
 
+        sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        width, height = 590, 465
-        self.minsize(590, 465)
-        self.geometry(f"{width}x{height}+{(sw-width)//2}+{(sh-height)//2}")
+        self.update_idletasks()
+        req_w = int(self.winfo_reqwidth() / sc)
+        req_h = int(self.winfo_reqheight() / sc)
+        width = min(max(600, req_w), int((sw - 40) / sc))
+        height = min(max(330, req_h), int((sh - 80) / sc))
+        self.minsize(width, height)
+        x = max(0, (sw - int(width * sc)) // 2)
+        y = max(0, (sh - int(height * sc)) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.update_idletasks()
 
-        self.deiconify()
-        self.state("normal")
+        try:
+            if self.state() != "normal":
+                self.deiconify()
+                self.state("normal")
+        except Exception as _e:
+            _log_silent("switch_to_full#show", _e)
+        self.update()
+        _set_win_alpha(self, 1.0)
         self.lift()
         self.focus_force()
 
@@ -8870,283 +5343,342 @@ class CustomTkinterApp(ctk.CTk):
         global SOUND_MUTED
         SOUND_MUTED = not SOUND_MUTED
         self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
+        _save_app_prefs(sound_muted=SOUND_MUTED)
 
     def setup_ui(self):
-        self.header = ctk.CTkFrame(self, corner_radius=0, height=36)
+        self.header = ctk.CTkFrame(self, corner_radius=0, height=44)
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
+        self.header_line = ctk.CTkFrame(self, height=2, corner_radius=0, fg_color="#2563EB")
+        self.header_line.pack(fill="x")
 
         f_left = ctk.CTkFrame(self.header, fg_color="transparent")
-        f_left.pack(side="left", padx=(10, 0), pady=4)
+        f_left.pack(side="left", padx=(12, 0), pady=6)
 
-        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=FONT_TITLE_LOGO)
-        self.lbl_logo.pack(side="left", padx=(0, 6))
+        self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=(FONT_FAMILY, 22, "bold"))
+        self.lbl_logo.pack(side="left", padx=(0, 8))
 
-        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=88, height=25, state="readonly",
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=116, height=27, state="readonly",
                                         font=FONT_REGULAR_BOLD, command=self.on_theme_select)
         self.cb_theme.set(self.current_theme_name)
-        self.cb_theme.pack(side="left", padx=(0, 3))
+        self.cb_theme.pack(side="left", padx=(0, 4))
 
-        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=54, height=25, font=FONT_REGULAR_BOLD,
-                                      command=self.toggle_language)
-        self.btn_lang.pack(side="left", padx=(0, 3))
+        self.btn_lang = ctk.CTkButton(f_left, text="🌐 عربي", width=62, height=27, corner_radius=8,
+                                      font=(FONT_FAMILY, 10, "bold"), command=self.toggle_language)
+        self.btn_lang.pack(side="left", padx=(0, 4))
 
-        self.btn_mute = ctk.CTkButton(f_left, text="🔇 Muted", width=62, height=25, font=(FONT_FAMILY, 9, "bold"),
-                                      fg_color="#334155", hover_color="#475569", command=self.toggle_mute)
+        self.btn_mute = ctk.CTkButton(f_left, text=("🔇 Muted" if SOUND_MUTED else "🔊 Sound"), width=66, height=27, corner_radius=8,
+                                      font=(FONT_FAMILY, 9, "bold"), fg_color="#334155", hover_color="#475569",
+                                      command=self.toggle_mute)
         self.btn_mute.pack(side="left")
 
         f_right = ctk.CTkFrame(self.header, fg_color="transparent")
-        f_right.pack(side="right", padx=(0, 10), pady=4)
+        f_right.pack(side="right", padx=(0, 10), pady=6)
 
-        self.btn_elevate = ctk.CTkButton(f_right, text=tr("btn_full_console"), width=115, height=26,
-                                         font=(FONT_FAMILY, 10, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
-                                         border_width=1, border_color="#EF4444", command=self.request_full_console)
-        self.btn_elevate.pack(side="right", padx=(6, 0))
-
-        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=95, height=25,
+        self.btn_back_to_mini = ctk.CTkButton(f_right, text=tr("btn_back_mini"), width=96, height=27, corner_radius=8,
                                               font=(FONT_FAMILY, 10, "bold"), fg_color="#334155", hover_color="#475569",
                                               command=self.switch_to_mini_view)
 
-        self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=6, border_width=1.2, fg_color="#121E2E")
-        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", font=(FONT_FAMILY, 9, "bold"), padx=8, pady=1)
+        self.f_role_btn = ctk.CTkFrame(f_right, corner_radius=8, border_width=1.2, fg_color="#121E2E")
+        self.badge_role = ctk.CTkLabel(self.f_role_btn, text="● USER", height=20, font=(FONT_FAMILY, 9, "bold"), padx=8, pady=1)
         self.badge_role.pack()
 
-        self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_clock = ctk.CTkLabel(f_right, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#38BDF8")
         self.lbl_clock.pack(side="right", padx=(0, 2))
         self.update_live_clock()
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=10, border_width=1)
-        self.card_mini_status.pack(fill="x", pady=(2, 4))
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=12, border_width=1)
+        self.card_mini_status.pack(fill="x", pady=(4, 6))
 
         f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
-        f_mini_title_row.pack(fill="x", padx=14, pady=(6, 2))
+        f_mini_title_row.pack(fill="x", padx=12, pady=(7, 3))
 
-        self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"),
-                                          font=(FONT_FAMILY, 11, "bold"), text_color="#38BDF8")
+        self.lbl_mini_title = ctk.CTkLabel(f_mini_title_row, text=tr("mini_station_title"), height=20,
+                                          font=(FONT_FAMILY, 12, "bold"), text_color="#38BDF8")
         self.lbl_mini_title.pack(side="left")
 
-        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=70, height=22,
-                                             font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706", hover_color="#B45309",
-                                             text_color="#FFFFFF", command=self.fix_printer_paper_action)
+        self.btn_fix_printer = ctk.CTkButton(f_mini_title_row, text=self._paper_btn_text(), width=78, height=24,
+                                             corner_radius=7, font=(FONT_FAMILY, 9, "bold"), fg_color="#D97706",
+                                             hover_color="#B45309", text_color="#FFFFFF", command=self.fix_printer_paper_action)
         self.btn_fix_printer.pack(side="right")
 
-        self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"),
+        self.lbl_mini_desc = ctk.CTkLabel(self.card_mini_status, text=tr("mini_status_active"), height=18,
                                          font=(FONT_FAMILY, 10, "bold"), text_color="#10B981")
-        self.lbl_mini_desc.pack(anchor="w", padx=14, pady=(0, 2))
+        self.lbl_mini_desc.pack(anchor="w", padx=12, pady=(0, 1))
 
-        self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0),
-                                            font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
-        self.lbl_mini_counter.pack(anchor="w", padx=14, pady=(0, 6))
+        self.lbl_mini_counter = ctk.CTkLabel(self.card_mini_status, text=tr("mini_printed_count", count=0), height=18,
+                                            font=(FONT_FAMILY, 10, "bold"), text_color="#94A3B8")
+        self.lbl_mini_counter.pack(anchor="w", padx=12, pady=(0, 1))
 
-        self.btn_mini_archive = ctk.CTkButton(self.body_mini, text=tr("clean_downloads"), height=36,
-                                              font=FONT_BTN_MAIN, fg_color="#4338CA", hover_color="#3730A3",
-                                              text_color="#FFFFFF", command=self.open_downloads_archiver_dialog)
-        self.btn_mini_archive.pack(fill="x", pady=(2, 4))
+        self.lbl_mini_archive = ctk.CTkLabel(self.card_mini_status, text="", height=18,
+                                             font=(FONT_FAMILY, 9, "bold"), text_color="#94A3B8")
+        self.lbl_mini_archive.pack(anchor="w", padx=12, pady=(0, 7))
 
-        self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+        f_mini_btns = ctk.CTkFrame(self.body_mini, fg_color="transparent")
+        f_mini_btns.pack(fill="x", pady=(0, 5))
+
+        self.btn_mini_reprint = ctk.CTkButton(f_mini_btns, text=tr("mini_reprint_last"), height=34, corner_radius=9,
+                                              font=(FONT_FAMILY, 11, "bold"), fg_color="#D97706", hover_color="#B45309",
+                                              text_color="#FFFFFF", command=self.reprint_last_receipt)
+        self.btn_mini_reprint.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.btn_elevate = ctk.CTkButton(f_mini_btns, text=tr("btn_full_console"), height=34, corner_radius=9,
+                                         font=(FONT_FAMILY, 11, "bold"), fg_color="#DC2626", hover_color="#B91C1C",
+                                         border_width=0, text_color="#FFFFFF", command=self.request_full_console)
+        self.btn_elevate.pack(side="right", fill="x", expand=True, padx=(5, 0))
+
+        self.lbl_mini_foot = ctk.CTkLabel(self.body_mini, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=16,
                                          font=(FONT_FAMILY, 9, "bold"), text_color="#64748B")
-        self.lbl_mini_foot.pack(anchor="center", pady=(0, 0))
+        self.lbl_mini_foot.pack(anchor="center", pady=(0, 3))
 
-        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=42)
-        self.btn_center_box = ctk.CTkFrame(self.b_bar, fg_color="transparent")
-        self.btn_center_box.pack(anchor="center", pady=(2, 0))
+        # ===== الشريط السفلي: مجموعات معنونة + شريط حالة نحيف (Pack 1) =====
+        self.b_bar = ctk.CTkFrame(self, corner_radius=0, height=76)
 
+        self._bar_captions = []  # (label, ar, en) — بتتحدث مع تغيير اللغة والثيم
+
+        bar_groups = ctk.CTkFrame(self.b_bar, fg_color="transparent")
+        bar_groups.pack(anchor="center", pady=(4, 0))
+
+        def _mk_group(cap_ar, cap_en):
+            g = ctk.CTkFrame(bar_groups, fg_color="transparent")
+            g.pack(side="left", padx=(10, 0))
+            cap = ctk.CTkLabel(g, text=T2(cap_ar, cap_en), height=12,
+                               font=(FONT_FAMILY, 8, "bold"), text_color="#64748B")
+            cap.pack(anchor="center")
+            row = ctk.CTkFrame(g, fg_color="transparent")
+            row.pack(anchor="center", pady=(1, 0))
+            self._bar_captions.append((cap, cap_ar, cap_en))
+            return row
+
+        _BAR_BTN_H = 30
+        _BAR_FONT = (FONT_FAMILY, 10, "bold")
+
+        row_view = _mk_group("العرض", "View")
         self.btn_view_rec = ctk.CTkButton(
-            self.btn_center_box, width=115, height=25, font=(FONT_FAMILY, 10, "bold"),
-            text_color="#FFFFFF", fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
+            row_view, width=112, height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT,
+            text_color="#FFFFFF", fg_color="#2563EB", hover_color="#1D4ED8",
             command=self.open_records_viewer
         )
         self.btn_view_rec.pack(side="left", padx=2)
 
-        self.btn_pdf_export = ctk.CTkButton(self.btn_center_box, width=50, height=25, font=FONT_BTN_SUB,
-                                           fg_color="#1A2D42", hover_color="#243C56", text_color="#FFFFFF", command=self.export_pdf_summary)
+        # النسخة المخففة: بدل زر المشرف (التقفيل/الدفع) فيه زر واحد بيفتح سجل الأرشيف الكامل (للمشرف فقط)
+        self.btn_arch_full = ctk.CTkButton(row_view, fg_color="#4F46E5", hover_color="#4338CA", width=112,
+                                           height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.open_archive_history)
+
+        self.btn_chrome = ctk.CTkButton(row_view, fg_color="#334155", hover_color="#475569", width=104,
+                                        height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.open_chrome_browser)
+
+        row_reports = _mk_group("التقارير", "Reports")
+        self.btn_pdf_export = ctk.CTkButton(row_reports, width=96, height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT,
+                                           fg_color="#334155", hover_color="#475569", text_color="#FFFFFF", command=self.export_pdf_summary)
         self.btn_pdf_export.pack(side="left", padx=2)
 
-        self.btn_print_slip = ctk.CTkButton(self.btn_center_box, fg_color="#D97706", hover_color="#B45309", width=85,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.print_slip)
+        self.btn_excel = ctk.CTkButton(row_reports, fg_color="#059669", hover_color="#047857", width=96,
+                                       height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.open_excel)
+
+        row_print = _mk_group("الطباعة", "Print")
+        self.btn_print_slip = ctk.CTkButton(row_print, fg_color="#D97706", hover_color="#B45309", width=100,
+                                           height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.print_slip)
         self.btn_print_slip.pack(side="left", padx=2)
 
-        self.btn_excel = ctk.CTkButton(self.btn_center_box, fg_color="#059669", hover_color="#047857", width=85,
-                                       height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_excel)
+        # شريط حالة نحيف: عدادات اليوم لايف + سطر الإصدار
+        status_row = ctk.CTkFrame(self.b_bar, fg_color="transparent", height=18)
+        status_row.pack(fill="x", padx=12, pady=(2, 3))
 
-        self.btn_pos_close = ctk.CTkButton(self.btn_center_box, fg_color="#0F766E", hover_color="#115E59", width=105,
-                                           height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_pos_closing)
-        self.btn_pos_pay = ctk.CTkButton(self.btn_center_box, fg_color="#B45309", hover_color="#92400E", width=105,
-                                         height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_pos_payments)
+        self.lbl_status_count = ctk.CTkLabel(status_row, text="", height=16,
+                                             font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_status_count.pack(side="left")
 
-        self.btn_pos_tools = None
-        if POS_TOOLS_AVAILABLE:
-            try:
-                self.btn_pos_tools = make_pos_tools_button(self, self.btn_center_box, width=105, height=25)
-            except Exception:
-                self.btn_pos_tools = None
+        self.lbl_status_sum = ctk.CTkLabel(status_row, text="", height=16,
+                                           font=(FONT_FAMILY, 9, "bold"), text_color="#00FF66")
+        self.lbl_status_sum.pack(side="left", padx=(12, 0))
 
-        self.btn_chrome = ctk.CTkButton(self.btn_center_box, fg_color="#2563EB", hover_color="#1D4ED8", width=90,
-                                        height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.open_chrome_browser)
-
-        lbl_foot = ctk.CTkLabel(self.b_bar, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria",
+        self.lbl_foot = ctk.CTkLabel(status_row, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=16,
                                 font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        lbl_foot.pack(anchor="center", pady=(0, 2))
+        self.lbl_foot.pack(side="right")
+
+        self._status_count_val = 0
+        self._status_total_val = 0.0
+        self._render_status_bar(0, 0.0)
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_top.pack(fill="x", pady=(0, 2))
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_top.pack(fill="x", pady=(4, 4))
 
-        self.lbl_folder = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_folder.pack(anchor="w", padx=8, pady=(2, 1))
+        self.lbl_folder = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
+        self.lbl_folder.pack(anchor="w", padx=12, pady=(6, 2))
 
         f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_dir.pack(fill="x", padx=8, pady=1)
+        f_dir.pack(fill="x", padx=12, pady=(0, 3))
 
-        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=27, text_color="#FFFFFF")
-        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=30, text_color="#FFFFFF")
+        self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
         attach_context_menu(self.e_path)
 
         self.btn_browse = ctk.CTkButton(
-            f_dir, width=70, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
-            fg_color="#0284C7", hover_color="#0369A1", border_width=1, border_color="#38BDF8",
-            command=self.browse_folder
+            f_dir, width=74, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#2563EB", hover_color="#1D4ED8", command=self.browse_folder
         )
-        self.btn_browse.pack(side="left", padx=(0, 3))
+        self.btn_browse.pack(side="left", padx=(0, 4))
 
         self.btn_open_f = ctk.CTkButton(
-            f_dir, width=60, height=27, font=FONT_BTN_SUB, text_color="#FFFFFF",
-            fg_color="#0F766E", hover_color="#115E59", border_width=1, border_color="#2DD4BF",
-            command=self.open_current_folder
+            f_dir, width=64, height=30, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF",
+            fg_color="#059669", hover_color="#047857", command=self.open_current_folder
         )
         self.btn_open_f.pack(side="left")
 
-        self.lbl_d = ctk.CTkLabel(self.card_top, font=FONT_SECTION_LBL)
-        self.lbl_d.pack(anchor="w", padx=8, pady=(1, 1))
+        self.lbl_d = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
+        self.lbl_d.pack(anchor="w", padx=12, pady=(2, 2))
 
         f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_date.pack(fill="x", padx=8, pady=(1, 3))
+        f_date.pack(fill="x", padx=12, pady=(0, 6))
 
         today = datetime.date.today()
-        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=56, height=30, font=FONT_REGULAR_BOLD)
         self.cb_d.set(f"{today.day:02d}")
-        self.cb_d.pack(side="left", padx=(0, 2))
+        self.cb_d.pack(side="left", padx=(0, 3))
 
-        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=52, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_m = ctk.CTkComboBox(f_date, values=[f"{m:02d}" for m in range(1, 13)], width=56, height=30, font=FONT_REGULAR_BOLD)
         self.cb_m.set(f"{today.month:02d}")
-        self.cb_m.pack(side="left", padx=(0, 2))
+        self.cb_m.pack(side="left", padx=(0, 3))
 
-        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=66, height=25, font=FONT_REGULAR_BOLD)
+        self.cb_y = ctk.CTkComboBox(f_date, values=[str(y) for y in range(today.year - 3, today.year + 3)], width=70, height=30, font=FONT_REGULAR_BOLD)
         self.cb_y.set(str(today.year))
-        self.cb_y.pack(side="left", padx=(0, 4))
+        self.cb_y.pack(side="left", padx=(0, 6))
 
-        self.btn_today = ctk.CTkButton(f_date, width=52, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
-        self.btn_today.pack(side="left", padx=(0, 2))
+        self.btn_today = ctk.CTkButton(f_date, width=58, height=30, corner_radius=8, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.set_today)
+        self.btn_today.pack(side="left", padx=(0, 4))
 
-        self.btn_yesterday = ctk.CTkButton(f_date, width=62, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF",
+        self.btn_yesterday = ctk.CTkButton(f_date, width=68, height=30, corner_radius=8, font=FONT_BTN_SUB, text_color="#FFFFFF",
                                            fg_color="#334155", hover_color="#475569", command=self.set_yesterday)
-        self.btn_yesterday.pack(side="left", padx=(0, 6))
+        self.btn_yesterday.pack(side="left", padx=(0, 8))
 
         f_switches = ctk.CTkFrame(f_date, fg_color="transparent")
         f_switches.pack(side="right")
 
-        self.sw_autosync = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autosync)
-        self.sw_autosync.pack(side="left", padx=(0, 2))
+        self.sw_autosync = ctk.CTkSwitch(f_switches, text="", width=38, height=22, command=self.toggle_autosync)
+        self.sw_autosync.pack(side="left", padx=(0, 3))
         self.lbl_sw_sync = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
-        self.lbl_sw_sync.pack(side="left", padx=(0, 8))
+        self.lbl_sw_sync.pack(side="left", padx=(0, 10))
 
-        self.sw_autoprint = ctk.CTkSwitch(f_switches, text="", width=36, height=20, command=self.toggle_autoprint)
-        self.sw_autoprint.pack(side="left", padx=(0, 2))
+        self.sw_autoprint = ctk.CTkSwitch(f_switches, text="", width=38, height=22, command=self.toggle_autoprint)
+        self.sw_autoprint.pack(side="left", padx=(0, 3))
         self.lbl_sw_print = ctk.CTkLabel(f_switches, text="", font=(FONT_FAMILY, 9, "bold"))
         self.lbl_sw_print.pack(side="left")
 
-        self.sw_autosync.select()
-        self.sw_autoprint.select()
+        if self.auto_sync_enabled: self.sw_autosync.select()
+        else: self.sw_autosync.deselect()
+        if self.auto_print_enabled: self.sw_autoprint.select()
+        else: self.sw_autoprint.deselect()
 
-        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_dash.pack(fill="x", pady=(0, 2))
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 4))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
-        dash_grid.pack(fill="x", padx=8, pady=3)
+        dash_grid.pack(fill="x", padx=10, pady=6)
 
         f_kpi = ctk.CTkFrame(dash_grid, fg_color="transparent")
         f_kpi.pack(side="left", fill="both", expand=True)
 
-        pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
-        pill_c1.pack(side="left", padx=(0, 4), fill="both", expand=True)
-        self.lbl_kpi1_title = ctk.CTkLabel(pill_c1, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi1_title.pack(anchor="w", padx=6, pady=(1, 0))
-        self.lbl_cnt = ctk.CTkLabel(pill_c1, text="0", font=FONT_KPI_VAL, text_color="#FFFFFF")
-        self.lbl_cnt.pack(anchor="w", padx=6, pady=(0, 1))
+        self.pill_c1 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
+        self.pill_c1.pack(side="left", padx=(0, 6), fill="both", expand=True)
+        self.kpi1_bar = ctk.CTkFrame(self.pill_c1, width=4, height=28, corner_radius=2, fg_color="#38BDF8")
+        self.kpi1_bar.pack(side="left", fill="y", padx=(6, 6), pady=6)
+        f_kpi1_txt = ctk.CTkFrame(self.pill_c1, fg_color="transparent")
+        f_kpi1_txt.pack(side="left", fill="both", expand=True, pady=4)
+        self.lbl_kpi1_title = ctk.CTkLabel(f_kpi1_txt, height=16, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi1_title.pack(anchor="w")
+        self.lbl_cnt = ctk.CTkLabel(f_kpi1_txt, text="0", height=22, font=(FONT_FAMILY, 16, "bold"), text_color="#FFFFFF")
+        self.lbl_cnt.pack(anchor="w")
 
-        pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=6, border_width=1, border_color="#1E2E42")
-        pill_c2.pack(side="left", padx=(0, 4), fill="both", expand=True)
-        self.lbl_kpi2_title = ctk.CTkLabel(pill_c2, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_kpi2_title.pack(anchor="w", padx=6, pady=(1, 0))
-        self.lbl_sum = ctk.CTkLabel(pill_c2, text="0.00 EGP", font=FONT_KPI_VAL, text_color="#00FF66")
-        self.lbl_sum.pack(anchor="w", padx=6, pady=(0, 1))
+        self.pill_c2 = ctk.CTkFrame(f_kpi, fg_color="#07121E", corner_radius=10, border_width=1, border_color="#1E2E42")
+        self.pill_c2.pack(side="left", padx=(0, 8), fill="both", expand=True)
+        self.kpi2_bar = ctk.CTkFrame(self.pill_c2, width=4, height=28, corner_radius=2, fg_color="#34D399")
+        self.kpi2_bar.pack(side="left", fill="y", padx=(6, 6), pady=6)
+        f_kpi2_txt = ctk.CTkFrame(self.pill_c2, fg_color="transparent")
+        f_kpi2_txt.pack(side="left", fill="both", expand=True, pady=4)
+        self.lbl_kpi2_title = ctk.CTkLabel(f_kpi2_txt, height=16, font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
+        self.lbl_kpi2_title.pack(anchor="w")
+        self.lbl_sum = ctk.CTkLabel(f_kpi2_txt, text="0.00 EGP", height=22, font=(FONT_FAMILY, 16, "bold"), text_color="#00FF66")
+        self.lbl_sum.pack(anchor="w")
 
         f_pos = ctk.CTkFrame(dash_grid, fg_color="transparent")
-        f_pos.pack(side="right", fill="both")
+        f_pos.pack(side="right", fill="y")
 
-        self.lbl_pos_title = ctk.CTkLabel(f_pos, font=FONT_SECTION_LBL)
-        self.lbl_pos_title.pack(anchor="w", pady=(0, 1))
+        self.lbl_pos_title = ctk.CTkLabel(f_pos, height=16, font=FONT_SECTION_LBL)
+        self.lbl_pos_title.pack(anchor="w", pady=(0, 2))
 
         f_pos_in = ctk.CTkFrame(f_pos, fg_color="transparent")
         f_pos_in.pack(fill="x")
 
         vcmd = (self.register(self.validate_numeric_input), '%P')
-        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=105, height=25,
+        self.e_pos = ctk.CTkEntry(f_pos_in, placeholder_text="POS / Cash Total", width=116, height=28,
                                   justify="center", font=FONT_ENTRY, text_color="#FFFFFF",
                                   validate="key", validatecommand=vcmd)
-        self.e_pos.pack(side="left", padx=(0, 3))
+        self.e_pos.pack(side="left", padx=(0, 5))
         self.e_pos.bind("<Return>", lambda e: self.check_pos())
         attach_context_menu(self.e_pos)
 
-        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=50, height=25, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
+        self.btn_pos_check = ctk.CTkButton(f_pos_in, width=62, height=28, corner_radius=9, font=FONT_BTN_SUB, text_color="#FFFFFF", command=self.check_pos)
         self.btn_pos_check.pack(side="left")
 
-        self.lbl_diff = ctk.CTkLabel(f_pos, text="", font=(FONT_FAMILY, 10, "bold"))
-        self.lbl_diff.pack(anchor="w", pady=(1, 0))
+        self.lbl_diff = ctk.CTkLabel(f_pos, text="", height=15, font=(FONT_FAMILY, 10, "bold"))
+        self.lbl_diff.pack(anchor="w", pady=(2, 0))
 
-        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=10, border_width=1)
-        self.card_actions.pack(fill="x", pady=(0, 2))
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 4))
 
-        self.btn_run = ctk.CTkButton(self.card_actions, font=FONT_BTN_MAIN, height=30, text_color="#FFFFFF", command=self.start_thread)
-        self.btn_run.pack(fill="x", padx=10, pady=(4, 2))
+        self.btn_run = ctk.CTkButton(self.card_actions, font=(FONT_FAMILY, 13, "bold"), height=36, corner_radius=10,
+                                     text_color="#FFFFFF", command=self.start_thread)
+        self.btn_run.pack(fill="x", padx=10, pady=(7, 5))
 
         f_prog = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_prog.pack(fill="x", padx=10, pady=(0, 2))
+        f_prog.pack(fill="x", padx=10, pady=(0, 1))
 
-        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=6, progress_color="#00FF66", fg_color="#064E3B")
+        self.progress_bar = ctk.CTkProgressBar(f_prog, orientation="horizontal", height=7, corner_radius=4, progress_color="#00FF66", fg_color="#064E3B")
         self.progress_bar.set(0)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=34)
+        self.lbl_progress_pct = ctk.CTkLabel(f_prog, text="0%", height=16, font=(FONT_FAMILY, 10, "bold"), text_color="#FFFFFF", width=36)
         self.lbl_progress_pct.pack(side="right")
 
-        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", font=(FONT_FAMILY, 10), text_color="#8FA3B8")
-        self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 2))
+        self.lbl_current_file = ctk.CTkLabel(self.card_actions, text="", height=16, font=(FONT_FAMILY, 9), text_color="#8FA3B8")
+        self.lbl_current_file.pack(anchor="w", padx=12, pady=(0, 3))
 
         f_act = ctk.CTkFrame(self.card_actions, fg_color="transparent")
-        f_act.pack(fill="x", padx=10, pady=(0, 4))
+        f_act.pack(fill="x", padx=10, pady=(0, 7))
 
-        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0F766E", hover_color="#115E59", height=27, width=72, command=self.open_manual)
-        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 1))
+        self.btn_manual = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#059669", hover_color="#047857", height=32, corner_radius=9, width=82, command=self.open_manual)
+        self.btn_manual.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
-        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9", height=27, width=72, command=self.reopen_summary_modal)
-        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_summary_reopen = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#4F46E5", hover_color="#4338CA", height=32, corner_radius=9, width=82, command=self.reopen_summary_modal)
+        self.btn_summary_reopen.pack(side="left", fill="x", expand=True, padx=3)
 
-        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#0D9488", hover_color="#0F766E", height=27, width=60, command=self.open_cash_counter)
-        self.btn_cash.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_cash = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#FFFFFF", fg_color="#059669", hover_color="#047857", height=32, corner_radius=9, width=72, command=self.open_cash_counter)
+        self.btn_cash.pack(side="left", fill="x", expand=True, padx=3)
 
-        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", height=27, width=68, command=self.open_downloads_archiver_dialog)
-        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=(1, 1))
+        self.btn_archive_downloads = ctk.CTkButton(f_act, font=FONT_BTN_SUB, fg_color="#4F46E5", hover_color="#4338CA", text_color="#FFFFFF", height=32, corner_radius=9, width=78, command=self.open_downloads_archiver_dialog)
+        self.btn_archive_downloads.pack(side="left", fill="x", expand=True, padx=3)
 
         self.btn_reset = ctk.CTkButton(f_act, font=FONT_BTN_SUB, text_color="#EF4444", fg_color="transparent",
-                                       hover_color="#1E1E24", border_width=1.5, border_color="#EF4444", height=27, width=52,
+                                       hover_color="#2A1C22", border_width=1.5, border_color="#EF4444", height=32, corner_radius=9, width=62,
                                        command=self.confirm_and_reset)
-        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(1, 0))
+        self.btn_reset.pack(side="right", fill="x", expand=True, padx=(3, 0))
         self._install_tooltips()
+
+    def _render_status_bar(self, count, total):
+        """شريط الحالة السفلي: عدد العمليات وإجمالي المبالغ (بيتحدث لايف مع كل فحص أو مسح)."""
+        self._status_count_val = count
+        self._status_total_val = total
+        try:
+            self.lbl_status_count.configure(text=T2("العمليات", "Ops") + f": {count:,}")
+            self.lbl_status_sum.configure(text=T2("الإجمالي", "Total") + f": {total:,.2f} {tr('currency')}")
+        except Exception as _e:
+            _log_silent("status_bar#render", _e)
 
     def _on_global_escape(self, e=None):
         """Esc = قفل النافذة الفرعية اللي عليها الفوكس. النوافذ اللي ليها Esc خاص بيها (زي سجل الأرشيف) بتفضل زي ما هي."""
@@ -9167,13 +5699,12 @@ class CustomTkinterApp(ctk.CTk):
             "btn_cash":             (lambda: T2("حاسبة الكاش (F4)", "Cash calculator (F4)")),
             "btn_summary_reopen":   (lambda: T2("إعادة فتح ملخص الفحص", "Reopen scan summary")),
             "btn_archive_downloads": (lambda: T2("أرشفة الجهاز", "Archive this device")),
-            "btn_mini_archive":     (lambda: T2("أرشفة الجهاز", "Archive this device")),
+            "btn_mini_reprint":     (lambda: T2("إعادة طباعة آخر إيصال (في حالة نفاد الورق أو انحشاره)", "Reprint the last receipt (if paper ran out or jammed)")),
             "btn_reset":            (lambda: T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)")),
             "btn_view_rec":         (lambda: T2("عرض السجلات", "Records viewer")),
             "btn_pdf_export":       (lambda: T2("تصدير ملخص PDF", "Export PDF summary")),
             "btn_excel":            (lambda: T2("فتح ملف الإكسيل", "Open Excel file")),
-            "btn_pos_close":        (lambda: T2("تقفيل POS", "POS closing")),
-            "btn_pos_pay":          (lambda: T2("إيصالات الدفع", "Payment receipts")),
+            "btn_arch_full":        (lambda: T2("سجل الأرشيف الكامل (كل الأيام)", "Full archive history (all days)")),
             "btn_chrome":           (lambda: T2("فتح المتصفح", "Open browser")),
             "btn_today":            (lambda: T2("تاريخ النهارده", "Set date to today")),
             "btn_yesterday":        (lambda: T2("تاريخ امبارح", "Set date to yesterday")),
@@ -9189,33 +5720,61 @@ class CustomTkinterApp(ctk.CTk):
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
         self.apply_theme(selected_theme)
+        _save_app_prefs(theme=selected_theme)
 
     def apply_theme(self, name):
         t = THEMES[name]
-        ctk.set_appearance_mode(t["mode"])
+        if ctk.get_appearance_mode().lower() != t["mode"].lower():
+            ctk.set_appearance_mode(t["mode"])
         self.configure(fg_color=t["bg"])
         self.header.configure(fg_color=t["sub_card"])
         self.lbl_logo.configure(text_color=t["accent"])
+        self.header_line.configure(fg_color=t["primary"])
+        try:
+            self.kpi1_bar.configure(fg_color=t["primary"])
+            self.kpi2_bar.configure(fg_color=t["success"])
+            self.btn_reset.configure(text_color=t["danger"], border_color=t["danger"],
+                                     hover_color=("#2A1B22" if t["mode"] == "Dark" else "#FEE2E2"))
+        except Exception as _e: _log_silent("apply_theme#bars", _e)
         self.card_top.configure(fg_color=t["card"], border_color=t["border"])
         self.card_dash.configure(fg_color=t["card"], border_color=t["border"])
         self.card_actions.configure(fg_color=t["card"], border_color=t["border"])
         self.card_mini_status.configure(fg_color=t["card"], border_color=t["border"])
         self.b_bar.configure(fg_color=t["sub_card"])
 
-        self.lbl_folder.configure(text_color=t["accent"])
-        self.lbl_d.configure(text_color=t["accent"])
-        self.lbl_kpi1_title.configure(text_color=t["accent"])
-        self.lbl_kpi2_title.configure(text_color=t["accent"])
-        self.lbl_pos_title.configure(text_color=t["accent"])
-        self.lbl_sum.configure(text_color="#00FF66")
+        self.lbl_folder.configure(text_color=t["text_muted"])
+        self.lbl_d.configure(text_color=t["text_muted"])
+        self.lbl_kpi1_title.configure(text_color=t["text_muted"])
+        self.lbl_kpi2_title.configure(text_color=t["text_muted"])
+        self.lbl_pos_title.configure(text_color=t["text_muted"])
+        self.lbl_sum.configure(text_color=t["success"])
+        try:
+            self.lbl_cnt.configure(text_color=t["text"])
+            for _p in (self.pill_c1, self.pill_c2):
+                _p.configure(fg_color=t["input"], border_color=t["border"], corner_radius=10)
+            self.progress_bar.configure(progress_color=t["success"], fg_color=t["border"])
+            self.lbl_progress_pct.configure(text_color=t["text"])
+            self.lbl_current_file.configure(text_color=t["text_muted"])
+            self.lbl_foot.configure(text_color=t["text_muted"])
+            for _cap, _ar, _en in getattr(self, "_bar_captions", []):
+                _cap.configure(text_color=t["text_muted"])
+            self.lbl_status_count.configure(text_color=t["accent"])
+            self.lbl_status_sum.configure(text_color=t["success"])
+            self.lbl_clock.configure(text_color=t["accent"])
+            self.f_role_btn.configure(fg_color=t["card"])
+            for _e in (self.e_path, self.e_pos): style_entry(_e, t)
+            for _c in (self.cb_d, self.cb_m, self.cb_y, self.cb_theme): style_combo(_c, t)
+            apply_tree_style(t, 28)
+        except Exception as _e: log_exception("apply_theme_extras", _e)
         self.btn_run.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
         self.btn_pos_check.configure(fg_color=t["primary"], hover_color=t["primary_hover"])
         self._apply_button_roles(t)
 
         self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
 
     def _apply_button_roles(self, t):
-        """تلوين كل الأزرار بحسب دورها من الثيم الحالي (تغيير الثيم بيغيّرها كلها)."""
+        """تلوين كل الأزرار بحسب دورها من الثيم الحالي بنمط عصري مسطح (بدون إطار ذهبي)."""
         for role, attrs in BUTTON_ROLES.items():
             col, hov = t.get(role), t.get(role + "_hover")
             if not col:
@@ -9225,27 +5784,25 @@ class CustomTkinterApp(ctk.CTk):
                 if b is None:
                     continue
                 try:
-                    b.configure(fg_color=col, hover_color=hov)
+                    if role == "secondary":
+                        b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["border"])
+                    else:
+                        b.configure(fg_color=col, hover_color=hov, border_width=0)
                 except Exception as e:
                     log_exception("apply_button_role:" + a, e)
-        for a in ("btn_browse", "btn_view_rec"):   # الحد المضيء حوالين الزرين دول
-            b = getattr(self, a, None)
-            if b is not None:
-                try: b.configure(border_color=t["accent"])
-                except Exception as e: log_exception("apply_button_border:" + a, e)
 
     def update_toggle_appearance(self):
         t = THEMES[self.current_theme_name]
         if self.auto_sync_enabled:
             self.sw_autosync.configure(progress_color=t["success"], button_color="#FFFFFF")
-            self.lbl_sw_sync.configure(text=tr("autosync_on"), text_color="#FFFFFF")
+            self.lbl_sw_sync.configure(text=tr("autosync_on"), text_color=t["text"])
         else:
             self.sw_autosync.configure(fg_color=t["border"], button_color=t["text_muted"])
             self.lbl_sw_sync.configure(text=tr("autosync_off"), text_color=t["text_muted"])
 
         if self.auto_print_enabled:
             self.sw_autoprint.configure(progress_color=t["success"], button_color="#FFFFFF")
-            self.lbl_sw_print.configure(text=tr("autoprint_on"), text_color="#FFFFFF")
+            self.lbl_sw_print.configure(text=tr("autoprint_on"), text_color=t["text"])
         else:
             self.sw_autoprint.configure(fg_color=t["border"], button_color=t["text_muted"])
             self.lbl_sw_print.configure(text=tr("autoprint_off"), text_color=t["text_muted"])
@@ -9270,6 +5827,7 @@ class CustomTkinterApp(ctk.CTk):
         self.current_lang = "ar" if self.current_lang == "en" else "en"
         CURRENT_LANG = self.current_lang
         self.apply_language(self.current_lang)
+        _save_app_prefs(lang=self.current_lang)
 
     def apply_language(self, lang):
         L = LANGUAGES[lang]
@@ -9285,7 +5843,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_summary_reopen.configure(text=L["summary_btn"])
         self.btn_cash.configure(text=L["cash_btn"])
         self.btn_archive_downloads.configure(text=L["clean_downloads"])
-        self.btn_mini_archive.configure(text=L["clean_downloads"])
+        self.btn_mini_reprint.configure(text=L["mini_reprint_last"])
         self.btn_reset.configure(text=L["reset"])
         self.lbl_kpi1_title.configure(text=L["kpi1"])
         self.lbl_kpi2_title.configure(text=L["kpi2"])
@@ -9295,21 +5853,19 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_pdf_export.configure(text=L["export_pdf"])
         self.btn_print_slip.configure(text=L["print_slip"])
         self.btn_excel.configure(text=L["open_excel"])
-        self.btn_pos_close.configure(text=L["pos_close_btn"])
-        self.btn_pos_pay.configure(text=L["pos_pay_btn"])
+        self.btn_arch_full.configure(text=L["arch_hist_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
+        for _cap, _ar, _en in getattr(self, "_bar_captions", []):
+            _cap.configure(text=_ar if lang == "ar" else _en)
+        self._render_status_bar(getattr(self, "_status_count_val", 0), getattr(self, "_status_total_val", 0.0))
         self.btn_elevate.configure(text=L["btn_full_console"])
-        if POS_TOOLS_AVAILABLE:
-            try:
-                refresh_pos_tools_button(self)
-            except Exception as _e:
-                _log_silent("apply_language#1", _e)
         self.btn_back_to_mini.configure(text=L["btn_back_mini"])
         self.lbl_mini_title.configure(text=L["mini_station_title"])
         self.lbl_mini_desc.configure(text=L["mini_status_active"])
         self.lbl_mini_counter.configure(text=tr("mini_printed_count", count=self.printed_count_today))
         self.btn_fix_printer.configure(text=self._paper_btn_text())
         self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
         if self.last_detailed_records:
             annotate_records(self.last_detailed_records)
 
@@ -9323,6 +5879,7 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_current_file.configure(text="")
         self.lbl_cnt.configure(text="0")
         self.lbl_sum.configure(text=f"0.00 {tr('currency')}")
+        self._render_status_bar(0, 0.0)
         self.lbl_diff.configure(text="")
         self.system_total_sum = 0.0
         self.last_generated_file = None
@@ -9392,14 +5949,35 @@ class CustomTkinterApp(ctk.CTk):
         webbrowser.open(target_url)
 
     def init_watchdogs(self):
+        def _scan_dir(folder):
+            """قراءة سريعة لمجلد الإيصالات بـ os.scandir (بدون glob أو استدعاءات قرص مكررة).
+            ترجّع: ([(path, name, size)], set_of_crdownload_base_names)."""
+            pdfs, cr_bases = [], set()
+            try:
+                with os.scandir(folder) as it:
+                    for ent in it:
+                        name = ent.name
+                        nl = name.lower()
+                        if nl.endswith(".pdf"):
+                            try:
+                                if ent.is_file(follow_symlinks=False):
+                                    pdfs.append((ent.path, name, ent.stat(follow_symlinks=False).st_size))
+                            except OSError:
+                                pass
+                        elif nl.endswith(".crdownload"):
+                            cr_bases.add(nl[:-11])
+            except OSError:
+                pass
+            return pdfs, cr_bases
+
         def _routine():
             # استبعاد وتسكين الملفات الموجودة قبل تشغيل البرنامج
             initial_path = self._watch_path
             last_seeded = None   # آخر مجلد اتعلّمت ملفاته "اتطبعت"
-            if initial_path and os.path.exists(initial_path):
+            if initial_path and os.path.isdir(initial_path):
                 try:
-                    for f in glob.glob(os.path.join(initial_path, "*.pdf")):
-                        fn = os.path.basename(f)
+                    pdfs, _ = _scan_dir(initial_path)
+                    for _, fn, _ in pdfs:
                         self.printed_receipts_set.add(fn)
                         self.printed_receipts_set.add(clean_download_filename(fn))
                     last_seeded = initial_path
@@ -9411,47 +5989,59 @@ class CustomTkinterApp(ctk.CTk):
                 time.sleep(0.5 if self.auto_print_enabled else 2)
                 try:
                     p = self._watch_path
-                    if not p or not os.path.exists(p): continue
+                    if not p or not os.path.isdir(p): continue
+
+                    # تصفير عدّاد المطبوعات تلقائيًا عند بداية يوم جديد مع الحفاظ على منع إعادة طباعة الملفات القديمة
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
+                        self.last_printed_pdf = None
+                        self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                            text=tr("mini_printed_count", count=0)))
+                        pdfs_now, _ = _scan_dir(p)
+                        keep = set()
+                        for _, fn, _ in pdfs_now:
+                            keep.add(fn)
+                            keep.add(clean_download_filename(fn))
+                        self.printed_receipts_set = keep
+
                     if p != last_seeded:
                         # مجلد جديد اتختار: الملفات اللي فيه دلوقتي قديمة، مش بتتطبع تلقائيًا.
                         # الطباعة التلقائية بتشتغل بس على الملفات اللي تظهر بعد كده.
-                        for f in glob.glob(os.path.join(p, "*.pdf")):
-                            fn = os.path.basename(f)
+                        pdfs_s, _ = _scan_dir(p)
+                        for _, fn, _ in pdfs_s:
                             self.printed_receipts_set.add(fn)
                             self.printed_receipts_set.add(clean_download_filename(fn))
                         last_seeded = p
                         continue
                     if not (self.auto_print_enabled or self.auto_sync_enabled): continue
 
-                    pdf_files = glob.glob(os.path.join(p, "*.pdf"))
+                    pdf_entries, cr_bases = _scan_dir(p)
 
                     if self.auto_print_enabled:
-                        for pdf_file in pdf_files:
-                            fname = os.path.basename(pdf_file)
-                            if fname.endswith("_cropped.pdf") or fname.endswith("_Summary.pdf"):
+                        for pdf_file, fname, fsize in pdf_entries:
+                            fl = fname.lower()
+                            if fl.endswith("_cropped.pdf") or fl.endswith("_summary.pdf"):
                                 continue
-                            if not (fname.lower().startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
+                            if not (fl.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
                                 continue
-
                             if fname.lstrip("_") in _VOID_KEYS:
                                 continue
                             clean_fn = clean_download_filename(fname)
                             if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
-                                cr_file = pdf_file + ".crdownload"
-                                if not os.path.exists(cr_file):
-                                    try:
-                                        if os.path.getsize(pdf_file) > 1000:
-                                            self.printed_receipts_set.add(fname)
-                                            self.printed_receipts_set.add(clean_fn)
-                                            self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
-                                    except Exception as _e: _log_silent("_routine#1", _e)
+                                if fl not in cr_bases and fsize > 1000 and _is_pdf_ready(pdf_file):
+                                    self.printed_receipts_set.add(fname)
+                                    self.printed_receipts_set.add(clean_fn)
+                                    self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
 
-                    if (self.auto_sync_enabled and not self.is_processing and not self.is_mini_mode
+                    if (self.auto_sync_enabled and not self.is_processing
                             and time.time() - _last_sync[0] >= 2):
                         _last_sync[0] = time.time()
                         try:
-                            valid_pdfs = [f for f in pdf_files if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
-                            current_sig = f"{len(valid_pdfs)}_{sum(os.path.getsize(f) for f in valid_pdfs if os.path.exists(f))}"
+                            valid = [(fn, sz) for _, fn, sz in pdf_entries
+                                     if not fn.lower().endswith(("_summary.pdf", "_cropped.pdf"))]
+                            current_sig = f"{len(valid)}_{sum(sz for _, sz in valid)}"
                             if self.last_pdf_state_sig == "":
                                 self.last_pdf_state_sig = current_sig
                             elif current_sig != self.last_pdf_state_sig:
@@ -9465,11 +6055,16 @@ class CustomTkinterApp(ctk.CTk):
             while True:
                 pdf = self._print_queue.get()
                 fname = os.path.basename(pdf)
+                self.last_printed_pdf = pdf
                 try: ok = self.send_to_thermal_printer_57x90(pdf)
                 except Exception as e:
                     log_exception(f"print_worker:{fname}", e)
                     ok = False
                 if ok:
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
                     self.printed_count_today += 1
                     self.run_on_main(lambda: self.lbl_mini_counter.configure(
                         text=tr("mini_printed_count", count=self.printed_count_today)))
@@ -9482,8 +6077,8 @@ class CustomTkinterApp(ctk.CTk):
         threading.Thread(target=_print_worker, daemon=True).start()
         threading.Thread(target=_routine, daemon=True).start()
 
-    def send_to_thermal_printer_57x90(self, pdf_file_path):
-        """يطبع إيصال على 57x90. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
+    def send_to_thermal_printer_57x90(self, pdf_file_path, is_test=False):
+        """يطبع إيصال على المقاس المختار. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
         temp_copy = None
         scaled_copy = None
         ok = False
@@ -9495,21 +6090,23 @@ class CustomTkinterApp(ctk.CTk):
 
                 target = pdf_file_path
                 clean_name = os.path.basename(pdf_file_path).lstrip("_")
-                if clean_name.lower().startswith("quote_receipt_"):
+                is_manual_pdf = bool(MANUAL_NAME_RE.match(clean_name))
+                if not is_test and clean_name.lower().startswith("quote_receipt_"):
                     temp_copy = make_print_copy(pdf_file_path)
                     if temp_copy:
                         target = temp_copy
 
-                if not MANUAL_NAME_RE.match(clean_name):      # الإيصال اليدوي بيطبع بعرض اللفة كامل
+                if not is_test and not is_manual_pdf:
                     scaled_copy = scale_pdf_to_print_width(target)
                 if scaled_copy:
                     target = scaled_copy
 
+                use_noscale = bool(is_test or is_manual_pdf or scaled_copy)
                 if os.path.exists(sumatra_path):
                     cmd = [
                         sumatra_path,
                         "-print-to-default",
-                        "-print-settings", print_settings_arg(),
+                        "-print-settings", print_settings_arg(scaled=use_noscale),
                         "-silent",
                         target
                     ]
@@ -9550,14 +6147,14 @@ class CustomTkinterApp(ctk.CTk):
 
             t = THEMES[self.current_theme_name]
             folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
-            # المشرف بيفتح السجل من زر 🛠️ المشرف؛ لو الزر ده مش موجود عنده نسيب الزر هنا كبديل
-            _has_hub = getattr(self, "btn_pos_tools", None) is not None
+            # المشرف بيفتح السجل من زر 📚 سجل الأرشيف في الشريط الرئيسي؛ لو الزر ده مش موجود عنده نسيب الزر هنا كبديل
+            _has_hub = getattr(self, "btn_arch_full", None) is not None
             _show_hist = not (getattr(self, "is_supervisor", False) and _has_hub)
             win = ctk.CTkToplevel(self)
+            _set_win_alpha(win, 0.0)
             self._user_archive_win = win
             win.title(f"{tr('clean_downloads')} - A2R {APP_VERSION}")
             win.resizable(False, False)
-            center_window_relative(win, self, 450, 385 if _show_hist else 330)
             win.configure(fg_color=t["bg"])
 
             ctk.CTkLabel(win, text=T2("📦 أرشفة الجهاز", "📦 Device Archive"),
@@ -9566,7 +6163,7 @@ class CustomTkinterApp(ctk.CTk):
                                       "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
-            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=10, border_width=1, border_color=t["border"])
+            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=12, border_width=1, border_color=t["border"])
             card.pack(fill="x", padx=16, pady=(0, 6))
             ctk.CTkLabel(card, text=T2("المجلد:", "Folder:"), font=(FONT_FAMILY, 10, "bold"),
                          text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 0))
@@ -9673,27 +6270,24 @@ class CustomTkinterApp(ctk.CTk):
                 threading.Thread(target=work, daemon=True).start()
 
             btn_go = ctk.CTkButton(win, text="", font=FONT_BTN_MAIN, height=38, text_color="#FFFFFF",
-                                   fg_color="#0F766E", hover_color="#115E59", command=_start)
+                                   fg_color=t["primary"], hover_color=t["primary_hover"], command=_start)
             btn_go.pack(fill="x", padx=16, pady=(4, 6))
 
             if _show_hist:
                 btn_hist = ctk.CTkButton(win, text=T2("📚 سجل الأرشيف", "📚 Archive History"), font=FONT_BTN_MAIN, height=38,
-                                         text_color="#FFFFFF", fg_color="#7C3AED", hover_color="#6D28D9",
+                                         text_color="#FFFFFF", fg_color=t["secondary"], hover_color=t["secondary_hover"],
                                          command=self.open_archive_history)
                 btn_hist.pack(fill="x", padx=16, pady=(0, 6))
 
             ctk.CTkLabel(win, text=(T2("المشرف: كل الأيام بتفاصيلها • المستخدم: آخر 7 أيام للقراءة فقط",
                                        "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
-                                    T2("🗂️ سجل الأرشيف متاح من زر 🛠️ المشرف", "🗂️ Archive history is available from the 🛠️ Supervisor button")),
+                                    T2("📚 سجل الأرشيف متاح من زر سجل الأرشيف في الشريط السفلي",
+                                       "📚 Archive history is available from the Archive History button below")),
                          font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
+            fit_and_center(win, self, 430, min_height=280)
         except Exception as e: log_exception("open_archive_dialog", e)
-
-    def open_archive_directory(self):
-        p = self.get_clean_path()
-        archive_root = ensure_archive_root(p)
-        if os.path.exists(archive_root): os.startfile(archive_root)
 
     def _generate_day_summary_pdf(self, day_folder_path, date_str, records_list):
         if not REPORTLAB_AVAILABLE or not records_list: return
@@ -9777,39 +6371,6 @@ class CustomTkinterApp(ctk.CTk):
         except Exception as e:
             log_exception("generate_day_summary_pdf", e)
 
-    def _process_archive_worker(self, archive_all, win, p_bar, p_lbl, s_lbl, folder_path, auto=False):
-        def prog(i, n, fname):
-            pct = int((i / n) * 100) if n else 100
-            self.run_on_main(lambda p=pct, f=fname: [
-                p_bar.set(p / 100.0), p_lbl.configure(text=f"{p}%"), s_lbl.configure(text=f"Processing: {f}")])
-
-        moved_count = 0
-        try:
-            def stage(i, n, name):
-                self.run_on_main(lambda i=i, n=n, nm=name: [
-                    p_bar.set(i / max(1, n)), p_lbl.configure(text=f"{int(i / max(1, n) * 100)}%"),
-                    s_lbl.configure(text=T2(f"جاري تحديث ملخص وإكسيل يوم {nm}  ({i}/{n})", f"Updating summary & Excel for day {nm}  ({i}/{n})"))])
-            moved_count = self._run_archive_sweep(folder_path, prog, stage) or 0
-            if auto: self._mark_archive_done_today()
-            self._start_archive_maintenance(folder_path)
-        except Exception as e:
-            log_exception("archive_worker", e)
-
-        def _complete():
-            if auto:
-                p_bar.set(1.0)
-                p_lbl.configure(text="100%")
-                s_lbl.configure(text=f"✓ Archive complete — {moved_count} file(s) archived.")
-                try: win.after(1500, win.destroy)
-                except Exception as _e: _log_silent("_complete#1", _e)
-                return
-            try: win.destroy()
-            except Exception as _e: _log_silent("_complete#2", _e)
-            play_sound_matched()
-            messagebox.showinfo(tr("done"), f"Successfully archived {moved_count} files.\nSummary PDFs updated for all affected days.")
-
-        self.run_on_main(_complete)
-
     def start_thread(self):
         L = LANGUAGES[self.current_lang]
         if not self.processing_lock.acquire(blocking=False): return
@@ -9883,6 +6444,7 @@ class CustomTkinterApp(ctk.CTk):
                 self.lbl_current_file.configure(text=f"Done · {last_f}")
                 self.lbl_cnt.configure(text=f"{info['total_count']:,}")
                 self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+                self._render_status_bar(info['total_count'], info['total_sum'])
                 self.check_pos()
                 play_sound_matched()
 
@@ -9918,6 +6480,7 @@ class CustomTkinterApp(ctk.CTk):
         self.system_total_sum = info["total_sum"]
         self.lbl_cnt.configure(text=f"{info['total_count']:,}")
         self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+        self._render_status_bar(info['total_count'], info['total_sum'])
         self.check_pos()
         try:
             rp = self.last_generated_file
@@ -10063,26 +6626,25 @@ class CustomTkinterApp(ctk.CTk):
 
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
         self._arch_win, self._arch_win_admin = win, is_admin
         win.title(T2("📚 سجل الأرشيف", "📚 Archive History"))
         win.resizable(True, True)
-        set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H, show=False)
         remember_window_geometry(win, "archive_history")
-        try: win.transient("")   # center_window_relative بتخليها transient = ويندوز بيشيل أزرار التصغير/التكبير وبتختفي من شريط المهام
+        try: win.transient(self)
         except Exception as _e: _log_silent("open_archive_history#transient", _e)
-        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
+        _sc = _win_scale(win)
+        win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("open_archive_history#1", _e)
 
         ALL = T2("الكل", "All")
         st = {"stats": [], "debounce": None, "iso": None, "recs": [], "recs_iso": None,
               "load_id": 0, "cache": {}, "sel_job": None}
 
         # ---------- شريط الحالة والأدوات ----------
-        bar = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        bar = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         bar.pack(fill="x", padx=14, pady=(12, 6))
         status_lbl = ctk.CTkLabel(bar, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"])
         status_lbl.pack(side="left", padx=12, pady=8)
@@ -10226,8 +6788,8 @@ class CustomTkinterApp(ctk.CTk):
                 try: dlg.destroy()
                 except Exception as _e: _log_silent("open_rearchive#destroy", _e)
                 run_rearchive(days, ask=(mode != "all"))
-            ctk.CTkButton(dlg, text=T2("▶ ابدأ", "▶ Start"), font=FONT_BTN_MAIN, height=34, fg_color="#B45309",
-                          hover_color="#92400E", text_color="#FFFFFF", command=go).pack(fill="x", padx=16, pady=(14, 0))
+            ctk.CTkButton(dlg, text=T2("▶ ابدأ", "▶ Start"), font=FONT_BTN_MAIN, height=34, fg_color=t["primary"],
+                          hover_color=t["primary_hover"], text_color="#FFFFFF", command=go).pack(fill="x", padx=16, pady=(14, 0))
 
         # ---------- تكبير / ملء الشاشة / تصغير ----------
         fs = {"on": False}
@@ -10238,11 +6800,6 @@ class CustomTkinterApp(ctk.CTk):
         def exit_fullscreen(event=None):
             if fs["on"]: toggle_fullscreen()
             else: close_toplevel_gracefully(win)      # Esc تاني (أو أول مرة لو مش fullscreen) = يقفل السجل
-        def minimize_win():
-            try:
-                if fs["on"]: toggle_fullscreen()
-                win.iconify()
-            except Exception as _e: _log_silent("minimize_win#1", _e)
         win.bind("<F11>", toggle_fullscreen)
         win.bind("<Escape>", exit_fullscreen)
 
@@ -10261,6 +6818,11 @@ class CustomTkinterApp(ctk.CTk):
             more_menu.add_separator()
             more_menu.add_command(label=T2("📂 فتح فولدر الأرشيف", "📂 Open archive folder"), command=open_archive_root)
             more_menu.add_command(label=T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open backup"), command=open_backup_folder)
+            def open_chrome_ext_folder():
+                if not is_admin: return
+                p_ext = ensure_chrome_extension_extracted()
+                if p_ext and os.path.isdir(p_ext): os.startfile(p_ext)
+            more_menu.add_command(label=T2("🧩 مجلد إضافة كروم", "🧩 Chrome extension folder"), command=open_chrome_ext_folder)
             more_menu.add_separator()
             more_menu.add_command(label=T2("⛶ ملء الشاشة (F11)", "⛶ Fullscreen (F11)"), command=toggle_fullscreen)
             def show_more():
@@ -10268,41 +6830,30 @@ class CustomTkinterApp(ctk.CTk):
                 finally: more_menu.grab_release()
 
             btn_more = ctk.CTkButton(bar, text=T2("⚙️ المزيد ▾", "⚙️ More ▾"), font=FONT_BTN_SUB, width=110, height=30,
-                                     fg_color="#475569", hover_color="#334155", text_color="#FFFFFF", command=show_more)
+                                     fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF", command=show_more)
             btn_more.pack(side="right", padx=4, pady=6)
             ctk.CTkButton(bar, text=T2("🗖 تكبير", "🗖 Zoom"), font=FONT_BTN_SUB, width=90, height=30,
-                          fg_color="#64748B", hover_color="#475569", text_color="#FFFFFF",
+                          fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
                           command=toggle_zoom).pack(side="right", padx=4, pady=6)
             ctk.CTkButton(bar, text=T2("🔄 تحديث + نسخ", "🔄 Refresh + Backup"), font=FONT_BTN_SUB, width=150, height=30,
                           fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
                           command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
         else:
             ctk.CTkButton(bar, text=T2("🗖 تكبير", "🗖 Zoom"), font=FONT_BTN_SUB, width=90, height=30,
-                          fg_color="#64748B", hover_color="#475569", text_color="#FFFFFF",
+                          fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
                           command=toggle_zoom).pack(side="right", padx=4, pady=6)
             rb["btn"] = ctk.CTkButton(bar, text=T2("♻️ إعادة أرشفة الكل", "♻️ Re-archive all"), font=FONT_BTN_SUB, width=160,
-                                      height=30, fg_color="#B45309", hover_color="#92400E", text_color="#FFFFFF",
+                                      height=30, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
                                       command=lambda: run_rearchive(None, ask=False, silent=True))
             rb["btn"].pack(side="right", padx=4, pady=6)
             ctk.CTkLabel(bar, text=T2(f"📅 عرض آخر {USER_DAYS} أيام", f"📅 Last {USER_DAYS} days"),
                          font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(side="left", padx=8)
 
         # ---------- ستايل الجداول ----------
-        style = ttk.Style()
-        try: style.theme_use("clam")
-        except Exception as _e: _log_silent("open_archive_history#2", _e)
-        style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
-                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=28)
-        style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
-                        font=(FONT_FAMILY, 11, "bold"), relief="flat")
-        def _fixed(option):
-            try: return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
-            except Exception: return []
-        style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
-                  foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+        apply_tree_style(t, 28)
 
         def make_tree(parent, columns, headers, widths):
-            fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            fr = ctk.CTkFrame(parent, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             fr.pack(fill="both", expand=True, padx=2, pady=(4, 2))
             tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
             for c in columns:
@@ -10312,11 +6863,16 @@ class CustomTkinterApp(ctk.CTk):
                 tree.tag_configure(kind, background=bg, foreground=fg)
             vsb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview)
             vsb.pack(side="right", fill="y", padx=2, pady=2)
-            tree.configure(yscrollcommand=vsb.set)
+            hsb = ttk.Scrollbar(fr, orient="horizontal", command=tree.xview)
+            hsb.pack(side="bottom", fill="x", padx=2, pady=2)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
             tree.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
             return tree
 
-        tv = ctk.CTkTabview(win, fg_color=t["bg"])
+        tv = ctk.CTkTabview(win, fg_color=t["bg"], segmented_button_fg_color=t["card"],
+                            segmented_button_selected_color=t["primary"], segmented_button_selected_hover_color=t["primary_hover"],
+                            segmented_button_unselected_color=t["card"], segmented_button_unselected_hover_color=t["border"],
+                            text_color="#FFFFFF")
         tv.pack(fill="both", expand=True, padx=14, pady=(0, 12))
         TAB_DAYS = T2("📅 الأيام والمعاملات", "📅 Days & Transactions")
         TAB_SEARCH = T2("🔎 بحث عام في الأرشيف", "🔎 Global Search")
@@ -10344,13 +6900,14 @@ class CustomTkinterApp(ctk.CTk):
         cb_month = ctk.CTkComboBox(f1, values=[ALL], width=110, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"],
                                    command=lambda v: apply_days())
         cb_month.set(ALL)
+        style_combo(cb_month, t)
         cb_month.pack(side="left", padx=2)
 
         def clear_filters():
             day_q.delete(0, "end")
             cb_month.set(ALL)
             apply_days()
-        ctk.CTkButton(f1, text="✖", width=34, height=28, font=FONT_BTN_SUB, fg_color="#64748B", hover_color="#475569",
+        ctk.CTkButton(f1, text="✖", width=34, height=28, font=FONT_BTN_SUB, fg_color=t["secondary"], hover_color=t["secondary_hover"],
                       text_color="#FFFFFF", command=clear_filters).pack(side="left", padx=4)
 
         day_cols = ("date", "ops", "total")
@@ -10387,7 +6944,7 @@ class CustomTkinterApp(ctk.CTk):
             day_tree.delete(*day_tree.get_children())
             for s in items:
                 y, m, d = s["day"].split("-")
-                tag = "dup" if s["dup"] else ("missing" if s["missing"] else "")
+                tag = "dup" if s["dup"] else ("missing" if s["missing"] else ("odd" if len(day_tree.get_children()) % 2 else ""))
                 day_tree.insert("", "end", iid=s["day"], tags=(tag,) if tag else (),
                                 values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}"))
             if keep and day_tree.exists(keep):
@@ -10420,7 +6977,7 @@ class CustomTkinterApp(ctk.CTk):
         for e in (day_q,): e.bind("<KeyRelease>", apply_days)
 
         # ---------- اليمين: بطاقة اليوم المختار ----------
-        hdr = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+        hdr = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
         hdr.pack(fill="x", pady=(2, 0))
         day_title = ctk.CTkLabel(hdr, text=T2("👈 اختار يوم من القائمة لعرض معاملاته", "👈 Pick a day from the list"),
                                  font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"])
@@ -10430,11 +6987,14 @@ class CustomTkinterApp(ctk.CTk):
         cards.pack(fill="x", pady=(6, 2))
         card_lbls = {}
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
-            lb = ctk.CTkLabel(f, text="-", font=(FONT_FAMILY, 18, "bold"), text_color=color)
-            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
+            inner = ctk.CTkFrame(f, fg_color="transparent")
+            inner.pack(side="left", fill="both", expand=True, pady=4)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 15, "bold"), text_color=color)
+            lb.pack(anchor="w")
             card_lbls[key] = lb
         mk_card("total", T2("إجمالي اليوم (الصافي)", "Day total (net)"), t["success"])
         mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
@@ -10517,18 +7077,19 @@ class CustomTkinterApp(ctk.CTk):
 
         btn_row = ctk.CTkFrame(right, fg_color="transparent")
         btn_row.pack(fill="x", pady=(4, 2))
-        def _b(text, color, hover, cmd, w=140):
-            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover,
+        def _b(text, kind, cmd, w=140):
+            _fg, _hv = theme_btn_colors(t, kind)
+            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
                           text_color="#FFFFFF", width=w, height=32, command=cmd).pack(side="left", padx=(0, 6), pady=2)
-        if is_admin: _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "#059669", "#047857", d_excel, 150)
-        _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "#0F766E", "#115E59", d_summary, 160)
+        if is_admin: _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", d_excel, 125)
+        _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "primary", d_summary, 135)
         if is_admin:
-            _b(T2("📂 فولدر اليوم", "📂 Day folder"), "#4338CA", "#3730A3", d_folder, 140)
-            _b(T2("♻️ إعادة أرشفة اليوم", "♻️ Re-archive day"), "#DC2626", "#B91C1C",
-               lambda: run_rearchive([st["iso"]] if st["iso"] else []), 170)
+            _b(T2("📂 فولدر اليوم", "📂 Day folder"), "quiet", d_folder, 115)
+            _b(T2("♻️ إعادة أرشفة اليوم", "♻️ Re-archive day"), "danger",
+               lambda: run_rearchive([st["iso"]] if st["iso"] else []), 145)
 
         # ---------- بحث وفلتر معاملات اليوم ----------
-        search_row = ctk.CTkFrame(right, corner_radius=10, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row = ctk.CTkFrame(right, corner_radius=12, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
         search_row.pack(fill="x", pady=(4, 4))
         tx_q = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
                             text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -10544,12 +7105,13 @@ class CustomTkinterApp(ctk.CTk):
                                     fg_color=t["input"], border_color=t["border"], state="readonly",
                                     command=lambda v: refresh_tx())
         cb_status.set(ALL_ST)
+        style_combo(cb_status, t)
         cb_status.pack(side="left", padx=(0, 6), pady=6)
         tx_count = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
         tx_count.pack(side="right", padx=14)
 
         # ---------- جدول معاملات اليوم ----------
-        tree_frame = ctk.CTkFrame(right, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, pady=(0, 2))
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
         headers = {
@@ -10624,8 +7186,8 @@ class CustomTkinterApp(ctk.CTk):
                 row_menu.tk_popup(ev.x_root, ev.y_root)
         tx_tree.bind("<Button-3>", _tx_pop)
 
-        ctk.CTkLabel(right, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
-                                    "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+        ctk.CTkLabel(right, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   🟪 ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                    "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   🟪 Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=8, pady=(0, 2))
 
         def refresh_tx(*_):
@@ -10641,7 +7203,7 @@ class CustomTkinterApp(ctk.CTk):
                     if q not in full_s: continue
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], f"{r['amount']:.2f}", r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
                 tx_tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
             tx_count.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
@@ -10729,52 +7291,128 @@ class CustomTkinterApp(ctk.CTk):
                 day_menu.tk_popup(ev.x_root, ev.y_root)
         day_tree.bind("<Button-3>", _dpop)
 
-        # ================= تبويب البحث العام =================
-        f2 = ctk.CTkFrame(tab_search, fg_color="transparent")
-        f2.pack(fill="x", pady=(2, 2))
-        s_entry = ctk.CTkEntry(f2, placeholder_text=T2("اسم المؤمن له / رقم اللوحة / المبلغ...", "Insured name / plate / amount..."),
-                               width=380, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
-        s_entry.pack(side="left", padx=(0, 8))
-        attach_context_menu(s_entry)
-        inc_void = ctk.CTkCheckBox(f2, text=T2("إظهار الملغي", "Include void"), font=FONT_SECTION_LBL, text_color=t["text"])
-        inc_void.select()
-        inc_void.pack(side="left", padx=6)
-        s_count = ctk.CTkLabel(f2, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
-        s_count.pack(side="right", padx=8)
+        # ================= تبويب البحث العام المتقدم (FTS5 + فلاتر) =================
+        f2_card = ctk.CTkFrame(tab_search, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        f2_card.pack(fill="x", pady=(2, 4))
 
-        s_cols = ("date", "unit", "plate", "insured", "amount", "time", "status", "file")
+        f2 = ctk.CTkFrame(f2_card, fg_color="transparent")
+        f2.pack(fill="x", padx=10, pady=(8, 4))
+        s_entry = ctk.CTkEntry(
+            f2, placeholder_text=T2("اسم / لوحة / شاسيه / موتور / مبلغ أو نطاق (500-1000)...",
+                                    "Name / plate / chassis / motor / amount or range (500-1000)..."),
+            width=400, height=32, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"]
+        )
+        s_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        attach_context_menu(s_entry)
+
+        ALL_S_ST = T2("كل الحالات", "All statuses")
+        s_status_map = {
+            ALL_S_ST: "all",
+            T2("سليم", "OK"): "ok",
+            T2("يدوي", "Manual"): "manual",
+            T2("ملغي", "Void"): "void",
+        }
+        cb_s_status = ctk.CTkComboBox(f2, values=list(s_status_map.keys()), width=125, height=32, font=FONT_ENTRY,
+                                      state="readonly", command=lambda v: do_search())
+        cb_s_status.set(ALL_S_ST)
+        style_combo(cb_s_status, t)
+        cb_s_status.pack(side="left", padx=(0, 6))
+
+        def clear_search_filters():
+            s_entry.delete(0, "end")
+            e_s_from.delete(0, "end")
+            e_s_to.delete(0, "end")
+            cb_s_unit.set(ALL_U)
+            cb_s_status.set(ALL_S_ST)
+            inc_void.select()
+            do_search()
+
+        ctk.CTkButton(f2, text=T2("✖ مسح", "✖ Clear"), width=74, height=32, corner_radius=8, font=FONT_BTN_SUB,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=clear_search_filters).pack(side="left")
+
+        f2b = ctk.CTkFrame(f2_card, fg_color="transparent")
+        f2b.pack(fill="x", padx=10, pady=(0, 8))
+
+        ALL_U = T2("كل الوحدات", "All units")
+        _u_vals = [ALL_U] + archive_units_list(cutoff_iso)
+        cb_s_unit = SafeArabicComboBox(f2b, values=_u_vals, width=185, height=28, font=FONT_ENTRY,
+                                       state="readonly", command=lambda v: do_search())
+        cb_s_unit.set(ALL_U)
+        style_combo(cb_s_unit, t)
+        cb_s_unit.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        e_s_from = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
+                                text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_s_from.pack(side="left", padx=(0, 8))
+        attach_context_menu(e_s_from)
+
+        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        e_s_to = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
+                              text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        e_s_to.pack(side="left", padx=(0, 10))
+        attach_context_menu(e_s_to)
+
+        inc_void = ctk.CTkCheckBox(f2b, text=T2("إظهار الملغي", "Include void"), font=FONT_SECTION_LBL, text_color=t["text"])
+        inc_void.select()
+        inc_void.pack(side="left", padx=(0, 8))
+
+        s_count = ctk.CTkLabel(f2b, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        s_count.pack(side="right", padx=4)
+
+        s_cols = ("date", "unit", "plate", "insured", "amount", "chassis", "time", "status", "file")
         s_hdr = {"date": T2("يوم الأرشيف", "Archive day"), "unit": T2("الوحدة", "Unit"), "plate": T2("اللوحة", "Plate"),
-                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"), "time": T2("الوقت", "Time"),
+                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"),
+                 "chassis": T2("الشاسيه", "Chassis"), "time": T2("الوقت", "Time"),
                  "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
         s_tree = make_tree(tab_search, s_cols, s_hdr,
-                           {"date": 105, "unit": 140, "plate": 100, "insured": 180, "amount": 90, "time": 120, "status": 80, "file": 170})
+                           {"date": 98, "unit": 135, "plate": 100, "insured": 175, "amount": 88,
+                            "chassis": 130, "time": 118, "status": 76, "file": 165})
         s_paths = {}
         s_days = {}
 
         def do_search(*_):
             q = s_entry.get().strip()
+            d_from = parse_flex_date(e_s_from.get())
+            d_to = parse_flex_date(e_s_to.get())
+            min_d = d_from.isoformat() if d_from else ""
+            if cutoff_iso and (not min_d or min_d < cutoff_iso):
+                min_d = cutoff_iso
+            max_d = d_to.isoformat() if d_to else ""
+            u_sel = cb_s_unit.get()
+            u_filt = "" if (not u_sel or u_sel == ALL_U) else u_sel
+            st_filt = s_status_map.get(cb_s_status.get(), "all")
+
             s_tree.delete(*s_tree.get_children())
             s_paths.clear()
             s_days.clear()
-            if not q:
+            has_user_filter = bool(d_from or d_to or u_filt or st_filt != "all")
+            if not q and not has_user_filter:
                 s_count.configure(text="")
                 return
-            try: rows = archive_search(q, include_void=bool(inc_void.get()), min_day=cutoff_iso)
+            try:
+                rows = archive_search(
+                    q, include_void=bool(inc_void.get()), min_day=min_d, max_day=max_d,
+                    unit_filter=u_filt, status_filter=st_filt
+                )
             except Exception as e:
                 log_exception("archive_search", e)
                 rows = []
             tot = 0.0
-            for i, (path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void) in enumerate(rows):
+            for i, row in enumerate(rows):
+                path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = row[:10]
+                ch = row[10] if len(row) > 10 else "-"
                 y, m, d = day.split("-")
                 if is_void: status, tag = T2("ملغي", "Void"), "void"
                 elif is_manual: status, tag = T2("يدوي", "Manual"), "manual"
-                else: status, tag = T2("سليم", "OK"), ""
+                else: status, tag = T2("سليم", "OK"), ("odd" if i % 2 else "")
                 if not is_void: tot += amount
                 iid = str(i)
                 s_paths[iid] = path
                 s_days[iid] = day
                 s_tree.insert("", "end", iid=iid, tags=(tag,) if tag else (),
-                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", rtime, status, fname))
+                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", ch, rtime, status, fname))
             s_count.configure(text=T2(f"النتائج: {len(rows):,}  |  الإجمالي (بدون الملغي): {tot:,.2f}",
                                       f"Results: {len(rows):,}  |  Total (excl. void): {tot:,.2f}"))
 
@@ -10782,9 +7420,13 @@ class CustomTkinterApp(ctk.CTk):
             if st["debounce"]:
                 try: win.after_cancel(st["debounce"])
                 except Exception as _e: _log_silent("_debounced#1", _e)
-            st["debounce"] = win.after(300, do_search)
+            st["debounce"] = win.after(220, do_search)
         s_entry.bind("<KeyRelease>", _debounced)
         s_entry.bind("<Return>", do_search)
+        e_s_from.bind("<KeyRelease>", _debounced)
+        e_s_from.bind("<Return>", do_search)
+        e_s_to.bind("<KeyRelease>", _debounced)
+        e_s_to.bind("<Return>", do_search)
         inc_void.configure(command=do_search)
 
         def open_result(event=None, folder_only=False):
@@ -10812,419 +7454,10 @@ class CustomTkinterApp(ctk.CTk):
                 smenu.tk_popup(ev.x_root, ev.y_root)
         s_tree.bind("<Button-3>", _spop)
 
-        # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين حدّث في الخلفية
+        # تشغيل: اعرض اللي في الفهرس فورًا، وبعدين ارفع النافذة للأمام وحدّث في الخلفية
         load_days()                       # اعرض الفهرس الموجود فورًا
+        bring_window_to_front(win, focus_widget=day_q, delay=10)
         run_maintenance(light=True)       # فهرسة بس؛ النسخ الاحتياطي والإكسيلات بزرار "تحديث + نسخ" أو في الخلفية
-        win.after(150, lambda: day_q.focus_set())
-
-    # ================= أدوات POS للمشرف: التقفيل + إيصالات الدفع (بباسورد منفصل) =================
-    def _pos_gate(self):
-        if not getattr(self, "is_supervisor", False):
-            messagebox.showwarning(T2("غير مسموح", "Not allowed"), T2("هذه الأداة للمشرف فقط.", "Supervisor only."))
-            return False
-        if pos_is_unlocked(): return True
-        t = THEMES[self.current_theme_name]
-        dlg = ctk.CTkToplevel(self)
-        dlg.title(T2("🔐 باسورد الأداة", "🔐 Tool password"))
-        dlg.resizable(False, False)
-        set_window_icon_safe(dlg)
-        center_window_relative(dlg, self, 360, 200)
-        dlg.configure(fg_color=t["bg"])
-        ok = {"v": False}
-        ctk.CTkLabel(dlg, text=T2("أدخل الباسورد الخاص بهذه الأداة", "Enter this tool's password"),
-                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(18, 8))
-        ent = ctk.CTkEntry(dlg, show="●", width=260, font=FONT_ENTRY, text_color=t["text"],
-                           fg_color=t["input"], border_color=t["border"])
-        ent.pack(pady=4)
-        msg = ctk.CTkLabel(dlg, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#EF4444")
-        msg.pack(pady=2)
-
-        def submit(event=None):
-            good, m = pos_check_password(ent.get())
-            if good:
-                ok["v"] = True; dlg.destroy()
-            else:
-                msg.configure(text=m); ent.delete(0, "end")
-        ent.bind("<Return>", submit)
-        ctk.CTkButton(dlg, text=T2("دخول", "Unlock"), width=120, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=submit).pack(pady=8)
-        try: dlg.lift(); dlg.grab_set(); ent.focus_set()
-        except Exception as _e: _log_silent("_pos_gate#1", _e)
-        self.wait_window(dlg)
-        return ok["v"]
-
-    def _pos_need_ocr(self):
-        if pos_ocr_init(): return True
-        messagebox.showerror(T2("محرك OCR غير متاح", "OCR engine missing"),
-                             T2("مفيش محرك قراءة صور شغّال.\n\nالسبب الفعلي:\n", "No working OCR engine.\n\nActual reason:\n") + (_OCR.get("err") or "-") +
-                             T2("\n\nالحل: pip install rapidocr onnxruntime pypdfium2\n(لو بتشغّل exe لازم يتبني من جديد بالمكتبات دي)",
-                                "\n\nFix: pip install rapidocr onnxruntime pypdfium2\n(for an exe, rebuild it with these packages)"))
-        return False
-
-    def _pos_picker_bar(self, parent, t, st, exts, filetypes, on_change):
-        fr = ctk.CTkFrame(parent, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        fr.pack(fill="x", padx=12, pady=(10, 4))
-        r1 = ctk.CTkFrame(fr, fg_color="transparent"); r1.pack(fill="x", padx=8, pady=(8, 2))
-        r2 = ctk.CTkFrame(fr, fg_color="transparent"); r2.pack(fill="x", padx=8, pady=(2, 8))
-        lbl_src = ctk.CTkLabel(r1, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], anchor="w")
-        lbl_out = ctk.CTkLabel(r2, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"], anchor="w")
-
-        def refresh():
-            files = pos_collect_files(st["sources"], exts)
-            lbl_src.configure(text=T2(f"المصدر: {len(st['sources'])} اختيار → {len(files)} ملف", f"Source: {len(st['sources'])} picks → {len(files)} files"))
-            lbl_out.configure(text=T2("الإخراج: ", "Output: ") + (st["out"] or T2("(لم يتم الاختيار)", "(not chosen)")))
-            on_change()
-
-        def add_folder():
-            d = filedialog.askdirectory(title=T2("اختر فولدر الصور / الـ PDF", "Choose folder"), parent=parent.winfo_toplevel())
-            if d: st["sources"].append(d); refresh()
-        def add_files():
-            fs = filedialog.askopenfilenames(title=T2("اختر ملفات", "Choose files"), filetypes=filetypes, parent=parent.winfo_toplevel())
-            if fs: st["sources"].extend(fs); refresh()
-        def clear_src():
-            st["sources"].clear(); refresh()
-        def pick_out():
-            d = filedialog.askdirectory(title=T2("اختر مكان الإخراج", "Choose output folder"), parent=parent.winfo_toplevel())
-            if d: st["out"] = d; refresh()
-
-        for txt, cmd, col in ((T2("📁 اختيار فولدر", "📁 Add folder"), add_folder, t["primary"]),
-                              (T2("🖼️ اختيار ملفات", "🖼️ Add files"), add_files, t["primary"]),
-                              (T2("مسح", "Clear"), clear_src, "#64748B")):
-            ctk.CTkButton(r1, text=txt, width=130, height=30, font=FONT_BTN_SUB, fg_color=col, hover_color=t["primary_hover"],
-                          text_color="#FFFFFF", command=cmd).pack(side="left", padx=3)
-        lbl_src.pack(side="left", padx=10)
-        ctk.CTkButton(r2, text=T2("📂 مكان الإخراج", "📂 Output folder"), width=130, height=30, font=FONT_BTN_SUB,
-                      fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=pick_out).pack(side="left", padx=3)
-        lbl_out.pack(side="left", padx=10)
-        return refresh
-
-    # ---------------------------------------- التقفيل ----------------------------------------
-    def open_pos_closing(self):
-        if not self._pos_gate() or not self._pos_need_ocr(): return
-        t = THEMES[self.current_theme_name]
-        win = ctk.CTkToplevel(self)
-        win.title(T2("🧾 تقفيل POS", "🧾 POS Closing"))
-        set_window_icon_safe(win)
-        center_window_relative(win, self, 1100, 720)
-        remember_window_geometry(win, "pos_closing")
-        win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("open_pos_closing#1", _e)
-        st = {"sources": [], "out": "", "items": [], "warnings": [], "excluded": [], "stop": False, "busy": False}
-        FT = [("Images / PDF", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf")]
-
-        status = ctk.CTkLabel(win, text=T2("اختر مكان الصور أو الـ PDF ومكان الإخراج، ثم اضغط بدء.", "Pick sources and output, then press Start."),
-                              font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w")
-        bar = ctk.CTkProgressBar(win, height=10); bar.set(0)
-
-        def update_buttons():
-            ready = bool(st["sources"]) and bool(st["out"]) and not st["busy"]
-            btn_run.configure(state="normal" if ready else "disabled")
-        refresh = self._pos_picker_bar(win, t, st, POS_IMG_EXT + (".pdf",), FT, lambda: update_buttons())
-
-        ctrl = ctk.CTkFrame(win, fg_color="transparent"); ctrl.pack(fill="x", padx=12, pady=2)
-        cb_rot = ctk.CTkCheckBox(ctrl, text=T2("تدوير الصور المقلوبة تلقائيًا", "Auto-rotate"), font=FONT_SECTION_LBL, text_color=t["text"])
-        cb_rot.select(); cb_rot.pack(side="left", padx=6)
-        btn_run = ctk.CTkButton(ctrl, text=T2("▶ بدء القراءة", "▶ Start"), width=140, height=32, font=FONT_BTN_SUB,
-                                fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", state="disabled")
-        btn_run.pack(side="left", padx=6)
-        refresh()
-        btn_stop = ctk.CTkButton(ctrl, text=T2("⏹ إيقاف", "⏹ Stop"), width=90, height=32, font=FONT_BTN_SUB,
-                                 fg_color="#DC2626", hover_color="#B91C1C", text_color="#FFFFFF",
-                                 command=lambda: st.__setitem__("stop", True))
-        btn_stop.pack(side="left", padx=2)
-        status.pack(fill="x", padx=14, pady=(4, 0)); bar.pack(fill="x", padx=14, pady=(2, 4))
-
-        cols = ("order", "unit", "tid", "amount", "date", "status", "file")
-        hdr = {"order": T2("رقم", "No."), "unit": T2("الوحدة", "Unit"), "tid": "TID", "amount": T2("المبلغ", "Amount"),
-               "date": T2("التاريخ", "Date"), "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
-        tree = pos_make_tree(win, t, cols, hdr, {"order": 60, "unit": 150, "tid": 110, "amount": 110, "date": 80, "status": 130, "file": 280})
-        warn_box = ctk.CTkTextbox(win, height=110, font=(FONT_FAMILY, 10), fg_color=t["input"], text_color=t["text"])
-        warn_box.pack(fill="x", padx=12, pady=(2, 4))
-        sumlbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 12, "bold"), text_color=t["accent"], anchor="w")
-        sumlbl.pack(fill="x", padx=14)
-
-        def status_of(it):
-            if it["skip"]: return T2("مكرر (مستبعد)", "Duplicate"), "void"
-            if not it.get("include", True): return T2("مستبعد", "Excluded"), "void"
-            if it["tid"] is None or it["amount"] <= 0 or not it["ok"] or it["alt"] is not None:
-                return T2("⚠ راجع", "⚠ Review"), "missing"
-            return "✓", ""
-
-        def fill_tree():
-            tree.delete(*tree.get_children())
-            tot = 0.0
-            for i, it in enumerate(st["items"]):
-                s, tag = status_of(it)
-                if not it["skip"] and it.get("include", True) and it["amount"] > 0: tot += it["amount"]
-                sfx = f"_{it['suffix']}" if it["suffix"] else ""
-                tree.insert("", "end", iid=str(i), tags=(tag,) if tag else (),
-                            values=(f"{it['order']}{sfx}" if it["order"] else "-", it["unit"] or "-", it["tid"] or "-",
-                                    f"{it['amount']:,.2f}", it["date"] or "-", s, it["label"]))
-            sumlbl.configure(text=T2(f"عدد الإيصالات: {len(st['items'])}   |   الإجمالي: {tot:,.2f} جنيه", f"Receipts: {len(st['items'])}  |  Total: {tot:,.2f} EGP"))
-            warn_box.configure(state="normal"); warn_box.delete("1.0", "end")
-            lines = [f"• {w}" for w in st["warnings"]]
-            if st["excluded"]:
-                lines.append(T2(f"• اتجاهلت {len(st['excluded'])} إيصال دفع (مش باتش/إقفال): ", f"• Ignored {len(st['excluded'])} payment receipts: ") + "، ".join(st["excluded"][:8]))
-            warn_box.insert("1.0", "\n".join(lines) or T2("مفيش تحذيرات.", "No warnings.")); warn_box.configure(state="disabled")
-
-        def run():
-            files = pos_collect_files(st["sources"], POS_IMG_EXT + (".pdf",))
-            if not files:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش صور أو PDF في المصدر المختار.", "No images/PDF in source."), parent=win); return
-            st["stop"], st["busy"] = False, True; update_buttons()
-            def prog(i, n, label):
-                self.after(0, lambda: (bar.set(i / max(1, n)), status.configure(text=T2(f"قراءة {i + 1} من {n}: {label}", f"Reading {i + 1}/{n}: {label}"))))
-            def work():
-                try:
-                    items, w, ex = pos_closing_scan(files, bool(cb_rot.get()), prog, lambda: st["stop"])
-                    pos_closing_number(items, w)
-                    def fin():
-                        st["items"], st["warnings"], st["excluded"], st["busy"] = items, w, ex, False
-                        bar.set(1); update_buttons(); fill_tree()
-                        status.configure(text=T2(f"تمت القراءة: {len(items)} إيصال. راجع الجدول ثم اضغط إنشاء الملفات.", f"Done: {len(items)} receipts. Review, then Build."))
-                        if not items: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لم يتم العثور على إيصالات إقفال.", "No batch-close receipts found."), parent=win)
-                    self.after(0, fin)
-                except Exception as e:
-                    log_exception("pos_closing_run", e)
-                    def bad():
-                        st["busy"] = False; update_buttons()
-                        messagebox.showerror("Error", str(e), parent=win)
-                    self.after(0, bad)
-            threading.Thread(target=work, daemon=True).start()
-        btn_run.configure(command=run)
-
-        tid_choices = [T2("(بدون ماكينة)", "(none)")] + [f"{POS_TERMINALS[POS_NUM_TO_TID[n]][0]} - {POS_TERMINALS[POS_NUM_TO_TID[n]][2]} - {POS_NUM_TO_TID[n]}" for n in range(1, 20)]
-
-        def edit_selected(event=None):
-            sel = tree.selection()
-            if not sel: return
-            it = st["items"][int(sel[0])]
-            d = ctk.CTkToplevel(win); d.title(T2("تعديل الإيصال", "Edit receipt")); set_window_icon_safe(d)
-            center_window_relative(d, win, 420, 330); d.configure(fg_color=t["bg"])
-            ctk.CTkLabel(d, text=it["label"], font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(14, 4))
-            ctk.CTkLabel(d, text=T2("الماكينة", "Terminal"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=20)
-            cb = ctk.CTkComboBox(d, values=tid_choices, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"]); cb.pack(padx=20)
-            cb.set(next((c for c in tid_choices if it["tid"] and c.endswith(it["tid"])), tid_choices[0]))
-            ctk.CTkLabel(d, text=T2("المبلغ", "Amount"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=20, pady=(8, 0))
-            e_amt = ctk.CTkEntry(d, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"], text_color=t["text"]); e_amt.pack(padx=20)
-            e_amt.insert(0, f"{it['amount']:.2f}")
-            inc = ctk.CTkCheckBox(d, text=T2("ضمّه في التقفيل", "Include in closing"), font=FONT_SECTION_LBL, text_color=t["text"]); inc.pack(anchor="w", padx=20, pady=8)
-            if it.get("include", True) and not it["skip"]: inc.select()
-            def save():
-                try: amt = _r2(float(e_amt.get().replace(",", "").strip()))
-                except ValueError:
-                    messagebox.showerror(T2("خطأ", "Error"), T2("المبلغ غير صحيح.", "Invalid amount."), parent=win); return
-                v = cb.get()
-                if v != tid_choices[0]: pos_apply_tid(it, v.split(" - ")[-1].strip())
-                it["amount"], it["how"], it["ok"], it["alt"] = amt, "manual", True, None
-                it["include"] = bool(inc.get()); it["skip"] = False
-                d.destroy(); fill_tree()
-            def open_img():
-                try: os.startfile(it["path"])
-                except Exception as e: messagebox.showerror("Error", str(e), parent=win)
-            r = ctk.CTkFrame(d, fg_color="transparent"); r.pack(pady=10)
-            ctk.CTkButton(r, text=T2("💾 حفظ", "💾 Save"), width=110, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(side="left", padx=4)
-            ctk.CTkButton(r, text=T2("🖼️ فتح الصورة", "🖼️ Open image"), width=120, fg_color="#4338CA", hover_color="#3730A3", text_color="#FFFFFF", command=open_img).pack(side="left", padx=4)
-            try: d.lift(); d.grab_set()
-            except Exception as _e: _log_silent("edit_selected#1", _e)
-        tree.bind("<Double-1>", edit_selected)
-
-        def build():
-            if not st["items"]:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اعمل قراءة الأول.", "Run a scan first."), parent=win); return
-            if not st["out"]:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder."), parent=win); return
-            tpl = _pos_find_template()
-            if not tpl:
-                tpl = filedialog.askopenfilename(title=T2("اختر قالب الإكسيل (الاسكندريه 00.xlsx)", "Choose Excel template"), filetypes=[("Excel", "*.xlsx")], parent=win) or None
-            btn_build.configure(state="disabled"); status.configure(text=T2("جاري إنشاء الملفات...", "Building files..."))
-            def work():
-                try: res = pos_closing_build(st["items"], st["out"], tpl)
-                except Exception as e:
-                    log_exception("pos_closing_build", e); res = {"error": str(e)}
-                def fin():
-                    btn_build.configure(state="normal")
-                    if "error" in res:
-                        messagebox.showerror("Error", res["error"], parent=win); return
-                    msg = T2(f"تم إنشاء:\n• {len(res['pdfs'])} ملف PDF\n• {'إكسيل' if res['xlsx'] else 'بدون إكسيل'}\n• صور مرقّمة\n\nالتاريخ: {res['report_date']}", f"Created {len(res['pdfs'])} PDF, {'Excel' if res['xlsx'] else 'no Excel'}.")
-                    if res["notes"]: msg += "\n\n" + "\n".join(res["notes"])
-                    status.configure(text=T2("تم الإنشاء ✓", "Built ✓"))
-                    messagebox.showinfo(T2("تم", "Done"), msg, parent=win)
-                    try: os.startfile(st["out"])
-                    except Exception as _e: _log_silent("fin#1", _e)
-                self.after(0, fin)
-            threading.Thread(target=work, daemon=True).start()
-
-        foot = ctk.CTkFrame(win, fg_color="transparent"); foot.pack(fill="x", padx=12, pady=(4, 12))
-        ctk.CTkButton(foot, text=T2("✏️ تعديل المحدد", "✏️ Edit selected"), width=140, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=edit_selected).pack(side="left", padx=4)
-        btn_build = ctk.CTkButton(foot, text=T2("📦 إنشاء الملفات (PDF + إكسيل)", "📦 Build files (PDF + Excel)"), width=230, height=32, font=FONT_BTN_SUB,
-                                  fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", command=build)
-        btn_build.pack(side="left", padx=4)
-
-    # ---------------------------------------- إيصالات الدفع ----------------------------------------
-    def open_pos_payments(self):
-        if not self._pos_gate() or not self._pos_need_ocr(): return
-        t = THEMES[self.current_theme_name]
-        win = ctk.CTkToplevel(self)
-        win.title(T2("💳 إيصالات الدفع", "💳 Payment Receipts"))
-        set_window_icon_safe(win)
-        center_window_relative(win, self, 1150, 720)
-        remember_window_geometry(win, "pos_payments")
-        win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("open_pos_payments#1", _e)
-        st = {"sources": [], "out": "", "res": [], "stop": False, "busy": False}
-        FT = [("PDF", "*.pdf")]
-        status = ctk.CTkLabel(win, text=T2("اختر ملفات الـ PDF (أو فولدر) ومكان الإخراج، ثم اضغط بدء.", "Pick PDFs and output, then Start."),
-                              font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w")
-        bar = ctk.CTkProgressBar(win, height=10); bar.set(0)
-
-        def update_buttons():
-            btn_run.configure(state="normal" if (st["sources"] and not st["busy"]) else "disabled")
-        refresh = self._pos_picker_bar(win, t, st, (".pdf",), FT, lambda: update_buttons())
-        ctrl = ctk.CTkFrame(win, fg_color="transparent"); ctrl.pack(fill="x", padx=12, pady=2)
-        btn_run = ctk.CTkButton(ctrl, text=T2("▶ بدء الفحص والعد", "▶ Start scan"), width=150, height=32, font=FONT_BTN_SUB,
-                                fg_color="#16A34A", hover_color="#15803D", text_color="#FFFFFF", state="disabled")
-        btn_run.pack(side="left", padx=6)
-        refresh()
-        ctk.CTkButton(ctrl, text=T2("⏹ إيقاف", "⏹ Stop"), width=90, height=32, font=FONT_BTN_SUB, fg_color="#DC2626",
-                      hover_color="#B91C1C", text_color="#FFFFFF", command=lambda: st.__setitem__("stop", True)).pack(side="left", padx=2)
-        status.pack(fill="x", padx=14, pady=(4, 0)); bar.pack(fill="x", padx=14, pady=(2, 4))
-
-        cols = ("order", "unit", "tid", "date", "count", "new", "notes", "file")
-        hdr = {"order": T2("رقم", "No."), "unit": T2("الوحدة", "Unit"), "tid": "TID", "date": T2("التاريخ", "Date"),
-               "count": T2("العدد", "Count"), "new": T2("الاسم الجديد", "New name"), "notes": T2("ملاحظات", "Notes"), "file": T2("الملف الأصلي", "Original")}
-        tree = pos_make_tree(win, t, cols, hdr, {"order": 50, "unit": 120, "tid": 100, "date": 70, "count": 60, "new": 210, "notes": 260, "file": 200})
-        sumlbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], anchor="w", justify="left", wraplength=1080)
-        sumlbl.pack(fill="x", padx=14, pady=2)
-
-        def fill_tree():
-            tree.delete(*tree.get_children())
-            total = 0
-            for i, r in enumerate(st["res"]):
-                total += max(r["count"], 0)
-                tree.insert("", "end", iid=str(i), tags=(() if r["ok"] else ("missing",)),
-                            values=(r["order"] or "-", r["unit"] or "-", r["tid"] or "-", f"{r['day']}.{r['month']}" if r["day"] else "-",
-                                    r["count"], r["new"] or "-", " | ".join(r["notes"]) or "✓", r["name"]))
-            got = {r["order"] for r in st["res"] if r["order"]}
-            miss = [f"{n} {POS_TERMINALS[POS_NUM_TO_TID[n]][2]}" for n in range(1, 20) if n not in got]
-            sumlbl.configure(text=T2(f"الملفات: {len(st['res'])}   |   إجمالي الإيصالات: {total}" + (f"\nماكينات ناقصة: {'، '.join(miss)}" if st["res"] and miss else ""),
-                                     f"Files: {len(st['res'])} | Receipts: {total}" + (f"\nMissing machines: {', '.join(miss)}" if st["res"] and miss else "")))
-
-        def make_result(f, r):
-            res = {"src": f, "name": os.path.basename(f), "tid": r["tid"], "order": None, "unit": None, "day": r["day"], "month": r["month"],
-                   "count": r["count"], "notes": [], "ok": True, "new": None}
-            if r["tid"]:
-                res["order"], res["unit"] = POS_TERMINALS[r["tid"]][0], POS_TERMINALS[r["tid"]][2]
-            else:
-                res["ok"] = False; res["notes"].append(T2("مش قادر أعرف الماكينة", "Machine unknown"))
-            if not r["day"]:
-                res["ok"] = False; res["notes"].append(T2("مش قادر أعرف التاريخ", "Date unknown"))
-            if r["tid"] and r["day"]: res["new"] = pos_machine_new_name(r["tid"], r["day"], r["month"])
-            if r["seq_min"] is not None and r["count"] != r["seq_max"] - r["seq_min"] + 1:
-                res["ok"] = False
-                res["notes"].append(T2(f"العدد {r['count']} بس التسلسل {r['seq_max'] - r['seq_min'] + 1} — راجع", f"Count {r['count']} vs sequence {r['seq_max'] - r['seq_min'] + 1}"))
-            if r["other_day"]: res["ok"] = False; res["notes"].append(T2("فيه إيصال بتاريخ تاني", "Other-day receipt"))
-            if r["partial"]: res["notes"].append(T2(f"{r['partial']} إيصال رقمه مش واضح", f"{r['partial']} unclear"))
-            if r["non_payment"]: res["notes"].append(T2("فيه إقفال/ملخص (مش معدود)", "Contains closing/summary"))
-            return res
-
-        def run():
-            files = pos_collect_files(st["sources"], (".pdf",))
-            if not files:
-                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش ملفات PDF في المصدر.", "No PDFs."), parent=win); return
-            st["stop"], st["busy"], st["res"] = False, True, []; update_buttons(); fill_tree()
-            def work():
-                out = []
-                for i, f in enumerate(files):
-                    if st["stop"]: break
-                    self.after(0, lambda i=i, f=f: (bar.set(i / len(files)), status.configure(text=T2(f"فحص {i + 1} من {len(files)}: {os.path.basename(f)}", f"Scanning {i + 1}/{len(files)}"))))
-                    try:
-                        r = pos_count_pdf(f, lambda m, f=f: self.after(0, lambda: status.configure(text=f"{os.path.basename(f)} — {m}")), lambda: st["stop"])
-                        out.append(make_result(f, r))
-                    except Exception as e:
-                        log_exception(f"pos_payment:{f}", e)
-                        out.append({"src": f, "name": os.path.basename(f), "tid": None, "order": None, "unit": None, "day": None, "month": None,
-                                    "count": 0, "notes": [f"فشل: {e}"], "ok": False, "new": None})
-                    st["res"] = list(out)
-                    self.after(0, fill_tree)
-                used = set()
-                for r in st["res"]:           # أسماء مكررة
-                    if r["new"]:
-                        n, k = r["new"], 2
-                        while n in used: n = f"{r['new']}_{k}"; k += 1
-                        used.add(n); r["new"] = n
-                def fin():
-                    st["busy"] = False; update_buttons(); bar.set(1); fill_tree()
-                    status.configure(text=T2("تم الفحص. راجع الصفوف الصفراء ثم احفظ النسخ.", "Done. Review yellow rows, then save."))
-                self.after(0, fin)
-            threading.Thread(target=work, daemon=True).start()
-        btn_run.configure(command=run)
-
-        tid_choices = [T2("(بدون ماكينة)", "(none)")] + [f"{POS_TERMINALS[POS_NUM_TO_TID[n]][0]} - {POS_TERMINALS[POS_NUM_TO_TID[n]][2]} - {POS_NUM_TO_TID[n]}" for n in range(1, 20)]
-        def edit_selected(event=None):
-            sel = tree.selection()
-            if not sel: return
-            r = st["res"][int(sel[0])]
-            d = ctk.CTkToplevel(win); d.title(T2("تعديل", "Edit")); set_window_icon_safe(d)
-            center_window_relative(d, win, 420, 360); d.configure(fg_color=t["bg"])
-            ctk.CTkLabel(d, text=r["name"], font=FONT_SECTION_LBL, text_color=t["text"]).pack(pady=(14, 4))
-            cb = ctk.CTkComboBox(d, values=tid_choices, width=360, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"]); cb.pack(padx=20, pady=4)
-            cb.set(next((c for c in tid_choices if r["tid"] and c.endswith(r["tid"])), tid_choices[0]))
-            row = ctk.CTkFrame(d, fg_color="transparent"); row.pack(pady=4)
-            ents = {}
-            for key, lab, val in (("day", T2("اليوم", "Day"), r["day"]), ("month", T2("الشهر", "Month"), r["month"]), ("count", T2("العدد", "Count"), r["count"])):
-                ctk.CTkLabel(row, text=lab, font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(8, 2))
-                e = ctk.CTkEntry(row, width=60, font=FONT_ENTRY, fg_color=t["input"], border_color=t["border"], text_color=t["text"]); e.pack(side="left")
-                e.insert(0, "" if val is None else str(val)); ents[key] = e
-            def save():
-                try: cnt = int(ents["count"].get())
-                except ValueError: messagebox.showerror(T2("خطأ", "Error"), T2("العدد غير صحيح.", "Invalid count."), parent=win); return
-                v = cb.get()
-                r["tid"] = None if v == tid_choices[0] else v.split(" - ")[-1].strip()
-                r["day"], r["month"] = ents["day"].get().strip() or None, ents["month"].get().strip() or None
-                r["count"] = cnt
-                if r["tid"]: r["order"], r["unit"] = POS_TERMINALS[r["tid"]][0], POS_TERMINALS[r["tid"]][2]
-                r["new"] = pos_machine_new_name(r["tid"], r["day"], r["month"]) if (r["tid"] and r["day"] and r["month"]) else None
-                r["ok"], r["notes"] = bool(r["new"]), [T2("اتعدّل يدويًا", "Edited manually")]
-                d.destroy(); fill_tree()
-            ctk.CTkButton(d, text=T2("💾 حفظ", "💾 Save"), width=120, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF", command=save).pack(pady=12)
-            try: d.lift(); d.grab_set()
-            except Exception as _e: _log_silent("edit_selected#2", _e)
-        tree.bind("<Double-1>", edit_selected)
-
-        def save_copies():
-            if not st["out"]: messagebox.showinfo(T2("تنبيه", "Notice"), T2("اختر مكان الإخراج.", "Choose output folder."), parent=win); return
-            n = 0
-            os.makedirs(st["out"], exist_ok=True)
-            for r in st["res"]:
-                if not r["new"]: continue
-                try: shutil.copy2(r["src"], os.path.join(st["out"], r["new"] + ".pdf")); n += 1
-                except Exception as e: log_exception("pos_save_copy", e)
-            messagebox.showinfo(T2("تم", "Done"), T2(f"اتحفظ {n} ملف باسمه الجديد (الأصول ماتلمستش).", f"Saved {n} renamed copies (originals untouched)."), parent=win)
-            try: os.startfile(st["out"])
-            except Exception as _e: _log_silent("save_copies#1", _e)
-
-        def export_xlsx():
-            if not st["res"]: return
-            if not OPENPYXL_AVAILABLE: messagebox.showerror("Error", "openpyxl missing", parent=win); return
-            f = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile="ملخص إيصالات الدفع.xlsx", parent=win)
-            if not f: return
-            wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Payments"
-            ws.append(["رقم", "الوحدة", "TID", "التاريخ", "عدد الإيصالات", "الاسم الجديد", "ملاحظات", "الملف الأصلي"])
-            for r in sorted(st["res"], key=lambda x: (x["order"] or 99, x["name"])):
-                ws.append([r["order"], r["unit"], r["tid"], f"{r['day']}.{r['month']}" if r["day"] else "", r["count"], r["new"], " | ".join(r["notes"]), r["name"]])
-            ws.append([]); ws.append(["", "الإجمالي", "", "", sum(max(r["count"], 0) for r in st["res"])])
-            wb.save(f); messagebox.showinfo(T2("تم", "Done"), f, parent=win)
-
-        foot = ctk.CTkFrame(win, fg_color="transparent"); foot.pack(fill="x", padx=12, pady=(4, 12))
-        for txt, cmd, col in ((T2("✏️ تعديل المحدد", "✏️ Edit"), edit_selected, t["primary"]),
-                              (T2("💾 حفظ نسخ بالأسماء الجديدة", "💾 Save renamed copies"), save_copies, "#16A34A"),
-                              (T2("📊 تصدير ملخص إكسيل", "📊 Export Excel"), export_xlsx, "#4338CA")):
-            ctk.CTkButton(foot, text=txt, width=200, height=32, font=FONT_BTN_SUB, fg_color=col, hover_color=t["primary_hover"],
-                          text_color="#FFFFFF", command=cmd).pack(side="left", padx=4)
 
     def open_records_viewer(self):
         if not self.last_detailed_records:
@@ -11234,25 +7467,34 @@ class CustomTkinterApp(ctk.CTk):
 
     def _records_window(self, records, live=True, day_iso=None, day_folder=None):
         """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
+        if live:
+            old_r = getattr(self, "_records_win", None)
+            try:
+                if old_r is not None and old_r.winfo_exists():
+                    old_r.destroy()
+            except Exception as _e: _log_silent("_records_window#old", _e)
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
+        if live:
+            self._records_win = win
         day_txt = ""
         if day_iso:
             yy, mm, dd_ = day_iso.split("-")
             day_txt = f"{dd_}-{mm}-{yy}"
         win.title(tr("records_viewer_title") + (f" — {day_txt}" if day_txt else ""))
         win.resizable(True, True)
-        set_window_icon_safe(win)
         _sw, _sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H)
+        center_window_on_screen(win, LOG_WIN_W, LOG_WIN_H, show=False)
         remember_window_geometry(win, "records_viewer")
-        win.minsize(min(LOG_WIN_MIN_W, _sw - 40), min(LOG_WIN_MIN_H, _sh - 100))
+        try: win.transient(self)
+        except Exception as _e: _log_silent("_records_window#transient", _e)
+        _sc = _win_scale(win)
+        win.minsize(min(LOG_WIN_MIN_W, int((_sw - 48) / _sc)), min(LOG_WIN_MIN_H, int((_sh - 100) / _sc)))
         win.configure(fg_color=t["bg"])
-        try: win.lift(); win.focus_force()
-        except Exception as _e: _log_silent("_records_window#1", _e)
 
         if not live:
-            hdr = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["accent"])
+            hdr = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
             hdr.pack(fill="x", padx=14, pady=(12, 0))
             ctk.CTkLabel(hdr, text=T2(f"📅 أرشيف يوم {day_txt}", f"📅 Archive day {day_txt}"),
                          font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
@@ -11263,11 +7505,14 @@ class CustomTkinterApp(ctk.CTk):
         card_lbls = {}
 
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(f, text=title, font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=12, pady=(8, 0))
-            lb = ctk.CTkLabel(f, text="0", font=(FONT_FAMILY, 18, "bold"), text_color=color)
-            lb.pack(anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
+            inner = ctk.CTkFrame(f, fg_color="transparent")
+            inner.pack(side="left", fill="both", expand=True, pady=4)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 15, "bold"), text_color=color)
+            lb.pack(anchor="w")
             card_lbls[key] = lb
 
         mk_card("total", T2("إجمالي المبلغ (الصافي)", "Net total"), t["success"])
@@ -11277,7 +7522,7 @@ class CustomTkinterApp(ctk.CTk):
         mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
 
         # ---------- البحث والفلاتر ----------
-        search_row = ctk.CTkFrame(win, corner_radius=10, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row = ctk.CTkFrame(win, corner_radius=12, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
         search_row.pack(fill="x", padx=14, pady=(6, 4))
 
         search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=300,
@@ -11301,6 +7546,7 @@ class CustomTkinterApp(ctk.CTk):
                                     fg_color=t["input"], border_color=t["border"], state="readonly",
                                     command=lambda v: refresh())
         cb_status.set(ALL_ST)
+        style_combo(cb_status, t)
         cb_status.pack(side="left", padx=(0, 6), pady=8)
 
         count_lbl = ctk.CTkLabel(search_row, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
@@ -11370,25 +7616,26 @@ class CustomTkinterApp(ctk.CTk):
             if p_ and os.path.exists(p_): os.startfile(p_)
             else: messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
 
-        def _b(text, color, hover, cmd, w=115):
-            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=color, hover_color=hover,
+        def _b(text, kind, cmd, w=115):
+            _fg, _hv = theme_btn_colors(t, kind)
+            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
                           text_color="#FFFFFF", width=w, height=30, command=cmd).pack(side="left", padx=(0, 6), pady=2)
 
-        _b(tr("open_pdf_btn"), t["primary"], t["primary_hover"], open_selected)
-        _b(tr("btn_reprint"), "#D97706", "#B45309", reprint_selected, 105)
-        _b(T2("📂 فتح الفولدر", "📂 Open folder"), "#4338CA", "#3730A3", open_folder, 125)
+        _b(tr("open_pdf_btn"), "primary", open_selected)
+        _b(tr("btn_reprint"), "quiet", reprint_selected, 105)
+        _b(T2("📂 فتح الفولدر", "📂 Open folder"), "quiet", open_folder, 125)
         if live:
-            _b(tr("btn_void_sel"), "#991B1B", "#7F1D1D", cancel_selected, 110)
-            _b(tr("btn_restore_sel"), "#0F766E", "#115E59", restore_selected_void)
+            _b(tr("btn_void_sel"), "danger", cancel_selected, 110)
+            _b(tr("btn_restore_sel"), "quiet", restore_selected_void)
         else:
-            _b(T2("📄 ملخص اليوم", "📄 Day summary"), "#0F766E", "#115E59", open_day_summary, 125)
-            _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "#059669", "#047857", export_day_excel, 125)
+            _b(T2("📄 ملخص اليوم", "📄 Day summary"), "quiet", open_day_summary, 125)
+            _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", export_day_excel, 125)
 
-        ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   ⬛ ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
-                                  "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   ⬛ Void   •   double-click to open receipt"),
+        ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   🟪 ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
+                                  "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   🟪 Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
 
-        tree_frame = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, padx=14, pady=(2, 14))
 
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
@@ -11399,20 +7646,7 @@ class CustomTkinterApp(ctk.CTk):
             "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
         }
 
-        style = ttk.Style()
-        try: style.theme_use("clam")
-        except Exception as _e: _log_silent("_records_window#2", _e)
-        style.configure("A2R.Treeview", background=t["input"], foreground=t["text"],
-                        fieldbackground=t["input"], font=(FONT_FAMILY, 10, "bold"), rowheight=30)
-        style.configure("A2R.Treeview.Heading", background=t["card"], foreground=t["accent"],
-                        font=(FONT_FAMILY, 11, "bold"), relief="flat")
-
-        def _fixed(option):
-            try:
-                return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
-            except Exception: return []
-        style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
-                  foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+        apply_tree_style(t, 30)
 
         tree = ttk.Treeview(tree_frame, columns=columns, show="headings", style="A2R.Treeview")
 
@@ -11484,7 +7718,7 @@ class CustomTkinterApp(ctk.CTk):
 
                 vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
                         r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
-                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong") else ""
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
                 tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
                 shown += 1
                 if id(r) in counted:
@@ -11501,26 +7735,35 @@ class CustomTkinterApp(ctk.CTk):
         search_entry.bind("<KeyRelease>", refresh)
         amt_entry.bind("<KeyRelease>", refresh)
         refresh()
+        bring_window_to_front(win, focus_widget=search_entry, delay=10)
 
     def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
+        old = getattr(self, "_summary_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception as _e: _log_silent("show_custom_summary#old", _e)
+
         t = THEMES[self.current_theme_name]
         modal = ctk.CTkToplevel(self)
+        _set_win_alpha(modal, 0.0)
+        self._summary_win = modal
         modal.title(tr("summary_title"))
         modal.resizable(False, False)
         set_window_icon_safe(modal)
-        center_window_relative(modal, self, 440, 420)
         modal.configure(fg_color=t["bg"])
 
-        hdr = ctk.CTkFrame(modal, corner_radius=0, height=42, fg_color=t["card"])
+        hdr = ctk.CTkFrame(modal, corner_radius=0, height=44, fg_color=t["sub_card"])
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=6)
+        ctk.CTkLabel(hdr, text=f"📊  {tr('summary_title')}", font=(FONT_FAMILY, 13, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
+        ctk.CTkFrame(modal, height=2, corner_radius=0, fg_color=t["primary"]).pack(fill="x")
 
-        card_box = ctk.CTkFrame(modal, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        card_box.pack(fill="both", expand=True, padx=14, pady=10)
+        card_box = ctk.CTkFrame(modal, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card_box.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
         row_u = ctk.CTkFrame(card_box, fg_color="transparent")
-        row_u.pack(fill="x", padx=14, pady=(8, 4))
-        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
+        row_u.pack(fill="x", padx=14, pady=(10, 6))
+        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left")
 
         # قايمة الوحدات = الوحدات اللي في إيصالات اليوم نفسها (الأكتر أولًا)، والاختيار إجباري (قراءة فقط، مفيش كتابة حرة).
         # لو مفيش ولا وحدة اتقرت من الإيصالات (إيصالات يدوية بس مثلًا) بنرجع لقايمة الوحدات الكاملة عشان المستخدم ميتعلقش.
@@ -11540,12 +7783,14 @@ class CustomTkinterApp(ctk.CTk):
             if self.last_summary_info is not None:
                 self.last_summary_info["unit"] = val
 
-        cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=200, height=30, font=FONT_REGULAR_BOLD,
-                                     fg_color=t["input"], border_color=t["border"], text_color=t["text"],
+        cb_unit = SafeArabicComboBox(row_u, values=clean_opts, width=215, height=32, font=FONT_REGULAR_BOLD,
                                      command=_unit_changed, state="readonly")
+        style_combo(cb_unit, t)
         cb_unit.set(_sel_unit)
         cb_unit.pack(side="right")
         _unit_changed(_sel_unit)
+
+        ctk.CTkFrame(card_box, height=1, fg_color=t["border"]).pack(fill="x", padx=14, pady=(2, 6))
 
         void_cnt = self.last_summary_info.get("void_count", 0)
         void_amt = self.last_summary_info.get("void_sum", 0.0)
@@ -11559,27 +7804,40 @@ class CustomTkinterApp(ctk.CTk):
         ]
         if duplicates: details.append((tr("duplicates_lbl"), f"{duplicates}", t["danger"], 12))
         if wrong: details.append((tr("wrong_lbl"), f"{wrong}", t["warning"], 12))
-        details.append((tr("total_amt_lbl"), f"{total_sum:,.2f} {tr('currency')}", t["success"], 16))
 
         for lbl_t, val_t, val_c, val_sz in details:
             row = ctk.CTkFrame(card_box, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=2)
-            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
+            row.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"]).pack(side="left")
             ctk.CTkLabel(row, text=val_t, font=(FONT_FAMILY, val_sz, "bold"), text_color=val_c).pack(side="right")
 
+        tot_box = ctk.CTkFrame(card_box, corner_radius=10, fg_color=t["input"], border_width=1, border_color=t["border"])
+        tot_box.pack(fill="x", padx=14, pady=(10, 12))
+        ctk.CTkFrame(tot_box, width=4, height=28, corner_radius=2, fg_color=t["success"]).pack(side="left", fill="y", padx=(6, 8), pady=6)
+        ctk.CTkLabel(tot_box, text=tr("total_amt_lbl"), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"]).pack(side="left", pady=8)
+        ctk.CTkLabel(tot_box, text=f"{total_sum:,.2f} {tr('currency')}", font=(FONT_FAMILY, 17, "bold"),
+                     text_color=t["success"]).pack(side="right", padx=12, pady=8)
+
         b_bar = ctk.CTkFrame(modal, fg_color="transparent")
-        b_bar.pack(fill="x", padx=14, pady=(0, 10))
+        b_bar.pack(fill="x", padx=14, pady=(0, 12))
 
-        ctk.CTkButton(b_bar, text="Close", width=70, height=32, font=FONT_BTN_SUB, fg_color=t["border"],
-                      hover_color=t["card"], text_color=t["text"], command=modal.destroy).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(b_bar, text=T2("إغلاق", "Close"), width=80, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=modal.destroy).pack(side="right", padx=(6, 0))
 
-        ctk.CTkButton(b_bar, text=tr("export_pdf"), width=90, height=32, font=FONT_BTN_SUB, fg_color=t["primary"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=4)
+        ctk.CTkButton(b_bar, text=tr("export_pdf"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=6)
 
         if self.is_supervisor:
-            ctk.CTkButton(b_bar, text=tr("open_excel"), width=95, height=32, font=FONT_BTN_SUB, fg_color=t["success"],
-                          hover_color=t["primary_hover"], text_color="#FFFFFF",
+            ctk.CTkButton(b_bar, text=tr("open_excel"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
+                          fg_color=t["success_btn"], hover_color=t["success_btn_hover"], text_color="#FFFFFF",
                           command=lambda: [modal.destroy(), self.open_excel()]).pack(side="right")
+
+        modal.update_idletasks()
+        _sc = _win_scale(modal)
+        _rh = max(340, int(modal.winfo_reqheight() / _sc) + 8)
+        center_window_relative(modal, self, 420, _rh)
 
     def reopen_summary_modal(self):
         if not self.last_summary_info:
@@ -11591,32 +7849,44 @@ class CustomTkinterApp(ctk.CTk):
                                  info.get("wrong_count", 0), info.get("missing_count", 0))
 
     def open_manual(self):
+        old = getattr(self, "_manual_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_manual#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
+        self._manual_win = win
         win.title(tr("manual_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 380, 340)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("manual_amt_lbl"), font=FONT_SECTION_LBL, text_color=t["warning"]).pack(anchor="w", padx=18, pady=(12, 2))
-        e_a = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_a.pack(fill="x", padx=18)
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
+        card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
+
+        ctk.CTkLabel(card, text=tr("manual_amt_lbl"), font=FONT_SECTION_LBL, text_color=t["warning"]).pack(anchor="w", padx=14, pady=(12, 2))
+        e_a = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_a.pack(fill="x", padx=14)
         attach_context_menu(e_a)
 
-        ctk.CTkLabel(win, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        e_name = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_name.pack(fill="x", padx=18)
+        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        e_name = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_name.pack(fill="x", padx=14)
         attach_context_menu(e_name)
 
-        ctk.CTkLabel(win, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        e_p = ctk.CTkEntry(win, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=32)
-        e_p.pack(fill="x", padx=18)
+        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        e_p = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
+        e_p.pack(fill="x", padx=14)
         attach_context_menu(e_p)
 
-        ctk.CTkLabel(win, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=18, pady=(6, 2))
-        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, fg_color=t["input"], border_color=t["border"], height=32)
+        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_u, t)
         cb_u.set("")
-        cb_u.pack(fill="x", padx=18)
+        cb_u.pack(fill="x", padx=14, pady=(0, 12))
         attach_context_menu(cb_u)
 
         busy = [False]   # منع الضغط المتكرر (Enter مرتين أو دبل كليك) أثناء الإنشاء والطباعة
@@ -11683,40 +7953,61 @@ class CustomTkinterApp(ctk.CTk):
                     try: btn_gen.configure(state="normal")
                     except Exception as _e: _log_silent("manual_save_btn2", _e)
 
-        e_a.bind("<Return>", save)
-        btn_gen = ctk.CTkButton(win, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN, fg_color=t["success"],
-                                hover_color=t["primary_hover"], text_color="#FFFFFF", height=36, command=save)
-        btn_gen.pack(fill="x", padx=18, pady=16)
-        win.after(100, lambda: e_a.focus_set())
+        for _ent in (e_a, e_name, e_p):
+            _ent.bind("<Return>", save)
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=14, pady=(0, 12))
+        btn_gen = ctk.CTkButton(f_btns, text=tr("manual_generate_btn"), font=FONT_BTN_MAIN,
+                                fg_color=t["success_btn"], hover_color=t["success_btn_hover"],
+                                text_color="#FFFFFF", height=38, corner_radius=10, command=save)
+        btn_gen.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=82, height=38, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=win.destroy).pack(side="right")
+        fit_and_center(win, self, 370, min_height=320, focus_widget=e_a)
 
     def print_slip(self):
+        old = getattr(self, "_slip_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("print_slip#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
+        self._slip_win = win
         win.title(tr("slip_dialog_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 340, 285)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(12, 2))
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["warn_btn"]).pack(fill="x")
+        card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
-        cb_employee = SafeArabicComboBox(win, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=32,
-                                         fg_color=t["input"], border_color=t["border"])
+        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(12, 2))
+        cb_employee = SafeArabicComboBox(card, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_employee, t)
         cb_employee.set("")
-        cb_employee.pack(fill="x", padx=16)
+        cb_employee.pack(fill="x", padx=14)
         attach_context_menu(cb_employee)
 
-        ctk.CTkLabel(win, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(6, 2))
-        cb_u = SafeArabicComboBox(win, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=32, fg_color=t["input"], border_color=t["border"])
+        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
+        style_combo(cb_u, t)
         cb_u.set("")
-        cb_u.pack(fill="x", padx=16)
+        cb_u.pack(fill="x", padx=14)
         attach_context_menu(cb_u)
 
-        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
-        lbl_tid.pack(anchor="w", padx=16, pady=(6, 0))
+        tid_pill = ctk.CTkFrame(card, corner_radius=8, fg_color=t["input"], border_width=1, border_color=t["border"])
+        tid_pill.pack(fill="x", padx=14, pady=(10, 12))
+        lbl_tid = ctk.CTkLabel(tid_pill, text=T2("رقم الماكينة: —", "Terminal ID: —"),
+                               font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
+        lbl_tid.pack(pady=6)
 
         def _update_tid(*_):
             tid = UNIT_TERMINALS.get(cb_u.get().strip(), "")
-            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else T2("رقم الماكينة: —", "Terminal ID: —"))
 
         cb_u._user_command = lambda raw: _update_tid()
         cb_u.bind("<KeyRelease>", _update_tid)
@@ -11726,35 +8017,46 @@ class CustomTkinterApp(ctk.CTk):
             unit_val = cb_u.get().strip()
             tid_val = UNIT_TERMINALS.get(unit_val, "")
             date_val = datetime.date.today().strftime('%d/%m/%Y')
-            
-            pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
-            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
-                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
-                if not os.path.exists(sumatra_path):
-                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
-                
-                if os.path.exists(sumatra_path):
-                    cmd = [
-                        sumatra_path,
-                        "-print-to-default",
-                        "-print-settings", "shrink",     # البون: من غير paper= عشان طول الورقة يتبع الـ PDF الصغير مش 57x90
-                        "-silent",
-                        pdf_path
-                    ]
-                    subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
-                else:
-                    if sys.platform == "win32": os.startfile(pdf_path, "print")
-            else:
-                txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
-                lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
-                with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
-                if sys.platform == "win32": os.startfile(txt_path, "print")
             win.destroy()
 
+            def _print_bg():
+                try:
+                    pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+                    if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
+                        sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                        if not os.path.exists(sumatra_path):
+                            sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                        if os.path.exists(sumatra_path):
+                            cmd = [
+                                sumatra_path,
+                                "-print-to-default",
+                                "-print-settings", "shrink",     # البون: من غير paper= عشان طول الورقة يتبع الـ PDF الصغير مش 57x90
+                                "-silent",
+                                pdf_path
+                            ]
+                            subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
+                        else:
+                            if sys.platform == "win32": os.startfile(pdf_path, "print")
+                    else:
+                        txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
+                        lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
+                        with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+                        if sys.platform == "win32": os.startfile(txt_path, "print")
+                except Exception as e:
+                    log_exception("print_slip_bg", e)
+
+            threading.Thread(target=_print_bg, daemon=True).start()
+
         cb_employee.bind("<Return>", do_p)
-        ctk.CTkButton(win, text=tr("slip_btn_print"), font=FONT_BTN_MAIN, height=34, fg_color=t["warning"],
-                      hover_color=t["primary_hover"], text_color="#FFFFFF", command=do_p).pack(fill="x", padx=16, pady=16)
-        win.after(100, lambda: cb_employee.focus_set())
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkButton(f_btns, text=tr("slip_btn_print"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
+                      fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF",
+                      command=do_p).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=80, height=36, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=win.destroy).pack(side="right")
+        fit_and_center(win, self, 355, min_height=260, focus_widget=cb_employee)
 
     def ask_summary_unit(self, parent=None):
         """نافذة صغيرة: اختيار الوحدة (إجباري) قبل عمل إيصال السمري. بترجّع (اسم الوحدة، رقم الترمنل) أو None لو اتقفلت."""
@@ -11771,14 +8073,14 @@ class CustomTkinterApp(ctk.CTk):
         res = {"v": None}
 
         ctk.CTkLabel(win, text=T2("اختار الوحدة (إجباري):", "Choose the unit (required):"),
-                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(14, 2))
-        cb = SafeArabicComboBox(win, values=UNITS_LIST, font=FONT_REGULAR_BOLD, height=32,
-                                fg_color=t["input"], border_color=t["border"], state="readonly")
+                     font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        cb = SafeArabicComboBox(win, values=UNITS_LIST, font=FONT_REGULAR_BOLD, height=34, state="readonly")
+        style_combo(cb, t)
         cb.set("")
         cb.pack(fill="x", padx=16)
-        lbl_tid = ctk.CTkLabel(win, text="", font=FONT_REGULAR_BOLD, text_color=t["text"])
+        lbl_tid = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"])
         lbl_tid.pack(anchor="w", padx=16, pady=(8, 0))
-        msg = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 10, "bold"), text_color="#EF4444")
+        msg = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["danger"])
         msg.pack(anchor="w", padx=16, pady=(2, 0))
 
         def _update(*_):
@@ -11917,47 +8219,69 @@ class CustomTkinterApp(ctk.CTk):
             messagebox.showerror("Error", str(e))
 
     def open_cash_counter(self):
+        old = getattr(self, "_cash_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_cash_counter#exists", _e)
+
         t = THEMES[self.current_theme_name]
         win = ctk.CTkToplevel(self)
+        _set_win_alpha(win, 0.0)
+        self._cash_win = win
         win.title(tr("cash_win_title"))
         win.resizable(False, False)
-        center_window_relative(win, self, 420, 500)
         win.configure(fg_color=t["bg"])
 
-        ctk.CTkLabel(win, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(pady=(12, 4))
-        f_quick = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
+        ctk.CTkFrame(win, height=3, corner_radius=0, fg_color=t["success_btn"]).pack(fill="x")
+        hdr = ctk.CTkFrame(win, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(10, 4))
+        ctk.CTkLabel(hdr, text=tr("cash_hdr"), font=(FONT_FAMILY, 15, "bold"), text_color=t["accent"]).pack(side="left")
+        if self.system_total_sum > 0:
+            sys_badge = ctk.CTkFrame(hdr, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
+            sys_badge.pack(side="right")
+            ctk.CTkLabel(sys_badge, text=T2(f"السيستم: {self.system_total_sum:,.2f}", f"Sys: {self.system_total_sum:,.2f}"),
+                         font=(FONT_FAMILY, 10, "bold"), text_color=t["success"], padx=8, pady=3).pack()
+
+        f_quick = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
         f_quick.pack(fill="x", padx=16, pady=(4, 8))
 
         r_c = ctk.CTkFrame(f_quick, fg_color="transparent")
-        r_c.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r_c, text=tr("cash_manual_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["warning"]).pack(side="left")
-        e_manual_cash = ctk.CTkEntry(r_c, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        r_c.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(r_c, text=tr("cash_manual_lbl"), width=165, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["warning"]).pack(side="left")
+        e_manual_cash = ctk.CTkEntry(r_c, width=140, height=32, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_manual_cash.pack(side="right")
         attach_context_menu(e_manual_cash)
 
         r_p = ctk.CTkFrame(f_quick, fg_color="transparent")
-        r_p.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r_p, text=tr("cash_pos_lbl"), width=150, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(side="left")
-        e_pos_in = ctk.CTkEntry(r_p, width=130, height=30, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+        r_p.pack(fill="x", padx=12, pady=(4, 8))
+        ctk.CTkLabel(r_p, text=tr("cash_pos_lbl"), width=165, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"]).pack(side="left")
+        e_pos_in = ctk.CTkEntry(r_p, width=140, height=32, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_pos_in.pack(side="right")
         attach_context_menu(e_pos_in)
 
-        frame_box = ctk.CTkFrame(win, corner_radius=10, fg_color=t["card"], border_width=1, border_color=t["border"])
-        frame_box.pack(fill="both", expand=True, padx=16, pady=2)
+        frame_box = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
+        frame_box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         denoms = [200, 100, 50, 20, 10, 5, 1]
         entries = {}
+        sub_lbls = {}
 
-        lbl_tot_cash = ctk.CTkLabel(win, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
-        lbl_combined_total = ctk.CTkLabel(win, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 12, "bold"), text_color=t["text"])
-        lbl_diff_sys = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 11, "bold"))
+        sum_card = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        sum_card.pack(fill="x", padx=16, pady=(0, 8))
+        lbl_tot_cash = ctk.CTkLabel(sum_card, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
+        lbl_combined_total = ctk.CTkLabel(sum_card, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 13, "bold"), text_color=t["text"])
+        lbl_diff_sys = ctk.CTkLabel(sum_card, text="", font=(FONT_FAMILY, 11, "bold"))
         current_calculated = [0.0, 0.0]
 
         def recalc(*_):
             c_sum = 0.0
             for d, ent in entries.items():
                 v = ent.get().strip()
-                if v.isdigit(): c_sum += int(v) * d
+                sub = int(v) * d if v.isdigit() else 0
+                c_sum += sub
+                sub_lbls[d].configure(text=f"= {sub:,}" if sub else "= 0",
+                                      text_color=t["success"] if sub else t["text_muted"])
 
             manual_str = e_manual_cash.get().strip().replace(",", "")
             if manual_str:
@@ -11988,19 +8312,30 @@ class CustomTkinterApp(ctk.CTk):
         e_manual_cash.bind("<KeyRelease>", recalc)
         e_pos_in.bind("<KeyRelease>", recalc)
 
-        for d in denoms:
+        for idx_d, d in enumerate(denoms):
             r = ctk.CTkFrame(frame_box, fg_color="transparent")
-            r.pack(fill="x", padx=12, pady=1)
-            ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=90, anchor="w", font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(side="left")
-            e = ctk.CTkEntry(r, width=85, height=22, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
+            r.pack(fill="x", padx=12, pady=(8 if idx_d == 0 else 2, 8 if idx_d == len(denoms) - 1 else 2))
+            ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=95, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
+            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"])
+            lbl_s.pack(side="right", padx=(6, 0))
+            sub_lbls[d] = lbl_s
+            e = ctk.CTkEntry(r, width=90, height=28, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
             e.pack(side="right")
             e.bind("<KeyRelease>", recalc)
             attach_context_menu(e)
             entries[d] = e
 
-        lbl_tot_cash.pack(pady=(4, 0))
-        lbl_combined_total.pack(pady=(1, 0))
-        lbl_diff_sys.pack(pady=(1, 6))
+        lbl_tot_cash.pack(pady=(8, 1))
+        lbl_combined_total.pack(pady=(1, 1))
+        lbl_diff_sys.pack(pady=(1, 8))
+
+        def clear_cash():
+            e_manual_cash.delete(0, "end")
+            e_pos_in.delete(0, "end")
+            for ent in entries.values():
+                ent.delete(0, "end")
+            recalc()
+            e_manual_cash.focus_set()
 
         def apply_and_close(event=None):
             if current_calculated[1] > 0:
@@ -12009,11 +8344,17 @@ class CustomTkinterApp(ctk.CTk):
                 self.check_pos()
             win.destroy()
 
-        btn_apply = ctk.CTkButton(win, text=tr("cash_apply_btn"), font=FONT_BTN_MAIN,
-                                  fg_color=t["success"], hover_color=t["primary_hover"], height=36, command=apply_and_close)
-        btn_apply.pack(fill="x", padx=20, pady=(0, 12))
+        f_btns = ctk.CTkFrame(win, fg_color="transparent")
+        f_btns.pack(fill="x", padx=16, pady=(0, 12))
+        btn_apply = ctk.CTkButton(f_btns, text=tr("cash_apply_btn"), font=FONT_BTN_MAIN, corner_radius=10,
+                                  fg_color=t["success_btn"], hover_color=t["success_btn_hover"], text_color="#FFFFFF",
+                                  height=38, command=apply_and_close)
+        btn_apply.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(f_btns, text=T2("تصفير", "Reset"), font=FONT_BTN_SUB, width=80, height=38, corner_radius=10,
+                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      command=clear_cash).pack(side="right")
         win.bind("<Return>", apply_and_close)
-        e_manual_cash.focus_set()
+        fit_and_center(win, self, 405, min_height=470, focus_widget=e_manual_cash)
 
 if __name__ == "__main__":
     app = CustomTkinterApp()
