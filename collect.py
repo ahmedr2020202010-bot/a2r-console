@@ -106,7 +106,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v88-lite2"
+APP_VERSION = "v95"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -130,6 +130,4114 @@ def _log_silent(ctx, e):
 
 
 
+# ===== v51: أدوات المشرف (التقفيل + إيصالات الدفع) — مدمجة جوه collect.py =====
+import types as _a2r_types
+
+def _a2r_embed(_name, _src):
+    _mod = _a2r_types.ModuleType(_name)
+    try:
+        _mod.__file__ = os.path.abspath(__file__)
+    except Exception:
+        _mod.__file__ = os.path.abspath(sys.argv[0])
+    sys.modules[_name] = _mod
+    try:
+        exec(compile(_src, "<" + _name + ">", "exec"), _mod.__dict__)
+    except Exception:
+        sys.modules.pop(_name, None)
+        raise
+    return _mod
+
+_A2R_POS_ENGINE_SRC = r'''# -*- coding: utf-8 -*-
+"""
+A2R POS Engine  (v4.50)
+محرك قراءة وتحليل إيصالات ماكينات الدفع (التقفيل + إيصالات الدفع) لنسخة الويندوز.
+- مفيش واتساب نهائياً: كل المصادر بتتحدد من المستخدم (مجلد أو ملفات صور/PDF) في كل مرة.
+- الـ OCR: Tesseract (tesseract.exe) + تحسين صورة (OpenCV لو متاح) + قراءتين على الأقل ومطابقة المجاميع.
+- PDF -> صور: pdftoppm.exe (من نفس حزمة poppler اللي فيها pdftotext.exe) أو pypdfium2 كبديل.
+"""
+import os
+import sys
+import re
+import io
+import json
+import math
+import shutil
+import hashlib
+import zipfile
+import tempfile
+import datetime
+import subprocess
+from collections import Counter
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from PIL import Image, ImageOps
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
+ENGINE_VERSION = "60"
+
+if getattr(sys, "frozen", False):
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = BUNDLE_DIR
+
+IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
+_NOWIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+class OcrUnavailable(Exception):
+    pass
+
+
+# ───────────────────────── جداول الماكينات والوحدات ─────────────────────────
+class TerminalInfo:
+    __slots__ = ("order", "row", "unit")
+
+    def __init__(self, order, row, unit):
+        self.order, self.row, self.unit = order, row, unit
+
+
+TERMINALS = {
+    "50335710": TerminalInfo(1, 2, "أبيس"),
+    "50335993": TerminalInfo(2, 2, "أبيس"),
+    "50335987": TerminalInfo(3, 2, "أبيس"),
+    "50325716": TerminalInfo(4, 3, "برج العرب"),
+    "50335998": TerminalInfo(5, 3, "برج العرب"),
+    "50335994": TerminalInfo(6, 3, "برج العرب"),
+    "50335711": TerminalInfo(7, 3, "برج العرب"),
+    "50382298": TerminalInfo(8, 4, "المنتزه"),
+    "50382315": TerminalInfo(9, 4, "المنتزه"),
+    "50383712": TerminalInfo(10, 4, "المنتزه"),
+    "50382306": TerminalInfo(11, 5, "محرم بك"),
+    "50382316": TerminalInfo(12, 5, "محرم بك"),
+    "50382308": TerminalInfo(13, 6, "العجمي"),
+    "50383706": TerminalInfo(14, 6, "العجمي"),
+    "50382300": TerminalInfo(15, 7, "القباري"),
+    "50383702": TerminalInfo(16, 8, "مصطفى كامل"),
+    "50382312": TerminalInfo(17, 9, "مديرية الأمن"),
+    "50383699": TerminalInfo(18, 10, "ميناء الإسكندرية"),
+    "50383700": TerminalInfo(19, 11, "خدمات مصر"),
+}
+NUM_TO_TID = {t.order: k for k, t in TERMINALS.items()}
+TID_FIX = {
+    "50336994": "50335994", "50336711": "50335711", "50336998": "50335998",
+    "50302316": "50382316", "50382318": "50382315", "50330987": "50335987",
+    "60382308": "50382308",
+}
+MERCHANT_CODE_MAP = {"22": 2, "23": 3, "24": 4, "25": 5, "26": 6,
+                     "27": 7, "28": 8, "29": 9, "30": 10, "31": 11}
+NAME_HINTS = [
+    (["ABYSS", "ABIS"], 2), (["BURJ", "BORG"], 3), (["MONTZAH", "TOSUN"], 4),
+    (["MUHRAM", "MOHARAM"], 5), (["AJAMI", "AGAMI"], 6), (["KABBARY", "KABARY"], 7),
+    (["MUSTAFA", "KAMEL"], 8), (["MODRYT", "MODERYT"], 9),
+    (["ALEXANDRIA PORT", "ESMAT"], 10), (["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
+]
+ROW_NAMES = {2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك", 6: "العجمي",
+             7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن", 10: "ميناء الإسكندرية",
+             11: "خدمات مصر"}
+
+
+def round2(v):
+    return round(float(v) + 1e-9, 2)
+
+
+def terminal_label(tid):
+    t = TERMINALS.get(tid)
+    return f"{t.order} - {t.unit} ({tid})" if t else (tid or "غير محدد")
+
+
+def unit_label(tid, fallback=None):
+    """اسم الوحدة مع رقمها لو الوحدة ليها أكتر من ماكينة (أبيس 1، أبيس 2، برج العرب 3 ...)."""
+    t = TERMINALS.get(tid)
+    if not t:
+        return fallback or "غير محدد"
+    same = sorted([x for x in TERMINALS.values() if x.row == t.row], key=lambda x: x.order)
+    if len(same) > 1:
+        return "%s %d" % (t.unit, [x.order for x in same].index(t.order) + 1)
+    return t.unit
+
+
+# ───────────────────────── أدوات خارجية (Tesseract / pdftoppm) ─────────────────────────
+_TESS = None
+_PPM = None
+
+
+def _candidates(name, subs):
+    out = []
+    for base in (BUNDLE_DIR, BASE_DIR):
+        for s in subs:
+            out.append(os.path.join(base, s, name) if s else os.path.join(base, name))
+    return out
+
+
+def find_tesseract():
+    global _TESS
+    if _TESS and os.path.exists(_TESS):
+        return _TESS
+    exe = "tesseract.exe" if sys.platform == "win32" else "tesseract"
+    cands = _candidates(exe, ["tesseract", "Tesseract-OCR", ""])
+    cands += [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+              r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]
+    for c in cands:
+        if os.path.exists(c):
+            _TESS = c
+            break
+    else:
+        _TESS = shutil.which("tesseract")
+    if _TESS:
+        td = os.path.join(os.path.dirname(_TESS), "tessdata")
+        if os.path.exists(os.path.join(td, "eng.traineddata")):
+            os.environ["TESSDATA_PREFIX"] = td
+    return _TESS
+
+
+def find_pdftoppm():
+    global _PPM
+    if _PPM and os.path.exists(_PPM):
+        return _PPM
+    exe = "pdftoppm.exe" if sys.platform == "win32" else "pdftoppm"
+    for c in _candidates(exe, ["", "poppler", "poppler/bin"]):
+        if os.path.exists(c):
+            _PPM = c
+            return c
+    _PPM = shutil.which("pdftoppm")
+    return _PPM
+
+
+def ocr_ready():
+    """(ok, message)"""
+    if not find_tesseract():
+        return False, ("tesseract.exe مش موجود. حطّ فولدر tesseract (جواه tesseract.exe و tessdata\\eng.traineddata) "
+                       "جنب البرنامج أو ضمّه في الـ exe.")
+    return True, ""
+
+
+def _tess_env():
+    env = os.environ.copy()
+    env["OMP_THREAD_LIMIT"] = "1"
+    return env
+
+
+# ───────────────────────── OCR ─────────────────────────
+class OcrLine:
+    __slots__ = ("text", "left", "right", "top", "bottom")
+
+    def __init__(self, text, left, right, top, bottom):
+        self.text, self.left, self.right, self.top, self.bottom = text, left, right, top, bottom
+
+    @property
+    def cy(self):
+        return (self.top + self.bottom) / 2.0
+
+    @property
+    def h(self):
+        return self.bottom - self.top
+
+
+def tess_lines(img, psm=6):
+    """يقرا صورة PIL (رمادي) ويرجّع سطور مع أماكنها (من TSV)."""
+    exe = find_tesseract()
+    if not exe:
+        raise OcrUnavailable("Tesseract not found")
+    fd, tmp = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        img.save(tmp)
+        r = subprocess.run([exe, tmp, "stdout", "--psm", str(psm), "-l", "eng", "tsv"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+                           creationflags=_NOWIN, env=_tess_env())
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    out = r.stdout.decode("utf-8", "ignore")
+    groups = {}
+    order = []
+    for ln in out.splitlines()[1:]:
+        p = ln.split("\t", 11)
+        if len(p) < 12 or p[0] != "5":
+            continue
+        t = p[11].strip()
+        if not t:
+            continue
+        key = (p[2], p[3], p[4])
+        l, tp, w, h = int(p[6]), int(p[7]), int(p[8]), int(p[9])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((t, l, tp, l + w, tp + h))
+    lines = []
+    for k in order:
+        ws = groups[k]
+        lines.append(OcrLine(" ".join(w[0] for w in ws), min(w[1] for w in ws), max(w[3] for w in ws),
+                             min(w[2] for w in ws), max(w[4] for w in ws)))
+    return lines
+
+
+def rows_text(lines):
+    ls = sorted(lines, key=lambda l: l.cy)
+    rows = []
+    for l in ls:
+        if rows:
+            last = rows[-1]
+            cy = sum(e.cy for e in last) / len(last)
+            h = sum(e.h for e in last) / len(last)
+            if abs(l.cy - cy) < h * 0.6:
+                last.append(l)
+                continue
+        rows.append([l])
+    return "\n".join("  ".join(e.text for e in sorted(r, key=lambda e: e.left)) for r in rows) + "\n"
+
+
+def reading_text(lines):
+    return "\n".join(l.text for l in lines)
+
+
+# ───────────────────────── تحسين الصور ─────────────────────────
+def load_image(path):
+    im = Image.open(path)
+    im.load()
+    return ImageOps.exif_transpose(im).convert("RGB")
+
+
+def prep_raw(pil):
+    g = pil.convert("L")
+    w = g.width
+    if w < 1400:
+        s = 1400.0 / w
+        g = g.resize((int(g.width * s), int(g.height * s)), Image.LANCZOS)
+    elif w > 2600:
+        s = 2200.0 / w
+        g = g.resize((int(g.width * s), int(g.height * s)), Image.LANCZOS)
+    return g
+
+
+def _paper_crop_cv(bgr):
+    h, w = bgr.shape[:2]
+    s = 1000.0 / max(h, w)
+    sm = cv2.resize(bgr, None, fx=s, fy=s) if s < 1 else bgr.copy()
+    s = sm.shape[0] / float(h)
+    g = cv2.GaussianBlur(cv2.cvtColor(sm, cv2.COLOR_BGR2GRAY), (7, 7), 0)
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    cs, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return bgr
+    c = max(cs, key=cv2.contourArea)
+    if cv2.contourArea(c) < 0.08 * sm.shape[0] * sm.shape[1]:
+        return bgr
+    box = (cv2.boxPoints(cv2.minAreaRect(c)) / s).tolist()
+    box.sort(key=lambda p: p[1])
+    top = sorted(box[:2])
+    bot = sorted(box[2:])
+    tl, tr, bl, br = top[0], top[1], bot[0], bot[1]
+    W = int(max(np.hypot(*(np.array(tr) - tl)), np.hypot(*(np.array(br) - bl))))
+    H = int(max(np.hypot(*(np.array(bl) - tl)), np.hypot(*(np.array(br) - tr))))
+    if W < 100 or H < 100:
+        return bgr
+    # الباتش ورقة طويلة: لو القص طلع عريض نسيب الصورة زي ما هي (يعني فيه أكتر من إيصال)
+    if H < W * 1.6:
+        return bgr
+    M = cv2.getPerspectiveTransform(np.float32([tl, tr, bl, br]),
+                                    np.float32([[0, 0], [W, 0], [0, H], [W, H]]))
+    return cv2.warpPerspective(bgr, M, (W, H))
+
+
+def scan_receipt(pil):
+    """(نسخة ملونة مقصوصة للـ PDF، نسخة رمادية محسّنة للـ OCR)."""
+    if cv2 is None or np is None:
+        g = ImageOps.autocontrast(pil.convert("L"), cutoff=1)
+        return pil, prep_raw(Image.merge("RGB", (g, g, g)))
+    bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    try:
+        crop = _paper_crop_cv(bgr)
+    except Exception:
+        crop = bgr
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(g, None, fx=0.25, fy=0.25)
+    k = max(3, (min(small.shape) // 8) | 1)
+    bg = cv2.resize(cv2.medianBlur(small, min(k, 31) | 1), (g.shape[1], g.shape[0]))
+    norm = cv2.divide(g, bg, scale=255)
+    if norm.shape[1] < 1600:
+        norm = cv2.resize(norm, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
+    elif norm.shape[1] > 2800:
+        norm = cv2.resize(norm, None, fx=2200.0 / norm.shape[1], fy=2200.0 / norm.shape[1])
+    color = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+    return color, Image.fromarray(norm)
+
+
+# ───────────────────────── PDF -> صور ─────────────────────────
+def pdf_page_count(pdf):
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(pdf).pages)
+    except Exception:
+        pass
+    try:
+        data = open(pdf, "rb").read()
+        n = len(re.findall(rb"/Type\s*/Page(?![A-Za-z])", data))
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def pdf_to_images(pdf, outdir, dpi=200, first=None, last=None, max_side=3400):
+    """يرجّع لستة مسارات PNG لصفحات الـ PDF. pdftoppm أولاً، وpypdfium2 بديل."""
+    os.makedirs(outdir, exist_ok=True)
+    base = hashlib.md5((os.path.abspath(pdf) + str(os.path.getsize(pdf))).encode()).hexdigest()[:10]
+    prefix = os.path.join(outdir, base)
+    ppm = find_pdftoppm()
+    files = []
+    if ppm:
+        cmd = [ppm, "-r", str(dpi), "-png"]
+        if first:
+            cmd += ["-f", str(first)]
+        if last:
+            cmd += ["-l", str(last)]
+        cmd += [pdf, prefix]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NOWIN, timeout=600)
+        files = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
+                        if f.startswith(base + "-") and f.endswith(".png")])
+    if not files:
+        try:
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(pdf)
+            n = len(doc)
+            a = (first or 1) - 1
+            b = min(n, last or n)
+            for i in range(a, b):
+                im = doc[i].render(scale=dpi / 72.0).to_pil().convert("RGB")
+                p = f"{prefix}-{i + 1:03d}.png"
+                im.save(p)
+                files.append(p)
+        except Exception:
+            raise OcrUnavailable("مش قادر أحوّل PDF لصور: حطّ pdftoppm.exe جنب pdftotext.exe (أو pip install pypdfium2)")
+    # تصغير الصفحات العملاقة (PDF ممسوح كبير) عشان الذاكرة
+    for p in files:
+        try:
+            with Image.open(p) as im:
+                s = max(im.size)
+                if s > max_side:
+                    r = max_side / float(s)
+                    im2 = im.convert("RGB").resize((int(im.width * r), int(im.height * r)), Image.LANCZOS)
+                    im2.save(p)
+        except Exception:
+            pass
+    return files
+
+
+# ───────────────────────── المبالغ والباتش (منقول من نسخة الموبايل) ─────────────────────────
+_MARKERS = [re.compile(p, re.I) for p in (
+    r"TERMINAL", r"GRAND|TOTALS?", r"NATIONAL\s*BANK|\bNBE\b", r"BATCH", r"MERCHANT",
+    r"SUCCESSF|CLOSED", r"\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ", r"THANK\s*YOU", r"NET\s*AMOUNT", r"\bSALE\b")]
+
+
+def receipt_score(text):
+    return sum(1 for r in _MARKERS if r.search(text))
+
+
+_AMOUNT_RE = re.compile(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)")
+_BRAND_RE = re.compile(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", re.I)
+_TAIL_RE = re.compile(r"THANK\s*YOU|Hotline|App\s*Version", re.I)
+
+
+def amounts_in(raw):
+    text = re.sub(r"\bB(\d{2,3}[.,]\d{2})\b", lambda m: "8" + m.group(1), raw)
+    out = []
+    for m in _AMOUNT_RE.finditer(text):
+        try:
+            v = float(m.group(1).replace(",", "") + "." + m.group(2))
+        except ValueError:
+            continue
+        if 0.5 <= v <= 5000000:
+            out.append(round2(v))
+    return out
+
+
+def most_common(vals):
+    if not vals:
+        return None
+    c = Counter(vals)
+    best = None
+    for v in vals:
+        if best is None or c[v] > c[best]:
+            best = v
+    return best, c[best]
+
+
+class Parsed:
+    def __init__(self, grand, bsum, bvals):
+        self.grand, self.bsum, self.bvals = grand, bsum, bvals
+
+
+def parse_receipt(txt):
+    t = _TAIL_RE.split(txt)[0]
+    gm = re.search(r"GRAND|TOTALS", t, re.I)
+    pre = t[:gm.start()] if gm else t
+    post = t[gm.start():] if gm else ""
+    bms = list(_BRAND_RE.finditer(pre))
+    sections = []
+    if bms:
+        for i, m in enumerate(bms):
+            end = bms[i + 1].start() if i + 1 < len(bms) else len(pre)
+            sections.append(pre[m.end():end])
+    else:
+        sm = re.search(r"SUCCESSFULL?Y|CLOSED", pre, re.I)
+        if sm:
+            pre = pre[sm.end():]
+        sections.append(pre)
+    bvals = []
+    for sec in sections:
+        mc = most_common(amounts_in(sec))
+        if mc:
+            bvals.append(mc[0])
+    grand = amounts_in(post)
+    bsum = round2(sum(bvals)) if bvals else None
+    return Parsed(grand, bsum, bvals)
+
+
+def decide(results):
+    for r in results:
+        b = r.bsum
+        if b and b > 0 and any(abs(g - b) < 0.005 for g in r.grand):
+            return b, True
+    for r in results:
+        b = r.bsum
+        if b and b > 0 and len(r.bvals) >= 2:
+            for g in r.grand:
+                sa, sb = "%.2f" % g, "%.2f" % b
+                if len(sa) == len(sb) and sum(1 for x, y in zip(sa, sb) if x != y) == 1:
+                    return b, True
+    for r in results:
+        c = most_common(r.grand)
+        if c and c[1] >= 2 and r.bsum is None:
+            return c[0], False
+    pool = []
+    for r in results:
+        pool.extend(r.grand)
+        if r.bsum and r.bsum > 0:
+            pool.append(r.bsum)
+    c = most_common(pool)
+    if c:
+        return c[0], False
+    return 0.0, False
+
+
+def classify_receipt(text):
+    up = text.upper()
+    pay = [r"R{1,2}N\W{0,3}\d{9,}", r"\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}", r"APPROVED", r"AUTH\W{0,3}\d{6}",
+           r"I\s*AUTHORI[SZ]E", r"MERCHANT\s*COPY", r"CLESS|CHIP\s*ONLINE"]
+    batch = [r"BATCH\s*CLOS", r"SUCCESSF", r"GRAND\s*TOTAL", r"TOTAL\s*NET", r"THANK\s*YOU", r"NBE\s*NETWORK", r"HOTLINE"]
+    p = sum(1 for r in pay if re.search(r, up))
+    b = sum(1 for r in batch if re.search(r, up))
+    if p >= 2 and b < 2:
+        return "payment"
+    if b >= 1:
+        return "batch"
+    return "other"
+
+
+def sum_closure(texts):
+    cnt = {}
+    for t in texts:
+        tt = _TAIL_RE.split(t)[0]
+        local = Counter(amounts_in(tt))
+        for k, v in local.items():
+            if v > cnt.get(k, 0):
+                cnt[k] = v
+    c = sorted(k for k, v in cnt.items() if v >= 2)
+    if len(c) < 3 or len(c) > 14:
+        return None
+    for gi in range(len(c) - 1, 1, -1):
+        g = c[gi]
+        others = c[:gi]
+        n = len(others)
+        for mask in range(1, 1 << n):
+            bits, s = 0, 0.0
+            for i in range(n):
+                if mask & (1 << i):
+                    bits += 1
+                    s += others[i]
+            if bits >= 2 and abs(s - g) < 0.005:
+                return g
+    return None
+
+
+class PieceResult:
+    def __init__(self, texts, val, ok):
+        self.texts, self.val, self.ok = texts, val, ok
+
+
+def ocr_piece(lines):
+    texts = [rows_text(lines), reading_text(lines)]
+    sc = sum_closure(texts)
+    if sc is not None:
+        return PieceResult(texts, sc, True)
+    v, ok = decide([parse_receipt(t) for t in texts])
+    return PieceResult(texts, v, ok)
+
+
+def batch_no(texts):
+    reg = re.compile(r"BATCH\s*NO\D{0,6}(\d{4,7})", re.I)
+    allv = [m.group(1) for t in texts for m in reg.finditer(t)]
+    mc = most_common(allv)
+    return mc[0] if mc else None
+
+
+def split_columns(lines):
+    if len(lines) < 8:
+        return [lines]
+    minl = min(l.left for l in lines)
+    maxr = max(l.right for l in lines)
+    w = maxr - minl
+    if w <= 0:
+        return [lines]
+    srt = sorted(lines, key=lambda l: l.left)
+    for tol in (0.03, 0.02, 0.01):
+        groups, cur_right = [], -1e9
+        for l in srt:
+            if not groups or l.left - cur_right > w * tol:
+                groups.append([l])
+                cur_right = l.right
+            else:
+                groups[-1].append(l)
+                cur_right = max(cur_right, l.right)
+        big = [g for g in groups
+               if (max(e.right for e in g) - min(e.left for e in g)) >= w * 0.12 and len(g) >= 6]
+        if 2 <= len(big) <= 4 and all(receipt_score(reading_text(g)) >= 3 for g in big):
+            return big
+    return [lines]
+
+
+# ───────────────────────── الماكينة / الوحدة / التاريخ ─────────────────────────
+def _tid_labeled(t):
+    m = re.search(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", t, re.I)
+    if not m:
+        return None
+    raw = re.sub(r"\D", "", m.group(1).replace("/", "7"))
+    if len(raw) < 8:
+        return None
+    d = raw[-8:]
+    d = TID_FIX.get(d, d)
+    return d if d in TERMINALS else None
+
+
+def _tid_loose(t):
+    for tid in TERMINALS:
+        if tid in t:
+            return tid
+    for m in re.finditer(r"\b(503\d{5})\b", t):
+        c = TID_FIX.get(m.group(1), m.group(1))
+        if c in TERMINALS:
+            return c
+    return None
+
+
+def find_terminal_in(texts):
+    for t in texts:
+        r = _tid_labeled(t)
+        if r:
+            return r
+    for t in texts:
+        r = _tid_loose(t)
+        if r:
+            return r
+    return None
+
+
+def find_terminal_fuzzy_in(texts, target_row):
+    pool = [k for k, v in TERMINALS.items() if target_row is None or v.row == target_row]
+    dist = {}
+    for t in texts:
+        for run in re.finditer(r"\d[\d /]{6,14}\d", t):
+            digits = re.sub(r"\D", "", run.group(0).replace("/", "7"))
+            for i in range(0, len(digits) - 7):
+                cand = digits[i:i + 8]
+                if not (cand.startswith("50") or cand.startswith("60")):
+                    continue
+                for tid in pool:
+                    d = sum(1 for a, b in zip(cand, tid) if a != b)
+                    if d < dist.get(tid, 99):
+                        dist[tid] = d
+    if not dist:
+        return None
+    best = min(dist.values())
+    winners = [k for k, v in dist.items() if v == best]
+    if best <= 1 and len(winners) == 1:
+        return winners[0]
+    return None
+
+
+def find_unit_extra_in(texts):
+    for t in texts:
+        m = re.search(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", t, re.I)
+        cands = []
+        if m:
+            cands.append(re.sub(r"\D", "", m.group(1).replace("/", "7")))
+        cands.append(re.sub(r"\D", "", t))
+        for d in cands:
+            mm = re.search(r"11470?(2[2-9]|3[01])084", d)
+            if mm and mm.group(1) in MERCHANT_CODE_MAP:
+                return MERCHANT_CODE_MAP[mm.group(1)]
+    for t in texts:
+        up = t.upper()
+        for words, row in NAME_HINTS:
+            if any(w in up for w in words):
+                return row
+    return None
+
+
+def find_date_in(texts):
+    """التاريخ من سطر DATE: تصويت منفصل على الشهر واليوم بين كل القراءات
+    (القراءة الغلط في رقم بتتعوّض بقراءة تانية)، وأي شهر/يوم مش منطقي بيتجاهل."""
+    reg = re.compile(r"DATE\s*:?\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})", re.I)
+    months, days = [], []
+    for t in texts:
+        for m in reg.finditer(t):
+            mo, d = int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12:
+                months.append(mo)
+            if 1 <= d <= 31:
+                days.append(d)
+    mm, dd = most_common(months), most_common(days)
+    return "%d.%d" % (dd[0], mm[0]) if mm and dd else None
+
+
+class Analysis:
+    def __init__(self, tid, how, row, unit, val, ok, batches, date):
+        self.tid, self.how, self.row, self.unit = tid, how, row, unit
+        self.val, self.ok, self.batches, self.date = val, ok, batches, date
+        self.texts = []
+        self.txn = None     # عدد معاملات الباتش (من إيصال الإقفال)
+
+
+def analyze_lines(all_lines):
+    pieces = split_columns(all_lines)
+    multi = len(pieces) > 1
+    all_texts, batches, seen = [], [], set()
+    txns = []
+    all_ok = True
+    for pc in pieces:
+        r = ocr_piece(pc)
+        all_texts.extend(r.texts)
+        if r.val <= 0:
+            all_ok = False
+            continue
+        b = batch_no(r.texts)
+        key = (b, r.val)
+        if b is not None and key in seen:
+            continue
+        seen.add(key)
+        batches.append(r.val)
+        txns.append(batch_txn_of(r.texts))
+        all_ok = all_ok and r.ok
+    total = round2(sum(batches))
+    ok = all_ok and bool(batches)
+    if multi and not ok:
+        r = ocr_piece(all_lines)
+        all_texts.extend(r.texts)
+        if r.val > 0 and (r.ok or not batches):
+            total, ok, batches = r.val, r.ok, [r.val]
+            txns = [batch_txn_of(r.texts)]
+    date = find_date_in(all_texts)
+    tid = find_terminal_in(all_texts)
+    how = "terminal"
+    row = unit = None
+    if tid is None:
+        u0 = find_unit_extra_in(all_texts)
+        tid = find_terminal_fuzzy_in(all_texts, u0)
+        how = "fuzzy"
+    if tid is not None:
+        info = TERMINALS[tid]
+        row, unit = info.row, info.unit
+    else:
+        how = "none"
+        u = find_unit_extra_in(all_texts)
+        if u is not None:
+            row, unit, how = u, ROW_NAMES.get(u), "name/merchant"
+    a = Analysis(tid, how, row, unit, total, ok, batches, date)
+    a.texts = all_texts
+    a.txn = sum(txns) if (txns and all(t is not None for t in txns)) else None
+    return a
+
+
+def merge_second_read(a, b):
+    """بيدمج القراءة التانية في الأولى. يرجّع قيمة تانية متعارضة (للمراجعة) أو None."""
+    if a.tid is None and b.tid is not None:
+        a.tid, a.row, a.unit, a.how = b.tid, b.row, b.unit, b.how
+    elif a.row is None and b.row is not None:
+        a.row, a.unit, a.how = b.row, b.unit, b.how
+    if a.date is None:
+        a.date = b.date
+    if a.txn is None:
+        a.txn = b.txn
+    if b.val <= 0:
+        return None
+    if a.val <= 0:
+        a.val, a.ok, a.batches = b.val, b.ok, list(b.batches)
+        a.txn = b.txn if b.txn is not None else a.txn
+        return None
+    if abs(a.val - b.val) < 0.005:
+        a.ok = a.ok or b.ok
+        return None
+    if (not a.ok) and b.ok:
+        a.val, a.ok, a.batches = b.val, True, list(b.batches)
+        a.txn = b.txn if b.txn is not None else a.txn
+        return None
+    if a.ok and not b.ok:
+        return None
+    a.ok = False
+    return b.val
+
+
+def _looks_receipt(text):
+    return receipt_score(text) >= 2 or find_terminal_in([text]) is not None
+
+
+def analyze_image(pil, want_color_crop=False):
+    """يحلل صورة واحدة. يرجّع dict: kind = batch | payment | other، و
+    analysis, alt, image (الصورة بعد تصحيح الاتجاه)."""
+    base = pil.convert("RGB")
+    cur = base
+    lines = tess_lines(prep_raw(cur), 6)
+    text = reading_text(lines)
+    is_r = _looks_receipt(text)
+    if is_r and classify_receipt(text) == "payment":
+        return {"kind": "payment", "image": cur}
+    if not is_r:
+        for deg in (90, 270, 180):
+            rot = base.rotate(deg, expand=True)
+            ln2 = tess_lines(prep_raw(rot), 6)
+            t2 = reading_text(ln2)
+            if _looks_receipt(t2):
+                if classify_receipt(t2) == "payment":
+                    return {"kind": "payment", "image": rot}
+                cur, lines, text, is_r = rot, ln2, t2, True
+                break
+    if not is_r:
+        return {"kind": "other", "image": cur}
+    a = analyze_lines(lines)
+    all_texts = list(a.texts)
+    alt = None
+    color, enh = scan_receipt(cur)
+    for psm in (6, 4):
+        if psm == 4 and a.ok and a.tid and a.row and a.val > 0:
+            break
+        ln2 = tess_lines(enh, psm)
+        a2 = analyze_lines(ln2)
+        r = merge_second_read(a, a2)
+        if r is not None:
+            alt = r
+        all_texts.extend(a2.texts)
+    # التاريخ: تصويت بين كل القراءات (كل قراءة ممكن تغلط في رقم مختلف)
+    d = find_date_in(all_texts)
+    if d:
+        a.date = d
+    return {"kind": "batch", "analysis": a, "alt": alt, "image": cur, "crop": color}
+
+
+# ───────────────────────── عدّ إيصالات الدفع داخل PDF ─────────────────────────
+_RRN1 = re.compile(r"R{1,2}N\W{0,3}([0-9OoDQlI|iSsBZzgb ]{9,16})", re.I)
+_RRN2 = re.compile(r"(?<!\d)(63[\d ]{7,10})(?!\d)")
+_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "l": "1", "I": "1", "|": "1", "i": "1",
+                      "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "g": "9", "b": "6"})
+_DATE_RE = re.compile(r"(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})")
+
+_COUNT_PATS = {
+    "ec": r"\bEC\b|MUSTAFA|KAMEL|MOGAMAA|KHADMAT|ELKWAT",
+    "alex": r"ALEX\s*0?2F",
+    "bank": r"NATIONAL|EGYPT",
+    "sale": r"(MASTER|VISA|MEZZA|MEEZA)\s*-?\s*SALE",
+    "auth": r"AUTHORI|DEBIT\s+THE|ABOVE\s+AMOUNT",
+    "rrn": r"R{1,2}N\W{0,3}\d{6,}",
+    "amount": r"AMOUNT\W{0,3}\d",
+    "star": r"\d{4,6}\W{0,3}\*{4,}",
+    "card": r"CLESS|CHIP\s*ONLINE",
+}
+
+
+def day_key(text):
+    for m in _DATE_RE.finditer(text):
+        mo, d = int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return "%d.%d" % (d, mo)
+    return None
+
+
+def rrn_of(line):
+    m = _RRN1.search(line)
+    s = m.group(1).translate(_FIX) if m else None
+    if s is None:
+        m2 = _RRN2.search(line)
+        s = m2.group(1) if m2 else None
+    if not s:
+        return None
+    d = re.sub(r"\D", "", s)
+    if len(d) < 9:
+        return None
+    d = d[:12]
+    return d if (len(d) == 12 and d.startswith("63")) else "P"
+
+
+def _dedupe(pts, tol):
+    out = []
+    for l, r, cy in sorted(pts, key=lambda p: p[2]):
+        for o in out:
+            if o[0] < r and l < o[1] and abs(o[2] - cy) < tol:
+                break
+        else:
+            out.append([l, r, cy])
+    return out
+
+
+def _ocr_tiles(img_path, cols=5, rows=3, threads=None):
+    """يقسّم الصفحة لبلاط (5 أعمدة × 3 صفوف بتداخل) ويقراه بالتوازي. يرجّع (w, h, [(text,l,r,cy)])."""
+    im = Image.open(img_path).convert("L")
+    w, h = im.size
+    cw, rh = w / float(cols), h / float(rows)
+    jobs = []
+    for i in range(cols):
+        for j in range(rows):
+            x0 = max(0, int(i * cw - cw * 0.12))
+            x1 = min(w, int((i + 1) * cw + cw * 0.12))
+            y0 = max(0, int(j * rh - rh * 0.08))
+            y1 = min(h, int((j + 1) * rh + rh * 0.08))
+            jobs.append((x0, y0, im.crop((x0, y0, x1, y1))))
+
+    def run(job):
+        x0, y0, tile = job
+        return [(l.text, x0 + l.left, x0 + l.right, y0 + l.cy) for l in tess_lines(tile, 6)]
+
+    n = threads or max(1, min(8, os.cpu_count() or 2))
+    out = []
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        for part in ex.map(run, jobs):
+            out.extend(part)
+    return w, h, out
+
+
+def count_page(w, h, L):
+    """عدد الإيصالات في الصفحة = مجموع (أعلى عدد علامات من أي نوع) في كل عمود."""
+    per = {}
+    for k, pt in _COUNT_PATS.items():
+        pts = [(l, r, cy) for t, l, r, cy in L if re.search(pt, t.upper())]
+        per[k] = _dedupe(pts, h * 0.012)
+    total = 0
+    for ci in range(5):
+        lo, hi = ci * w / 5.0, (ci + 1) * w / 5.0
+        total += max((len([a for a in v if lo <= (a[0] + a[1]) / 2.0 < hi]) for v in per.values()), default=0)
+    # RRN كامل (نقاط ارتكاز) بالتسلسل
+    rr = {}
+    for t, l, r, cy in L:
+        a = rrn_of(t)
+        if a and a != "P":
+            rr[a] = day_key(t)
+    return total, rr
+
+
+def tid_votes(text):
+    v = {}
+    lab = _tid_labeled(text)
+    if lab:
+        v[lab] = v.get(lab, 0) + 3
+    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
+        c0 = m.group(1)
+        c = TID_FIX.get(c0, c0)
+        if c in TERMINALS:
+            v[c] = v.get(c, 0) + 1
+    if not v:
+        f = find_terminal_fuzzy_in([text], None)
+        if f:
+            v[f] = 0.5
+    return v
+
+
+def machine_new_name(info, day, month):
+    same = sorted([t for t in TERMINALS.values() if t.row == info.row], key=lambda t: t.order)
+    unit = re.sub(r"\s+", ".", info.unit.strip())
+    k = [t.order for t in same].index(info.order) + 1
+    parts = [str(info.order), unit]
+    if len(same) > 1:
+        parts.append(str(k))
+    parts += ["يوم", str(day), str(month)]
+    return ".".join(parts)
+
+
+# ───────────────────────── إيصالات الدفع: نفس طريقة تطبيق الموبايل ─────────────────────────
+# الفكرة (منقولة من التطبيق):
+#  1) كل صفحة بتتقرا مرة واحدة (الصورة الأصلية جوه الـ PDF الممسوح من غير تحويل) على شرائح مضبوطة.
+#  2) العدد = عدّ بالهيكل (لوجو + TERMINAL + RRN + AMOUNT + APPROVED) في كل عمود.
+#  3) أوراق التعريف الصغيرة (اسم + TID + تاريخ) بتتجاهل، وإيصالات الإقفال/الملخص مش بتتعد.
+#  4) مراجعة بتسلسل أرقام RRN + تاريخ كل إيصال + مقارنة بعدد معاملات الباتش من التقفيل.
+
+CLOSING_TXN = {}   # رقم الماكينة -> عدد معاملات الباتش (من إيصالات الإقفال في التقفيل)
+
+
+def publish_closing_txn(items):
+    """بيحفظ عدد معاملات الباتش لكل ماكينة (من التقفيل) علشان إيصالات الدفع تقارنه بالعدد الفعلي."""
+    sums, bad = {}, set()
+    for it in items:
+        if getattr(it, "skip", False):
+            continue
+        n = getattr(it, "order", None) or (TERMINALS[it.tid].order if getattr(it, "tid", None) in TERMINALS else None)
+        if n is None:
+            continue
+        t = getattr(it, "txn", None)
+        if t is None:
+            bad.add(n)
+            continue
+        sums[n] = sums.get(n, 0) + t
+    for n in bad:
+        sums.pop(n, None)
+    CLOSING_TXN.clear()
+    CLOSING_TXN.update(sums)
+    return sums
+
+
+def _txn_num(s):
+    t = s.strip().replace("O", "0").replace("o", "0")
+    t = re.sub(r"[Il|]", "1", t)
+    try:
+        return int(t)
+    except ValueError:
+        return None
+
+
+def batch_txn_of(texts):
+    """عدد معاملات الباتش من إيصال الإقفال: GRAND TOTALS / Sale (010) (ولو مجموع الكروت بيتطابق معاه)."""
+    grand_re = re.compile(r"GRAND|TOTALS", re.I)
+    paren = re.compile(r"\(\s*([0-9OoIl|]{1,5})\s*\)")
+    tot_re = re.compile(r"TOTAL(?!\s*NET)[^()\n]{0,12}\(\s*([0-9OoIl|]{1,5})\s*\)", re.I)
+    grands, sums = [], []
+    for raw in texts:
+        gm = grand_re.search(raw)
+        if gm:
+            m = paren.search(raw[gm.start():])
+            v = _txn_num(m.group(1)) if m else None
+            if v is not None and 0 < v < 100000:
+                grands.append(v)
+        pre = raw[:gm.start()] if gm else raw
+        s, n = 0, 0
+        for m in tot_re.finditer(pre):
+            v = _txn_num(m.group(1))
+            if v is not None:
+                s += v
+                n += 1
+        if n > 0 and s > 0:
+            sums.append(s)
+    g = most_common(grands)[0] if grands else None
+    s = most_common(sums)[0] if sums else None
+    if g is not None and s is not None and g != s:
+        return None          # القراءتين متعارضتين: الأفضل تتكتب بإيدك
+    return g if g is not None else s
+
+
+# ───────────── قراءة الصفحة (RapidOCR أولاً، Tesseract بديل) ─────────────
+_RAPID = {"eng": None, "tried": False}
+_RAPID_LOCK = threading.Lock()
+_TILE_MAX = 1900     # RapidOCR بيصغّر أي صورة أكبر من ~2000 بكسل، فالصفحة بتتقسم بلاطات أصغر من كده
+
+
+def _rapid():
+    if not _RAPID["tried"]:
+        _RAPID["tried"] = True
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _RAPID["eng"] = RapidOCR()
+        except Exception:
+            _RAPID["eng"] = None
+    return _RAPID["eng"]
+
+
+def pay_ocr_ready():
+    """(ok, message): إيصالات الدفع بتشتغل بـ RapidOCR أو Tesseract (أي واحد منهم)."""
+    if _rapid() is not None or find_tesseract():
+        return True, ""
+    return False, "مفيش محرك OCR: لا RapidOCR ولا Tesseract. اتأكد إن البرنامج اتبنى بالمكتبات كاملة."
+
+
+def _ocr_image_lines(im, scale=1.0, dx=0.0, dy=0.0):
+    """OCR لصورة واحدة -> OcrLine بإحداثيات الصفحة الأصلية."""
+    out = []
+    eng = _rapid()
+    if eng is not None and np is not None:
+        with _RAPID_LOCK:
+            res = eng(np.array(im.convert("RGB")))
+        items = (res[0] if isinstance(res, (tuple, list)) else None) or []
+        for box, txt, _sc in items:
+            t = str(txt).strip()
+            if not t:
+                continue
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            out.append(OcrLine(t, dx + min(xs) / scale, dx + max(xs) / scale,
+                               dy + min(ys) / scale, dy + max(ys) / scale))
+        return out
+    for l in tess_lines(im.convert("L"), 6):
+        out.append(OcrLine(l.text, dx + l.left / scale, dx + l.right / scale,
+                           dy + l.top / scale, dy + l.bottom / scale))
+    return out
+
+
+def _tile_boxes(w, h, cols=5, max_tile=_TILE_MAX):
+    cw = w / float(cols)
+    rows = max(1, int(math.ceil(h / float(max_tile))))
+    rh = h / float(rows)
+    boxes = []
+    for i in range(cols):
+        x0 = max(0, int(i * cw - cw * 0.12))
+        x1 = min(w, int((i + 1) * cw + cw * 0.12))
+        for j in range(rows):
+            y0 = max(0, int(j * rh - rh * 0.06))
+            y1 = min(h, int((j + 1) * rh + rh * 0.06))
+            boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
+def _merge_lines(lines):
+    """نفس السطر اتقرا من بلاطتين متداخلتين: يفضل مرة واحدة (الأطول)."""
+    out = []
+    for l in sorted(lines, key=lambda x: (x.cy, x.left)):
+        dup = None
+        for k in range(len(out) - 1, max(-1, len(out) - 80), -1):
+            o = out[k]
+            if abs(o.cy - l.cy) > max(o.h, l.h, 1.0) * 0.7:
+                break
+            ov = min(o.right, l.right) - max(o.left, l.left)
+            if ov > 0 and ov >= 0.6 * min(o.right - o.left, l.right - l.left):
+                dup = k
+                break
+        if dup is None:
+            out.append(l)
+        elif len(l.text) > len(out[dup].text):
+            out[dup] = l
+    return out
+
+
+def read_page(im, mode="fast"):
+    """يرجّع (w, h, lines). fast = بلاطات بالدقة الأصلية. accurate = الصفحة كلها + بلاطات مكبّرة 1.5x."""
+    im = ImageOps.exif_transpose(im).convert("RGB")
+    w, h = im.size
+    lines = []
+    f = 1.5 if mode == "accurate" else 1.0
+    if mode == "accurate":
+        s = min(1.0, float(_TILE_MAX) / max(w, h))
+        small = im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS) if s < 1.0 else im
+        lines += _ocr_image_lines(small, s)
+    for (x0, y0, x1, y1) in _tile_boxes(w, h, max_tile=_TILE_MAX / f):
+        tile = im.crop((x0, y0, x1, y1))
+        if f != 1.0:
+            tile = tile.resize((int(tile.width * f), int(tile.height * f)), Image.LANCZOS)
+        lines += _ocr_image_lines(tile, f, x0, y0)
+    return w, h, _merge_lines(lines)
+
+
+def _page_text(lines, w):
+    """نص الصفحة مرتب عمود عمود (كل عمود = إيصالات فوق بعض)."""
+    cw = max(1.0, w / 5.0)
+    ls = sorted(lines, key=lambda l: (int(((l.left + l.right) / 2.0) / cw), l.cy))
+    return "\n".join(l.text for l in ls)
+
+
+# ───────────── أوراق التعريف + العد بالهيكل ─────────────
+_SLIP_PAY = re.compile(r"TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL|SALE|GRAND|CARD|REPRINT")
+
+
+def is_id_slip(lines):
+    """ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) جوه الملف: مش إيصال دفع فمتتعدّش."""
+    if not lines or len(lines) > 16:
+        return False
+    allt = "\n".join(l.text.upper() for l in lines)
+    if _SLIP_PAY.search(allt):
+        return False
+    if re.search(r"(?<!\d)\d{12}(?!\d)", re.sub(r"[ \t]", "", allt)):
+        return False
+    if re.search(r"\bT\s?[I1L|]\s?D\b\W{0,4}[\dOo]{7,9}", allt) or re.search(r"\bT\s?[I1L|]\s?D\b", allt):
+        return True
+    has_date = re.search(r"\d{2}\s?[/.\-]\s?\d{2}\s?[/.\-]\s?20\d{2}", allt)
+    return bool(has_date) and len(lines) <= 8 and find_terminal_in([allt]) is not None
+
+
+_S_NAME = re.compile(r"NATIONAL|BANK\s*OF\s*EGYPT")
+_S_RRN = re.compile(r"(?<![A-Z])R{1,2}N\W{0,3}\d")
+_S_AMT = re.compile(r"^\s*AMOUNT\b")
+_S_AMT_BAD = re.compile(r"FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b")
+
+
+def struct_count(lines):
+    """عدّ الإيصالات بالهيكل: كل إيصال له لوجو + Terminal + RRN + AMOUNT + Approved (مرة واحدة).
+    بنقسم العلامات أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات.
+    يرجّع dict: sm (عدد الأعمدة)، mx (أكبر نوع علامة)، h."""
+    out = {"sm": 0, "mx": 0, "h": 3000.0, "types": {}}
+    if not lines:
+        return out
+    h = max(l.bottom for l in lines)
+    w = max(l.right for l in lines)
+    out["h"] = h
+    marks = []
+    for l in lines:
+        u = l.text.upper()
+        cx = (l.left + l.right) / 2.0
+        kinds = []
+        if _S_NAME.search(u):
+            kinds.append("logo")
+        if "TERMINAL" in u:
+            kinds.append("term")
+        if _S_RRN.search(u):
+            kinds.append("rrn")
+        if _S_AMT.search(u) and not _S_AMT_BAD.search(u):
+            kinds.append("amount")
+        if "APPROVED" in u:
+            kinds.append("appr")
+        for k in kinds:
+            marks.append((k, cx, l.cy, l.left, l.right))
+    ded = []
+    for m in marks:
+        dup = False
+        for o in ded:
+            if o[0] == m[0] and o[3] < m[4] and m[3] < o[4] and abs(o[2] - m[2]) < h * 0.02:
+                dup = True
+                break
+        if not dup:
+            ded.append(m)
+    for m in ded:
+        out["types"][m[0]] = out["types"].get(m[0], 0) + 1
+    if not ded:
+        return out
+    out["mx"] = max(out["types"].values())
+    ded.sort(key=lambda m: m[1])
+    cols, cur = [], [ded[0]]
+    for m in ded[1:]:
+        if m[1] - cur[-1][1] > w * 0.07:
+            cols.append(cur)
+            cur = []
+        cur.append(m)
+    cols.append(cur)
+    n = 0
+    for c in cols:
+        cnt = {}
+        for m in c:
+            cnt[m[0]] = cnt.get(m[0], 0) + 1
+        n += max(cnt.values())
+    out["sm"] = n
+    return out
+
+
+# ───────────── نقاط الارتكاز (RRN) والتسلسل ─────────────
+class ScanSummary:
+    def __init__(self):
+        self.full = 0
+        self.partial = 0
+        self.rrn_day = {}
+        self.non_payment = False
+        self.tid = None
+        self.day = self.month = None
+        self.other_day = []
+        self.seq_min = self.seq_max = None
+        self.seq_missing = []
+
+    @property
+    def count(self):
+        return self.full + self.partial
+
+    @property
+    def range_len(self):
+        return None if self.seq_min is None else self.seq_max - self.seq_min + 1
+
+    @property
+    def agree(self):
+        return self.range_len is None or self.count == self.range_len
+
+    @property
+    def range_text(self):
+        if self.seq_min is None:
+            return ""
+        return " • التسلسل %06d-%06d (%d)" % (self.seq_min, self.seq_max, self.range_len)
+
+    def missing_text(self, k=10):
+        miss = "، ".join("%06d" % n for n in self.seq_missing[:k])
+        return (" - أرقام مش لاقيها: %s%s" % (miss, " ..." if len(self.seq_missing) > k else "")) if self.seq_missing else ""
+
+
+class PayCollector:
+    def __init__(self):
+        self.pages = []
+        self.slips = 0
+        self.texts = []
+        self.page_h = 3000.0
+
+    def new_page(self, h):
+        self.pages.append([])
+        self.page_h = float(h) if h else 3000.0
+
+    def _add(self, rrn, day, l, r, cy):
+        for a in self.pages[-1]:
+            if a["l"] < r and l < a["r"] and abs(a["cy"] - cy) < self.page_h * 0.012:
+                a["rrn"] = a["rrn"] or rrn
+                a["day"] = a["day"] or day
+                return
+        self.pages[-1].append({"rrn": rrn, "day": day, "l": l, "r": r, "cy": cy})
+
+    def collect(self, lines):
+        if not self.pages:
+            self.new_page(3000.0)
+        self.texts.append("\n".join(l.text for l in lines))
+        dates = [l for l in lines if day_key(l.text)]
+        for l in lines:
+            a = rrn_of(l.text)
+            if a is None:
+                continue
+            day = day_key(l.text)
+            if day is None:
+                best, bd = None, 1e18
+                for d in dates:
+                    dy = abs(d.cy - l.cy)
+                    if dy > l.h * 5:
+                        continue
+                    if not (d.left < l.right + 60 and l.left < d.right + 60):
+                        continue
+                    if dy < bd:
+                        bd, best = dy, d
+                if best is not None:
+                    day = day_key(best.text)
+            self._add(None if a == "P" else a, day, l.left, l.right, l.cy)
+
+    def finish(self):
+        r = ScanSummary()
+        seen, days, partial_days = set(), {}, []
+        for a in (x for p in self.pages for x in p):
+            if a["rrn"]:
+                if a["rrn"] not in seen:
+                    seen.add(a["rrn"])
+                    r.full += 1
+                    r.rrn_day[a["rrn"]] = a["day"]
+                    if a["day"]:
+                        days[a["day"]] = days.get(a["day"], 0) + 1
+            else:
+                r.partial += 1
+                if a["day"]:
+                    partial_days.append(a["day"])
+                    days[a["day"]] = days.get(a["day"], 0) + 1
+        allt = "\n".join(self.texts)
+        r.non_payment = bool(re.search(
+            r"GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF", allt, re.I))
+        r.tid = _tid_of_text(allt)
+        if not days:
+            for m in _DATE_RE.finditer(allt):
+                k = day_key(m.group(0))
+                if k:
+                    days[k] = days.get(k, 0) + 1
+        if days:
+            best = max(days.items(), key=lambda e: e[1])[0]
+            r.day, r.month = best.split(".")
+            for rrn, d in r.rrn_day.items():
+                if d and d != best:
+                    r.other_day.append("إيصال %s بتاريخ %s" % (rrn[6:], d))
+            for d in partial_days:
+                if d != best:
+                    r.other_day.append("إيصال (رقمه مش واضح) بتاريخ %s" % d)
+        nums = sorted(int(k[6:]) for k in r.rrn_day)
+        if len(nums) >= 2:
+            best_start, best_len, start = 0, 1, 0
+            for i in range(1, len(nums) + 1):
+                if i == len(nums) or nums[i] - nums[i - 1] > 15:
+                    if i - start > best_len:
+                        best_len, best_start = i - start, start
+                    start = i
+            cl = nums[best_start:best_start + best_len]
+            r.seq_min, r.seq_max = cl[0], cl[-1]
+            have = set(cl)
+            r.seq_missing = [n for n in range(cl[0], cl[-1] + 1) if n not in have]
+        return r
+
+
+def _tid_of_text(text):
+    """الماكينة: أكتر Terminal ID معروف متكرر في النص."""
+    tc = {}
+    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", text):
+        c = TID_FIX.get(m.group(1), m.group(1))
+        if c in TERMINALS:
+            tc[c] = tc.get(c, 0) + 1
+    if tc:
+        return max(tc.items(), key=lambda e: e[1])[0]
+    return find_terminal_in([text]) or find_terminal_fuzzy_in([text], None)
+
+
+def _day_of_text(text):
+    days = {}
+    for m in _DATE_RE.finditer(text):
+        k = day_key(m.group(0))
+        if k:
+            days[k] = days.get(k, 0) + 1
+    if not days:
+        return None, None
+    best = max(days.items(), key=lambda e: e[1])[0]
+    d, mo = best.split(".")
+    return d, mo
+
+
+def plausible_day(d, m):
+    """تاريخ إيصال في المستقبل = قراءة غلط."""
+    if not d or not m:
+        return True
+    try:
+        di, mi = int(d), int(m)
+    except ValueError:
+        return False
+    today = datetime.date.today()
+    for y in (today.year, today.year - 1):
+        try:
+            dt = datetime.date(y, mi, di)
+        except ValueError:
+            continue
+        if dt <= today + datetime.timedelta(days=1):
+            if y == today.year or (today - dt).days <= 90:
+                return True
+    return False
+
+
+# ───────────── مصدر صفحات الـ PDF ─────────────
+def pdf_jpeg_pages(path):
+    """صور الصفحات الأصلية (JPEG) من PDF ممسوح (CamScanner وغيره): من غير تحويل ولا رسم."""
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+    except OSError:
+        return []
+    out, pos = [], 0
+    while True:
+        i = b.find(b"/DCTDecode", pos)
+        if i < 0:
+            break
+        s = b.find(b"stream", i)
+        if s < 0:
+            break
+        st = s + 6
+        if b[st:st + 2] == b"\r\n":
+            st += 2
+        elif b[st:st + 1] in (b"\n", b"\r"):
+            st += 1
+        e = b.find(b"endstream", st)
+        if e < 0:
+            break
+        en = e
+        while en > st and b[en - 1] in (10, 13, 32):
+            en -= 1
+        if en - st > 20000 and b[st:st + 2] == b"\xff\xd8" and b[en - 2:en] == b"\xff\xd9":
+            out.append(b[st:en])
+        pos = e + 9
+    return out
+
+
+def _pdf_page_count(pdf):
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(pdf).pages)
+    except Exception:
+        pass
+    try:
+        import pypdfium2 as pdfium
+        return len(pdfium.PdfDocument(pdf))
+    except Exception:
+        return 0
+
+
+class PageSource:
+    """صفحات PDF واحدة واحدة: صورة JPEG الأصلية لو ممسوح، وإلا رسم الصفحة (pdftoppm / pypdfium2)."""
+
+    def __init__(self, pdf, workdir, fast=True, dpi=200):
+        self.pdf, self.wd, self.dpi = pdf, workdir, dpi
+        self.jpegs = pdf_jpeg_pages(pdf) if fast else []
+        self.scanned = bool(self.jpegs)
+        self.n = len(self.jpegs) if self.scanned else (_pdf_page_count(pdf) or 0)
+
+    def get(self, i):
+        if self.scanned:
+            if i >= len(self.jpegs):
+                return None
+            with Image.open(io.BytesIO(self.jpegs[i])) as t:
+                return t.convert("RGB")
+        imgs = pdf_to_images(self.pdf, self.wd, dpi=self.dpi, first=i + 1, last=i + 1, max_side=3400)
+        if not imgs:
+            return None
+        try:
+            with Image.open(imgs[0]) as t:
+                return t.convert("RGB")
+        finally:
+            for q in imgs:
+                try:
+                    os.remove(q)
+                except OSError:
+                    pass
+
+
+# ───────────── نتيجة ملف إيصالات ─────────────
+class PayResult:
+    def __init__(self, src):
+        self.src = src
+        self.name = os.path.basename(src)
+        try:
+            self.size = os.path.getsize(src)
+        except OSError:
+            self.size = 0
+        self.pages = 0
+        self.count = -1             # -1 = لسه ما اتعدّش
+        self.tid = None
+        self.votes = {}
+        self.alt_tids = []
+        self.day = self.month = None
+        self.new_name = None
+        self.out_path = None
+        self.seq_min = self.seq_max = None
+        self.seq_missing = []
+        self.other_day = []
+        self.id_notes = []
+        self.cnt_notes = []
+        self.id_ok = True
+        self.cnt_ok = True
+        self.detail = ""
+        self.verdict = 0            # 0 = لسه ما اتراجعش، 1 = صح، -1 = غلط (مستبعد)
+        self.expected = None        # "الصح" بإيدك (عدد الباتش)
+        self.n15 = self.n10 = self.last = None
+        self.page_counts = []
+
+    key = property(lambda self: "%s:%d" % (self.name, self.size))
+    excluded = property(lambda self: self.verdict < 0)
+    pending = property(lambda self: self.count < 0 and self.verdict >= 0)
+    counted = property(lambda self: self.count >= 0)
+    ok = property(lambda self: self.verdict != 0 or (self.id_ok and self.cnt_ok))
+    notes = property(lambda self: list(self.id_notes) + list(self.cnt_notes))
+
+    @property
+    def order(self):
+        return TERMINALS[self.tid].order if self.tid in TERMINALS else 99
+
+
+def apply_payment_name(results, r, dest_dir):
+    """يسمّي ويكوّب الملف باسم الماكينة. لو اسم مكرر من ملف تاني بيزوّد _2."""
+    old = r.out_path
+    try:
+        if (old and os.path.exists(old) and os.path.abspath(old) != os.path.abspath(r.src)
+                and os.path.abspath(old).startswith(os.path.abspath(dest_dir))):
+            os.remove(old)
+    except OSError:
+        pass
+    r.new_name = r.out_path = None
+    miss_t, miss_d = "مش قادر أعرف الماكينة من الـ PDF", "مش قادر أعرف التاريخ من الـ PDF"
+    r.id_notes = [n for n in r.id_notes if n not in (miss_t, miss_d)]
+    if r.tid not in TERMINALS:
+        r.id_ok = False
+        r.id_notes.append(miss_t)
+        return
+    if not r.day or not r.month:
+        r.id_ok = False
+        r.id_notes.append(miss_d)
+        return
+    base = machine_new_name(TERMINALS[r.tid], r.day, r.month)
+    final, k = base, 2
+    while any(x is not r and not x.excluded and x.new_name == final for x in results):
+        final = "%s_%d" % (base, k)
+        k += 1
+    os.makedirs(dest_dir, exist_ok=True)
+    dst = os.path.join(dest_dir, final + ".pdf")
+    if os.path.abspath(dst) != os.path.abspath(r.src):
+        shutil.copy2(r.src, dst)
+    r.new_name, r.out_path = final, dst
+
+
+# ───────────── المرحلة 1: تعريف الماكينة واليوم ─────────────
+def identify_payment_pdf(pdf, workdir, progress=None, stop=lambda: False, max_probe=25, fast=True):
+    """بيقرا صفحات الملف (لحد 6، ولو مفيش ماكينة يكمّل لحد 25) ويصوّت على Terminal ID."""
+    r = PayResult(pdf)
+    src = PageSource(pdf, workdir, fast)
+    r.pages = src.n
+    votes, texts = {}, []
+    limit = min(max_probe, src.n) if src.n else max_probe
+    pi = 0
+    while pi < limit:
+        if stop():
+            break
+        if pi >= 6 and votes:
+            break
+        if progress:
+            progress("قراءة رقم الماكينة من صفحة %d" % (pi + 1))
+        im = src.get(pi)
+        if im is None:
+            break
+        w, h, lines = read_page(im, "fast")
+        txt = _page_text(lines, w)
+        texts.append(txt)
+        for k, v in tid_votes(txt).items():
+            votes[k] = votes.get(k, 0) + v
+        pi += 1
+        d, _m = _day_of_text("\n".join(texts))
+        rk = sorted(votes.items(), key=lambda e: -e[1])
+        # وقف بدري لو الماكينة واضحة (Terminal ID مقروء بوضوح) واليوم معروف
+        if d and rk and rk[0][1] >= 3 and (len(rk) < 2 or rk[0][1] >= rk[1][1] * 2):
+            break
+    allt = "\n".join(texts)
+    rk = sorted(votes.items(), key=lambda e: -e[1])
+    r.alt_tids, r.votes = [k for k, _ in rk], votes
+    tid = rk[0][0] if rk else _tid_of_text(allt)
+    from_unit = False
+    if tid is None:
+        row = find_unit_extra_in([allt])
+        same = [k for k, v in TERMINALS.items() if v.row == row] if row else []
+        if len(same) == 1:
+            tid, from_unit = same[0], True
+    day, month = _day_of_text(allt)
+    top = rk[0][1] if rk else 0.0
+    weak = tid is not None and ((not from_unit and top < 2) or not plausible_day(day, month))
+    if weak:
+        # مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): للمراجعة، من غير تسمية ولا عد
+        r.tid = None
+        r.day, r.month = day, month
+        r.id_ok = False
+        r.id_notes.append("الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه")
+        r.count = 0
+        r.detail = "للمراجعة (مش معدود)"
+        return r
+    r.tid, r.day, r.month = tid, day, month
+    if from_unit:
+        r.id_ok = False
+        r.id_notes.append("Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع")
+    return r
+
+
+def resolve_payment_duplicates(results, dest_dir):
+    """لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة."""
+    groups = {}
+    for r in results:
+        if r.tid and r.new_name and not r.excluded:
+            groups.setdefault(r.tid, []).append(r)
+    for tid, g in groups.items():
+        if len(g) < 2:
+            continue
+        g.sort(key=lambda x: -x.votes.get(tid, 0))
+        for r in g[1:]:
+            if not os.path.exists(r.src):
+                continue
+            claimed = set(x.tid for x in results if x.tid)
+            alt = None
+            for c in r.alt_tids:
+                if c == tid or c in claimed:
+                    continue
+                if r.votes.get(c, 0) >= 1:
+                    alt = c
+                    break
+            if alt is None:
+                continue
+            r.tid = alt
+            apply_payment_name(results, r, dest_dir)
+            if r.new_name:
+                r.id_ok = False
+                r.id_notes.append("الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة %d (المرشح التاني من قراءة الـ PDF)، راجع"
+                                  % TERMINALS[alt].order)
+
+
+def flag_payment_duplicates(results):
+    """بيعلّم الملفات اللي لسه واخدة نفس الماكينة (مفيش حل تلقائي)."""
+    tag = "نفس الماكينة"
+    for r in results:
+        had = any(n.startswith(tag) for n in r.id_notes)
+        r.id_notes = [n for n in r.id_notes if not n.startswith(tag)]
+        if had and not r.id_notes and r.new_name:
+            r.id_ok = True
+    groups = {}
+    for r in results:
+        if r.tid and r.new_name and not r.excluded:
+            groups.setdefault((r.tid, r.day, r.month), []).append(r)
+    for (tid, _d, _m), lst in groups.items():
+        if len(lst) < 2:
+            continue
+        info = TERMINALS.get(tid)
+        for r in lst:
+            others = " ، ".join(x.name for x in lst if x is not r)
+            r.id_ok = False
+            r.id_notes.append("%s (%s %s) اتعرفت كمان في: %s — راجع" % (
+                tag, info.order if info else "", info.unit if info else "", others))
+
+
+# ───────────── المرحلة 2: العد ─────────────
+def _scan_notes(r, sc, total, slips):
+    """ملاحظات المقارنة بين العدد وتسلسل الـ RRN واليوم (نفس رسايل التطبيق)."""
+    if sc.range_len is not None and sc.full >= total * 0.8 and total != sc.range_len:
+        r.cnt_ok = False
+        r.cnt_notes.append("العدد %d بس التسلسل %d%s" % (total, sc.range_len, sc.missing_text()))
+    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
+    r.other_day = list(sc.other_day)
+    if len(sc.other_day) >= 3 and len(sc.other_day) >= total * 0.1:
+        r.cnt_ok = False
+        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day[:5]))
+    if sc.non_payment:
+        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
+    if r.new_name is None and sc.tid:
+        # التعريف فشل: نسمّي من نتيجة العد (الاسم بيتعمل في apply_payment_name)
+        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
+        r.id_ok, r.id_notes = True, []
+    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
+        r.cnt_ok = False
+        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
+            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
+
+
+def _count_fast(r, workdir, progress, stop, max_pages):
+    """العد السريع: كل صفحة تتقرا مرة واحدة + عدّ بالهيكل. بيرجّع None لو اتوقف، False لو مش نافع."""
+    src = PageSource(r.src, workdir, True)
+    r.pages = src.n
+    col = PayCollector()
+    total = total_mx = failed = slips = done = 0
+    diff, empty = [], []
+    n = min(src.n, max_pages) if src.n else max_pages
+    for i in range(n):
+        if stop():
+            return None
+        if progress:
+            progress("عدّ صفحة %d من %s" % (i + 1, src.n or "؟"))
+        try:
+            im = src.get(i)
+            if im is None:
+                break
+            w, h, lines = read_page(im, "fast")
+        except OcrUnavailable:
+            raise
+        except Exception:
+            failed += 1
+            continue
+        done += 1
+        if is_id_slip(lines):
+            slips += 1
+            continue
+        sp = struct_count(lines)
+        total += sp["sm"]
+        total_mx += sp["mx"]
+        if sp["sm"] == 0:
+            empty.append(i + 1)
+        if abs(sp["sm"] - sp["mx"]) >= 2:
+            diff.append("%d (%d أو %d)" % (i + 1, sp["sm"], sp["mx"]))
+        col.new_page(sp["h"] or h)
+        col.collect(lines)
+    if total == 0 or done == 0:
+        return False
+    sc = col.finish()
+    r.count = total
+    r.detail = "عدّ سريع • %d صفحة • RRN مقروء %d%s%s" % (
+        done + failed, sc.full, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % slips) if slips else "")
+    if failed:
+        r.cnt_ok = False
+        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
+    if empty:
+        r.cnt_notes.append("صفحات ما لقيتش فيها إيصالات: " + "، ".join(str(x) for x in empty))
+    if diff:
+        r.cnt_notes.append("صفحات الطريقتين اختلفوا فيها: %s (راجعها لو العدد مهم)" % "، ".join(diff))
+    _scan_notes(r, sc, total, slips)
+    return True
+
+
+def _count_accurate(r, workdir, progress, stop, max_pages):
+    """العد الدقيق (أبطأ): الصفحة كلها + بلاطات مكبّرة، والعدد = عدد نقاط الارتكاز (RRN)."""
+    src = PageSource(r.src, workdir, True)
+    r.pages = src.n
+    col = PayCollector()
+    done = failed = 0
+    n = min(src.n, max_pages) if src.n else max_pages
+    for i in range(n):
+        if stop():
+            return None
+        if progress:
+            progress("عدّ دقيق: صفحة %d من %s" % (i + 1, src.n or "؟"))
+        try:
+            im = src.get(i)
+            if im is None:
+                break
+            w, h, lines = read_page(im, "accurate")
+        except OcrUnavailable:
+            raise
+        except Exception:
+            failed += 1
+            continue
+        done += 1
+        if is_id_slip(lines):
+            col.slips += 1
+            continue
+        col.new_page(max([l.bottom for l in lines] or [h]))
+        col.collect(lines)
+    if done == 0:
+        r.count = 0
+        r.cnt_ok = False
+        r.cnt_notes.append("فشل العد")
+        return True
+    sc = col.finish()
+    r.count = sc.count
+    r.detail = "عدّ دقيق • RRN كامل %d • ناقص القراءة %d%s%s" % (
+        sc.full, sc.partial, sc.range_text, (" • أوراق تعريف مُتجاهلة %d" % col.slips) if col.slips else "")
+    if failed:
+        r.cnt_ok = False
+        r.cnt_notes.append("%d صفحة فشلت قراءتها، العدد ممكن يكون ناقص" % failed)
+    if not sc.agree:
+        r.cnt_ok = False
+        r.cnt_notes.append("العدد %d بس التسلسل %d%s (ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف)" % (
+            sc.count, sc.range_len, sc.missing_text()))
+    r.seq_min, r.seq_max, r.seq_missing = sc.seq_min, sc.seq_max, list(sc.seq_missing)
+    r.other_day = list(sc.other_day)
+    if sc.other_day:
+        r.cnt_ok = False
+        r.cnt_notes.append("مش تبع نفس اليوم: " + " ، ".join(sc.other_day))
+    if sc.non_payment:
+        r.cnt_notes.append("فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)")
+    if r.new_name is None and sc.tid:
+        r.tid, r.day, r.month = sc.tid, sc.day or r.day, sc.month or r.month
+        r.id_ok, r.id_notes = True, []
+    elif sc.tid in TERMINALS and r.tid in TERMINALS and TERMINALS[sc.tid].order != TERMINALS[r.tid].order:
+        r.cnt_ok = False
+        r.cnt_notes.append("العد لقى ماكينة %d بس التسمية ماكينة %d، راجع" % (
+            TERMINALS[sc.tid].order, TERMINALS[r.tid].order))
+    return True
+
+
+def count_payment_pdf(r, workdir, progress=None, stop=lambda: False, fast=True, max_pages=400):
+    """بيعدّ إيصالات الملف. يرجّع False لو اتوقف قبل ما يخلص."""
+    r.cnt_notes, r.cnt_ok = [], True
+    if not os.path.exists(r.src):
+        r.count = 0
+        r.cnt_ok = False
+        r.cnt_notes.append("الملف الأصلي مش موجود")
+        return True
+    if fast:
+        res = _count_fast(r, workdir, progress, stop, max_pages)
+        if res is None:
+            return False
+        if res:
+            return True
+        r.cnt_notes, r.cnt_ok = [], True      # السريع ما نفعش: نكمّل بالدقيق
+    res = _count_accurate(r, workdir, progress, stop, max_pages)
+    return res is not None
+
+
+# ───────────── مقارنة الباتش + حالة الملف + الملاحظات ─────────────
+def batch_manual(r):
+    try:
+        return int(str(r.expected).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def batch_auto(r):
+    return CLOSING_TXN.get(r.order) if r.order != 99 else None
+
+
+def batch_of(r):
+    m = batch_manual(r)
+    return m if m is not None else batch_auto(r)
+
+
+def batch_diff(r):
+    b = batch_of(r)
+    if b is None or r.pending or r.excluded:
+        return None
+    return b - r.count
+
+
+def batch_match(r):
+    """True/False، أو None لو مفيش حاجة نقارنها. لو راجعته يدوي وعلّمته صح يتحسب مطابق."""
+    if r.excluded or r.pending:
+        return None
+    if r.verdict > 0:
+        return True
+    d = batch_diff(r)
+    return None if d is None else d == 0
+
+
+def diff_text(d):
+    return "مطابق ✓" if d == 0 else ("ناقص %d" % d if d > 0 else "زيادة %d" % (-d))
+
+
+def pay_status(r):
+    """(نص، tag للجدول)."""
+    if r.excluded:
+        return "مستبعد", "skip"
+    if r.pending:
+        return "لسه ما اتعدّش", "skip"
+    if r.verdict > 0:
+        return "اتراجع: صح", "ok"
+    if r.ok:
+        return "سليم", "ok"
+    return "محتاج مراجعة", "warn"
+
+
+def pay_summary(r):
+    if r.excluded:
+        return "مستبعد (علامة غلط)"
+    if r.pending:
+        return "لسه ما اتعدّش (دوس ② عدّ الإيصالات)"
+    s = "عدد المعاملات: %d" % r.count
+    b, d = batch_of(r), batch_diff(r)
+    if b is not None and d is not None:
+        tag = " (يدوي)" if batch_manual(r) is not None else " (من التقفيل)"
+        res = "راجعته يدوي: صح ✓" if (r.verdict > 0 and d != 0) else diff_text(d)
+        s += "\nالباتش: %d%s • الفعلي: %d • %s" % (b, tag, r.count, res)
+    return s
+
+
+def missing_machines(results):
+    got = set(r.order for r in results if not r.excluded and r.order != 99)
+    return ["%d %s" % (n, TERMINALS[NUM_TO_TID[n]].unit) for n in range(1, 20) if n not in got]
+
+
+# (key, severity 2=لازم تراجع 1=انتبه 0=معلومة, عنوان، السبب، الحل)
+NOTE_KINDS = [
+    ("seq", 2, "العدد مش مطابق لتسلسل الإيصالات",
+     "أرقام الإيصالات (RRN) متتالية، فالعدد المتوقع هو من أول رقم لآخر رقم. العدد اللي اتعدّ مختلف عنه، يعني غالباً فيه إيصال ناقص في الملف أو البرنامج ما قراش إيصال.",
+     "افتح الملف وراجع الأرقام اللي مش لاقيها، وسجّل العدد الصح في خانة \"الصح\" لو اتأكدت."),
+    ("otherday", 2, "فيه إيصالات من يوم تاني",
+     "تاريخ بعض الإيصالات مختلف عن يوم باقي الملف، فممكن تكون اتضافت بالغلط أو الملف فيه أكتر من يوم.",
+     "راجع التواريخ المذكورة، ولو الملف مش بتاع اليوم علّمه غلط ✗."),
+    ("machconf", 2, "تعارض في رقم الماكينة",
+     "اسم الملف اتحدد لماكينة، لكن الإيصالات جواه بتقول إنها ماكينة تانية.",
+     "استخدم \"تحديد/تعديل\" واختار الماكينة الصح."),
+    ("readfail", 2, "فشل في قراءة صفحات",
+     "البرنامج ما قدرش يقرا صفحة أو أكتر، فالعدد ممكن يكون ناقص.",
+     "اختار الملف ودوس \"إعادة عد\". لو اتكرر راجع الملف بنفسك."),
+    ("emptypages", 1, "صفحات من غير إيصالات",
+     "فيه صفحات في الملف البرنامج ما لقاش فيها أي إيصال (ممكن تكون صفحة فاضية أو صورة مش واضحة).",
+     "افتح الصفحات المذكورة وتأكد إنها فعلاً فاضية."),
+    ("methoddiff", 1, "تضارب بين طريقتين للعد",
+     "البرنامج بيعد بطريقتين للتأكد، وفي صفحات معينة النتيجة اختلفت.",
+     "راجع الصفحات المذكورة لو العدد مهم ليك."),
+    ("nonpay", 0, "مستند إقفال أو ملخص",
+     "الملف فيه إيصال إقفال أو ملخص أو إعادة طباعة. البرنامج تجاهله ومش محسوب في العدد.",
+     "مفيش حاجة مطلوبة، ده طبيعي."),
+    ("nofile", 2, "الملف الأصلي مش موجود",
+     "الملف اتمسح أو اتنقل من مكانه، فالبرنامج مش قادر يعدّه.",
+     "رجّع الملف مكانه أو اعمل فحص من جديد."),
+    ("datefail", 1, "التاريخ مش واضح",
+     "البرنامج ما قدرش يقرا تاريخ اليوم من الملف.",
+     "افتح الملف وتأكد من التاريخ بنفسك."),
+    ("namefail", 2, "فشلت التسمية",
+     "البرنامج ما قدرش يتعرف على الماكينة فمسمّاش الملف.",
+     "استخدم \"تحديد/تعديل\" واختار الماكينة."),
+    ("idweak", 2, "الماكينة مش مؤكدة",
+     "رقم الماكينة (Terminal ID) ما اتقراش بوضوح، فالبرنامج خمّن الماكينة من بيانات تانية أو لقاها في أكتر من ملف.",
+     "اتأكد من الماكينة، ولو غلط استخدم \"تحديد/تعديل\"."),
+    ("other", 1, "ملاحظة تانية", "ملاحظة من البرنامج مش متصنفة.", "اقراها وقرر لو محتاجة مراجعة."),
+]
+_NOTE_RULES = [
+    (re.compile(r"^العدد \d+ بس التسلسل"), "seq"),
+    (re.compile(r"مش تبع نفس اليوم"), "otherday"),
+    (re.compile(r"العد لقى ماكينة"), "machconf"),
+    (re.compile(r"صفحة فشلت قراءتها|فشل العد|العد وقف"), "readfail"),
+    (re.compile(r"صفحات ما لقيتش فيها إيصالات"), "emptypages"),
+    (re.compile(r"الطريقتين اختلفوا"), "methoddiff"),
+    (re.compile(r"إقفال/ملخص"), "nonpay"),
+    (re.compile(r"الملف الأصلي مش موجود"), "nofile"),
+    (re.compile(r"مش قادر أعرف التاريخ"), "datefail"),
+    (re.compile(r"فشل التسمية|فشل التعريف|فشل النسخ"), "namefail"),
+    (re.compile(r"Terminal ID|مش واضح|مش قادر أعرف الماكينة|نفس الماكينة|اتعرفت كمان|الوحدة اتحددت|نفس ماكينة"), "idweak"),
+]
+
+
+def note_kind(n):
+    """يرجّع (key, severity, عنوان, سبب, حل) للملاحظة."""
+    for rx, key in _NOTE_RULES:
+        if rx.search(n):
+            return next(k for k in NOTE_KINDS if k[0] == key)
+    return NOTE_KINDS[-1]
+
+
+# ───────────────────────── التقفيل: عناصر + ترقيم + مخرجات ─────────────────────────
+class Item:
+    def __init__(self, label, image):
+        self.label = label          # اسم العرض (ملف / ملف pdf صفحة n)
+        self.image = image          # PIL بعد تصحيح الاتجاه
+        self.crop = None
+        self.tid = None
+        self.order = None
+        self.row = None
+        self.unit = None
+        self.amount = 0.0
+        self.date = None
+        self.ok = False
+        self.how = "none"
+        self.batches = []
+        self.suffix = None
+        self.orig_tid = None
+        self.conflict = False
+        self.skip = False
+        self.alt = None
+        self.key = ""
+        self.path = None
+        self.txn = None             # عدد معاملات الباتش من إيصال الإقفال
+
+    @property
+    def needs_review(self):
+        return (self.amount <= 0 or self.row is None or not self.ok or self.alt is not None
+                or self.how in ("auto-number", "conflict"))
+
+
+def _item_reset(self):
+    self.tid, self.order, self.row, self.unit, self.how = self.det
+    self.suffix = self.orig_tid = None
+    self.conflict = self.skip = False
+
+
+Item.reset = _item_reset
+Item.det = (None, None, None, None, "none")
+
+
+def renumber(raw_items):
+    """يعيد الترقيم والتكرار بعد أي تعديل يدوي. يرجّع (kept, warnings)."""
+    for r in raw_items:
+        r.reset()
+    warns = []
+    return assign_numbers(raw_items, warns), warns
+
+
+def same_day(a, b):
+    return a.date is None or b.date is None or a.date == b.date
+
+
+def assign_numbers(raw, warnings):
+    """المرحلة 2: التكرار وترقيم الماكينات (منقولة من نسخة الموبايل)."""
+    prio = {"manual": 0, "terminal": 0, "fuzzy": 1}
+    with_tid = [r for r in raw if r.tid is not None]
+    with_tid.sort(key=lambda r: (prio.get(r.how, 3), raw.index(r)))
+    taken = {}
+    for r in with_tid:
+        n = r.order
+        prev = taken.get(n)
+        if prev is None:
+            taken[n] = r
+        elif r.amount > 0 and abs(prev.amount - r.amount) < 0.005 and same_day(prev, r):
+            r.skip = True
+            warnings.append("%s: نفس الماكينة %s ونفس المبلغ %.2f (إيصال مكرر) - تم استبعاده" % (r.label, n, r.amount))
+        else:
+            r.orig_tid, r.tid, r.conflict = r.tid, None, True
+    used = set()
+
+    def give_suffix(r):
+        k = 2
+        while (r.orig_tid, k) in used:
+            k += 1
+        used.add((r.orig_tid, k))
+        r.tid, r.suffix, r.how = r.orig_tid, k, "extra-batch"
+
+    for r in raw:
+        if r.skip or r.tid is not None or r.row is None:
+            continue
+        if r.conflict and r.how in ("terminal", "fuzzy"):
+            give_suffix(r)
+            continue
+        free = [n for n in range(1, 20) if TERMINALS[NUM_TO_TID[n]].row == r.row and n not in taken]
+        if free:
+            n = free[0]
+            t = NUM_TO_TID[n]
+            r.tid, r.order, r.unit = t, n, TERMINALS[t].unit
+            taken[n] = r
+            r.how = "conflict" if r.conflict else "auto-number"
+        elif r.orig_tid is not None:
+            give_suffix(r)
+    kept = [r for r in raw if not r.skip]
+    votes = Counter(r.date for r in kept if r.date)
+    main = votes.most_common(1)[0][0] if votes else None
+    for r in kept:
+        nm = r.label
+        if main and r.date and r.date != main:
+            warnings.append("%s: تاريخ الإيصال %s بينما أغلب الإيصالات %s" % (nm, r.date, main))
+        if r.row is not None and r.amount > 0:
+            if not r.ok:
+                warnings.append("%s: %s = %.2f (راجع المبلغ يدوياً)" % (nm, r.unit, r.amount))
+            if r.alt is not None:
+                warnings.append("%s: القراءة التانية للمبلغ %.2f مختلفة عن %.2f - راجع الصورة" % (nm, r.alt, r.amount))
+            if r.how == "extra-batch":
+                warnings.append("%s: الماكينة %s ظهرت بمبلغ مختلف - اتحسبت كباتش إضافي %s" % (nm, r.order, r.suffix))
+            elif r.how in ("auto-number", "conflict"):
+                warnings.append("%s: رقم الماكينة اتحدد تلقائياً (%s) - اتأكد منه" % (nm, r.order))
+            elif r.how not in ("terminal", "fuzzy", "manual"):
+                warnings.append("%s: الوحدة اتحددت بالاسم/الميرشانت فقط" % nm)
+        else:
+            warnings.append("%s: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل" % nm)
+    try:
+        publish_closing_txn(kept)      # عدد معاملات الباتش لكل ماكينة (تقارنه إيصالات الدفع)
+    except Exception:
+        pass
+    return kept
+
+
+def main_date_of(items):
+    c = Counter(r.date for r in items if r.date)
+    return c.most_common(1)[0][0] if c else datetime.date.today().strftime("%d.%m")
+
+
+# ───────────── ملء قالب الإكسيل مباشرة في XML (من غير ما نبوّظ التنسيق) ─────────────
+_CELL_RE = re.compile(r"<c\b[^>]*?/>|<c\b[^>]*?>.*?</c>", re.S)
+
+
+def _col_num(c):
+    n = 0
+    for ch in c:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _find_row(xml, row):
+    return re.search(r'<row\b[^>]*\br="%d"[^>]*?(?:/>|>.*?</row>)' % row, xml, re.S)
+
+
+def _read_num(xml, col, row):
+    rm = _find_row(xml, row)
+    if not rm:
+        return 0.0
+    for m in _CELL_RE.finditer(rm.group(0)):
+        cell = m.group(0)
+        op = re.search(r"<c\b[^>]*?>", cell).group(0)
+        r = re.search(r'\br="([A-Z]+)\d+"', op)
+        if not r or r.group(1) != col:
+            continue
+        t = re.search(r'\bt="([^"]+)"', op)
+        if t and t.group(1) != "n":
+            return 0.0
+        v = re.search(r"<v>([^<]*)</v>", cell)
+        try:
+            return float(v.group(1)) if v else 0.0
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _set_cell(xml, col, row, build):
+    rm = _find_row(xml, row)
+    if not rm:
+        raise Exception("row %d missing" % row)
+    row_xml = rm.group(0)
+    ref = "%s%d" % (col, row)
+    target = _col_num(col)
+    existing = before = None
+    for m in _CELL_RE.finditer(row_xml):
+        cell = m.group(0)
+        op = re.search(r"<c\b[^>]*?>", cell).group(0)
+        r = re.search(r'\br="([A-Z]+)\d+"', op)
+        if not r:
+            continue
+        cn = _col_num(r.group(1))
+        if cn == target:
+            existing = m
+            break
+        if cn > target and before is None:
+            before = m
+    style = formula = None
+    if existing:
+        cell = existing.group(0)
+        op = re.search(r"<c\b[^>]*?>", cell).group(0)
+        s = re.search(r'\bs="(\d+)"', op)
+        style = s.group(1) if s else None
+        f = re.search(r"<f\b[^>]*?(?:/>|>.*?</f>)", cell, re.S)
+        formula = f.group(0) if f else None
+    new_cell = build(ref, style, formula)
+    if existing:
+        row_xml = row_xml[:existing.start()] + new_cell + row_xml[existing.end():]
+    elif before:
+        row_xml = row_xml[:before.start()] + new_cell + row_xml[before.start():]
+    elif row_xml.endswith("/>"):
+        row_xml = row_xml[:-2] + ">" + new_cell + "</row>"
+    else:
+        i = row_xml.rfind("</row>")
+        row_xml = row_xml[:i] + new_cell + row_xml[i:]
+    return xml[:rm.start()] + row_xml + xml[rm.end():]
+
+
+def _first_sheet_path(z):
+    names = z.namelist()
+    try:
+        wb = z.read("xl/workbook.xml").decode("utf-8", "ignore")
+        rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", "ignore")
+        sm = re.search(r'<sheet\b[^>]*?r:id="([^"]+)"', wb)
+        if sm:
+            for m in re.finditer(r"<Relationship\b[^>]*>", rels):
+                tag = m.group(0)
+                if 'Id="%s"' % sm.group(1) in tag:
+                    t = re.search(r'Target="([^"]+)"', tag)
+                    if t:
+                        tg = t.group(1)
+                        return tg[1:] if tg.startswith("/") else "xl/" + tg
+    except KeyError:
+        pass
+    return "xl/worksheets/sheet1.xml" if "xl/worksheets/sheet1.xml" in names else names[0]
+
+
+def fill_template(template_path, out_path, totals):
+    with zipfile.ZipFile(template_path) as zin:
+        sheet = _first_sheet_path(zin)
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            found = False
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename == sheet:
+                    found = True
+                    xml = data.decode("utf-8", "ignore")
+                    for r in range(2, 12):
+                        tot = round2(totals.get(r, 0.0))
+                        xml = _set_cell(xml, "D", r, lambda ref, st, f0, tot=tot:
+                                        '<c r="%s"%s><v>%s</v></c>' % (ref, ' s="%s"' % st if st else "", tot))
+                        cash = _read_num(xml, "E", r)
+                        total = round2(tot + cash)
+                        xml = _set_cell(xml, "F", r, lambda ref, st, f0, r=r, total=total:
+                                        '<c r="%s"%s>%s<v>%s</v></c>' % (
+                                            ref, ' s="%s"' % st if st else "",
+                                            f0 or "<f>D%d+IF(ISBLANK(E%d),0,E%d)</f>" % (r, r, r), total))
+                    data = xml.encode("utf-8")
+                zout.writestr(info, data)
+            if not found:
+                raise Exception("sheet not found: " + sheet)
+
+
+def simple_workbook(out_path, totals):
+    """لو مفيش قالب: إكسيل بسيط بنفس ترتيب الصفوف (A اسم الوحدة، D المبلغ، E كاش، F الإجمالي)."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.sheet_view.rightToLeft = True
+    for c, h in zip("ABCDEF", ["الوحدة", "", "", "مبلغ الماكينات", "كاش", "الإجمالي"]):
+        ws[c + "1"] = h
+    for r in range(2, 12):
+        ws["A%d" % r] = ROW_NAMES.get(r, "")
+        ws["D%d" % r] = round2(totals.get(r, 0.0))
+        ws["F%d" % r] = "=D%d+IF(ISBLANK(E%d),0,E%d)" % (r, r, r)
+    ws["A12"] = "الإجمالي"
+    ws["D12"] = "=SUM(D2:D11)"
+    ws["E12"] = "=SUM(E2:E11)"
+    ws["F12"] = "=SUM(F2:F11)"
+    wb.save(out_path)
+
+
+def find_template(extra_dirs=()):
+    """قالب الإكسيل: الاسم المضبوط 'الاسكندريه 00.xlsx' الأول، وبعده أي ملف اسمه بينتهي بـ 00.xlsx."""
+    dirs = [d for d in list(extra_dirs) + [BASE_DIR, BUNDLE_DIR] if d and os.path.isdir(d)]
+    for d in dirs:
+        exact = os.path.join(d, "الاسكندريه 00.xlsx")
+        if os.path.exists(exact):
+            return exact
+    for d in dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except Exception:
+            continue
+        for f in names:
+            if f.lower().endswith("00.xlsx") and not f.startswith(("~", ".")):
+                return os.path.join(d, f)
+    return None
+
+
+def build_closing_outputs(items, out_dir, template=None, report_date=None, progress=None):
+    """يكتب: raw_images/N.jpg، PDF مجمّع لكل يوم، الإكسيل، وتقرير نصي. يرجّع dict بالمسارات."""
+    os.makedirs(out_dir, exist_ok=True)
+    raw_dir = os.path.join(out_dir, "raw_images")
+    shutil.rmtree(raw_dir, ignore_errors=True)
+    os.makedirs(raw_dir, exist_ok=True)
+    report_date = report_date or main_date_of(items)
+    items = sorted([i for i in items if not i.skip],
+                   key=lambda r: ((r.order or 99), (r.suffix or 1)))
+    for r in items:
+        if r.order is None:
+            nm = "x_%s" % re.sub(r"[^\w\-]+", "_", r.label)[:40]
+        else:
+            nm = "%d%s" % (r.order, "_%d" % r.suffix if r.suffix else "")
+        r.path = os.path.join(raw_dir, nm + ".jpg")
+        r.image.save(r.path, quality=92)
+    main_items = [r for r in items if r.date is None or r.date == report_date]
+    other = {}
+    for r in items:
+        if r.date is not None and r.date != report_date:
+            other.setdefault(r.date, []).append(r)
+
+    def build_pdf(lst, path):
+        pages = []
+        for r in lst:
+            try:
+                crop = r.crop if r.crop is not None else scan_receipt(r.image)[0]
+            except Exception:
+                crop = r.image
+            r.crop = crop
+            W, H = 1240, 1754
+            page = Image.new("RGB", (W, H), "white")
+            c = crop.copy()
+            c.thumbnail((W - 80, H - 80))
+            page.paste(c, ((W - c.width) // 2, (H - c.height) // 2))
+            pages.append(page)
+        if not pages:
+            return False
+        pages[0].save(path, "PDF", save_all=True, append_images=pages[1:], resolution=150.0)
+        return True
+
+    res = {"report_date": report_date, "pdf": None, "extra_pdfs": [], "xlsx": None, "report": None}
+    rd = report_date.replace(".", ".")
+    pdf_path = os.path.join(out_dir, "الاسكندريه %s.pdf" % rd)
+    if build_pdf(main_items, pdf_path):
+        res["pdf"] = pdf_path
+    for d, lst in other.items():
+        p = os.path.join(out_dir, "الاسكندريه %s.pdf" % d)
+        if build_pdf(lst, p):
+            res["extra_pdfs"].append(p)
+    totals = {r: 0.0 for r in range(2, 12)}
+    for r in main_items:
+        if r.row is not None and r.amount > 0:
+            totals[r.row] = totals.get(r.row, 0.0) + r.amount
+    xlsx = os.path.join(out_dir, "الاسكندريه %s.xlsx" % rd)
+    try:
+        if template and os.path.exists(template):
+            fill_template(template, xlsx, totals)
+        else:
+            simple_workbook(xlsx, totals)
+        res["xlsx"] = xlsx
+    except Exception as e:  # pragma: no cover
+        res["xlsx_error"] = str(e)
+    found = {r.order for r in main_items if r.amount > 0 and r.order}
+    res["missing"] = [i for i in range(1, 20) if i not in found]
+    res["totals"] = totals
+    lines = ["تقرير التقفيل - %s" % rd, "=" * 40]
+    for r in main_items:
+        lines.append("%s | %s | %s | %.2f %s" % (
+            r.order or "-", unit_label(r.tid, r.unit), r.label, r.amount, "" if r.ok else "(راجع)"))
+    lines.append("-" * 40)
+    for row in range(2, 12):
+        lines.append("%s: %.2f" % (ROW_NAMES[row], totals.get(row, 0.0)))
+    lines.append("الإجمالي: %.2f" % sum(totals.values()))
+    if res["missing"]:
+        lines.append("ماكينات ما ظهرش لها باتش: " + "، ".join(str(i) for i in res["missing"]))
+    rp = os.path.join(out_dir, "تقرير التقفيل %s.txt" % rd)
+    with open(rp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    res["report"] = rp
+    return res
+
+
+def expand_sources(paths, recursive=False):
+    """أي مجموعة مسارات (ملفات أو مجلدات) -> (صور، PDFs). من غير أي افتراض عن الأسماء أو الترتيب."""
+    imgs, pdfs = [], []
+
+    def add(p):
+        low = p.lower()
+        if os.path.basename(p).startswith(("."," ")):
+            return
+        if low.endswith(".pdf"):
+            pdfs.append(p)
+        elif low.endswith(IMG_EXT):
+            imgs.append(p)
+
+    for p in paths:
+        if os.path.isdir(p):
+            if recursive:
+                for dp, _dn, fns in os.walk(p):
+                    for f in fns:
+                        add(os.path.join(dp, f))
+            else:
+                for f in os.listdir(p):
+                    fp = os.path.join(p, f)
+                    if os.path.isfile(fp):
+                        add(fp)
+        elif os.path.isfile(p):
+            add(p)
+    return sorted(set(imgs)), sorted(set(pdfs))
+
+
+def process_closing(img_paths, pdf_paths, workdir, progress=None, stop=lambda: False, fixes=None):
+    """يقرا كل الصور وصفحات الـ PDF ويرجّع (items, excluded_payment, warnings)."""
+    fixes = fixes or {}
+    ok, msg = ocr_ready()
+    if not ok:
+        raise OcrUnavailable(msg)
+    todo = []     # (label, key, loader)
+    for p in img_paths:
+        todo.append(("%s" % os.path.basename(p), "%s:%d" % (os.path.basename(p), os.path.getsize(p)),
+                     (lambda p=p: load_image(p))))
+    for pdf in pdf_paths:
+        if stop():
+            break
+        if progress:
+            progress(0.0, "تحويل صفحات: %s" % os.path.basename(pdf))
+        pages = pdf_to_images(pdf, os.path.join(workdir, "pdf"), dpi=220)
+        for i, pg in enumerate(pages, 1):
+            todo.append(("%s (ص%d)" % (os.path.basename(pdf), i), "%s:p%d:%d" % (
+                os.path.basename(pdf), i, os.path.getsize(pdf)), (lambda pg=pg: load_image(pg))))
+    raw, excluded, warnings = [], [], []
+    for n, (label, key, loader) in enumerate(todo):
+        if stop():
+            break
+        if progress:
+            progress(n / float(max(1, len(todo))) * 0.9, "قراءة %d من %d: %s" % (n + 1, len(todo), label))
+        try:
+            res = analyze_image(loader())
+        except OcrUnavailable:
+            raise
+        except Exception as e:
+            warnings.append("%s: فشلت القراءة (%s)" % (label, e))
+            continue
+        if res["kind"] == "payment":
+            excluded.append(label)
+            continue
+        if res["kind"] != "batch":
+            continue
+        a = res["analysis"]
+        it = Item(label, res["image"])
+        it.crop = res.get("crop")
+        it.key = key
+        it.tid, it.row, it.unit, it.how = a.tid, a.row, a.unit, a.how
+        it.order = TERMINALS[a.tid].order if a.tid else None
+        it.amount, it.date, it.ok, it.batches, it.alt = a.val, a.date, a.ok, a.batches, res["alt"]
+        it.txn = getattr(a, "txn", None)
+        fx = fixes.get(key)
+        if isinstance(fx, dict):
+            v, ft = fx.get("val"), fx.get("tid")
+            if isinstance(v, (int, float)) and v > 0:
+                it.amount, it.batches = round2(v), [round2(v)]
+            if ft in TERMINALS:
+                info = TERMINALS[ft]
+                it.tid, it.order, it.row, it.unit = ft, info.order, info.row, info.unit
+            it.ok, it.alt, it.how = True, None, "manual"
+        it.det = (it.tid, it.order, it.row, it.unit, it.how)
+        raw.append(it)
+    if excluded:
+        warnings.append("اتجاهلت %d صورة إيصال دفع أو مستند (مش باتش كلوز): %s%s" % (
+            len(excluded), "، ".join(excluded[:8]), " ..." if len(excluded) > 8 else ""))
+    kept = assign_numbers(raw, warnings) if raw else []
+    return kept, excluded, warnings, raw
+
+
+# ───────────────────────── تشغيل من سطر الأوامر للاختبار ─────────────────────────
+if __name__ == "__main__":  # pragma: no cover
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "closing":
+        imgs, pdfs = expand_sources(sys.argv[2:])
+        wd = tempfile.mkdtemp()
+        items, ex, warns, _raw = process_closing(imgs, pdfs, wd, progress=lambda f, m: print("..", m))
+        for r in items:
+            print(r.label, "| tid", r.tid, "| order", r.order, "| amount", r.amount, "| ok", r.ok,
+                  "| alt", r.alt, "| how", r.how, "| date", r.date, "| batches", r.batches)
+        print("excluded:", ex)
+        print("warnings:", warns)
+    elif cmd == "payments":
+        wd = tempfile.mkdtemp()
+        for p in sys.argv[2:]:
+            r = identify_payment_pdf(p, wd, progress=lambda m: print("..", m))
+            count_payment_pdf(r, wd, progress=lambda m: print("..", m))
+            print(r.name, "pages", r.pages, "count", r.count, "tid", r.tid, "votes", r.votes, "day", r.day, r.month,
+                  "seq", r.seq_min, r.seq_max, "missing", len(r.seq_missing), "ok", r.ok)
+            if r.tid:
+                print("name:", machine_new_name(TERMINALS[r.tid], r.day or "?", r.month or "?"))
+            print("notes:", r.notes)
+'''
+
+_A2R_POS_TOOLS_SRC = r'''# -*- coding: utf-8 -*-
+"""
+A2R POS Tools  (v4.50)
+زرّين للمشرف فقط: "التقفيل" و"إيصالات الدفع".
+- كل زر بيطلب باسورد مستقل (مختلف عن باسورد المشرف) في كل مرة.
+- مفيش واتساب: كل مرة بتختار مجلد أو ملفات (صور / PDF) مرتبة أو مش مرتبة.
+"""
+import os
+import sys
+import re
+import json
+import time
+import hmac
+import queue
+import shutil
+import hashlib
+import logging
+import tempfile
+import threading
+import datetime
+import subprocess
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+import customtkinter as ctk
+
+import a2r_pos_engine as E
+
+TOOLS_VERSION = "v60"
+
+# باسورد الفكرتين: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مش نص صريح، ومنفصل تماماً عن باسورد المشرف.
+_PW_SALT = "684cb086e29d8d07046fc249108085fc"
+_PW_HASH = "0e8d736a1037c8dc5297dd2be3bba6af0793f7a98ebe0cabc578d8d6ce89fe48"
+_PW_ITER = 200000
+
+_FAILS = 0
+_LOCKS = 0
+_LOCKED_UNTIL = 0.0
+
+
+def verify_pos_password(pw):
+    """حساس لحالة الحروف (من غير lower/strip)."""
+    h = hashlib.pbkdf2_hmac("sha256", (pw or "").encode("utf-8"), _PW_SALT.encode("utf-8"), _PW_ITER).hex()
+    return hmac.compare_digest(h, _PW_HASH)
+
+
+def _lock_remaining():
+    return max(0, int(_LOCKED_UNTIL - time.time() + 0.999))
+
+
+def _register_fail():
+    global _FAILS, _LOCKS, _LOCKED_UNTIL
+    _FAILS += 1
+    try:
+        logging.warning("POS tools: wrong password attempt #%d", _FAILS)
+    except Exception:
+        pass
+    if _FAILS >= 3:
+        _FAILS = 0
+        _LOCKS += 1
+        _LOCKED_UNTIL = time.time() + min(600, 30 * (2 ** (_LOCKS - 1)))
+
+
+def _register_ok():
+    global _FAILS, _LOCKS, _LOCKED_UNTIL
+    _FAILS = _LOCKS = 0
+    _LOCKED_UNTIL = 0.0
+
+
+# ───────────────────────── ثيم وأدوات مساعدة ─────────────────────────
+_DEFAULT = {"bg": "#080E17", "card": "#121E2E", "border": "#1E2E42", "input": "#0A131F", "text": "#FFFFFF",
+            "muted": "#8FA3B8", "primary": "#0284C7", "hover": "#0369A1", "success": "#10B981",
+            "danger": "#EF4444", "warning": "#F59E0B", "accent": "#38BDF8"}
+
+
+def _theme(parent):
+    t = dict(_DEFAULT)
+    try:
+        main = sys.modules.get("__main__")
+        themes = getattr(main, "THEMES", None)
+        cur = themes.get(getattr(parent, "current_theme_name", ""), None) if themes else None
+        if cur:
+            t.update({"bg": cur["bg"], "card": cur["card"], "border": cur["border"], "input": cur["input"],
+                      "text": cur["text"], "muted": cur["text_muted"], "primary": cur["primary"],
+                      "hover": cur["primary_hover"], "success": cur["success"], "danger": cur["danger"],
+                      "warning": cur["warning"], "accent": cur["accent"]})
+    except Exception:
+        pass
+    return t
+
+
+def _font():
+    return getattr(sys.modules.get("__main__"), "FONT_FAMILY", "Segoe UI")
+
+
+# ألوان الأزرار: غامقة عشان الكتابة البيضا تبان (الأخضر الفسفوري كان بيخفي الكلام)
+_GREEN, _GREEN_H = "#15803D", "#166534"
+_AMBER, _AMBER_H = "#B45309", "#92400E"
+_SLATE, _SLATE_H = "#334155", "#1E293B"
+
+
+def _icon(win):
+    try:
+        f = getattr(sys.modules.get("__main__"), "set_window_icon_safe", None)
+        if f:
+            f(win)
+    except Exception:
+        pass
+
+
+def _documents_dir():
+    d = getattr(sys.modules.get("__main__"), "DOCUMENTS_DIR", None)
+    if not d:
+        d = os.path.join(os.path.expanduser("~"), "Documents", "A2R_Reports")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _appdata_dir():
+    d = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "A2R")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _open_path(p):
+    try:
+        if not p or not os.path.exists(p):
+            messagebox.showinfo("A2R", "الملف أو المكان ده مش موجود.")
+            return
+        if sys.platform == "win32":
+            os.startfile(p)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", p])
+        else:
+            subprocess.Popen(["xdg-open", p])
+    except Exception as e:
+        messagebox.showerror("A2R", str(e))
+
+
+def _lang():
+    return getattr(sys.modules.get("__main__"), "CURRENT_LANG", "en")
+
+
+def _L(ar, en):
+    return ar if _lang() == "ar" else en
+
+
+def _settings_path():
+    return os.path.join(_appdata_dir(), "pos_settings.json")
+
+
+def _load_settings():
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_setting(k, v):
+    try:
+        d = _load_settings()
+        d[k] = v
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def _reveal(p):
+    """يفتح مكان الملف في الإكسبلورر ويحدد الملف (أو يفتح الفولدر لو الملف مش موجود)."""
+    try:
+        if p and os.path.isfile(p) and sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select," + os.path.normpath(p)])
+        elif p and os.path.isdir(p):
+            _open_path(p)
+        elif p and os.path.isdir(os.path.dirname(p)):
+            _open_path(os.path.dirname(p))
+        else:
+            messagebox.showinfo("A2R", "المكان ده لسه مش موجود.")
+    except Exception as e:
+        messagebox.showerror("A2R", str(e))
+
+
+def _newest(folder, ext):
+    try:
+        c = [os.path.join(folder, f) for f in os.listdir(folder)
+             if f.lower().endswith(ext) and not f.startswith("~")]
+        return max(c, key=os.path.getmtime) if c else None
+    except Exception:
+        return None
+
+
+def _fixes_path():
+    return os.path.join(_appdata_dir(), "pos_fixes.json")
+
+
+def _load_fixes():
+    try:
+        with open(_fixes_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_fix(key, tid, val):
+    if not key:
+        return
+    d = _load_fixes()
+    d[key] = {"val": val, "tid": tid}
+    try:
+        with open(_fixes_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _terminal_choices():
+    return ["— غير محدد —"] + [E.terminal_label(k) for k, _ in sorted(E.TERMINALS.items(), key=lambda kv: kv[1].order)]
+
+
+def _tid_from_choice(s):
+    m = re.search(r"\((\d{8})\)", s or "")
+    return m.group(1) if m else None
+
+
+def _style_tree(theme):
+    st = ttk.Style()
+    name = "A2RPos.Treeview"
+    st.configure(name, background=theme["card"], fieldbackground=theme["card"], foreground=theme["text"],
+                 rowheight=26, borderwidth=0, font=(_font(), 10))
+    st.configure(name + ".Heading", font=(_font(), 10, "bold"))
+    st.map(name, background=[("selected", theme["primary"])], foreground=[("selected", "#FFFFFF")])
+    return name
+
+
+class _Modal(ctk.CTkToplevel):
+    def __init__(self, parent, title, w, h):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        _icon(self)
+        self.t = _theme(parent)
+        self.configure(fg_color=self.t["bg"])
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry("%dx%d+%d+%d" % (w, h, (sw - w) // 2, (sh - h) // 3))
+        except Exception:
+            pass
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+        self.after(120, self._grab)
+
+    def _grab(self):
+        try:
+            self.grab_set()
+            self.focus_force()
+        except Exception:
+            pass
+
+
+# ───────────────────────── نافذة الباسورد ─────────────────────────
+class PosPasswordDialog(_Modal):
+    def __init__(self, parent, feature_title, on_success):
+        super().__init__(parent, "A2R - صلاحية المشرف", 380, 230)
+        self.on_success = on_success
+        t, F = self.t, _font()
+        ctk.CTkLabel(self, text="🔐 " + feature_title, font=(F, 15, "bold"), text_color=t["accent"]).pack(pady=(14, 2))
+        ctk.CTkLabel(self, text="اكتب كلمة المرور الخاصة بالأدوات", font=(F, 10, "bold"),
+                     text_color=t["muted"]).pack(pady=(0, 8))
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=26)
+        self.e = ctk.CTkEntry(row, show="•", justify="center", font=(F, 13, "bold"), fg_color=t["input"],
+                              border_color=t["border"], text_color=t["text"])
+        self.e.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.e.bind("<Return>", lambda ev: self.check())
+        self._vis = False
+        self.eye = ctk.CTkButton(row, text="👁️", width=36, fg_color=t["card"], text_color=t["text"],
+                                 command=self.toggle)
+        self.eye.pack(side="right")
+        self.err = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["danger"], wraplength=330)
+        self.err.pack(pady=(6, 0))
+        ctk.CTkButton(self, text="فتح", font=(F, 12, "bold"), fg_color=t["primary"], hover_color=t["hover"],
+                      command=self.check).pack(fill="x", padx=26, pady=(8, 4))
+        self.after(200, self.e.focus_set)
+        self._tick()
+
+    def toggle(self):
+        self._vis = not self._vis
+        self.e.configure(show="" if self._vis else "•")
+        self.eye.configure(text="🙈" if self._vis else "👁️")
+
+    def _tick(self):
+        try:
+            rem = _lock_remaining()
+            if rem > 0:
+                self.err.configure(text="تم القفل مؤقتاً بسبب محاولات خاطئة. حاول بعد %d ثانية." % rem)
+                self.after(1000, self._tick)
+        except tk.TclError:
+            pass
+
+    def check(self):
+        rem = _lock_remaining()
+        if rem > 0:
+            self._tick()
+            return
+        if verify_pos_password(self.e.get()):
+            _register_ok()
+            cb = self.on_success
+            self.destroy()
+            cb()
+            return
+        _register_fail()
+        self.e.delete(0, "end")
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+        except Exception:
+            pass
+        rem = _lock_remaining()
+        self.err.configure(text=("كلمة المرور غير صحيحة. اتقفل مؤقتاً %d ثانية." % rem) if rem else
+                           "كلمة المرور غير صحيحة!")
+        if rem:
+            self._tick()
+
+
+# ───────────────────────── عامل خلفي ─────────────────────────
+class _Job:
+    def __init__(self, fn):
+        self.q = queue.Queue()
+        self.stop_ev = threading.Event()
+        self.fn = fn
+        self.th = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        try:
+            self.q.put(("done", self.fn(self)))
+        except E.OcrUnavailable as e:
+            self.q.put(("error", str(e)))
+        except Exception as e:
+            logging.exception("pos job")
+            self.q.put(("error", "%s: %s" % (type(e).__name__, e)))
+
+    def progress(self, frac, text):
+        self.q.put(("progress", frac, text))
+
+    def start(self):
+        self.th.start()
+
+
+class _FeatureWindow(ctk.CTkToplevel):
+    """أساس نافذتي الفكرتين: اختيار المصدر (مجلد أو ملفات) كل مرة، تقدّم، وجدول نتائج."""
+    TITLE = ""
+
+    def __init__(self, parent, w, h):
+        super().__init__(parent)
+        self.parent = parent
+        self.t = _theme(parent)
+        self.F = _font()
+        self.title("A2R - %s  %s" % (self.TITLE, TOOLS_VERSION))
+        _icon(self)
+        self.configure(fg_color=self.t["bg"])
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(w, int(sw * 0.86)), min(h, int(sh * 0.80))
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 4)))
+        self.minsize(720, 460)
+        self.sources = []
+        self.recursive = tk.BooleanVar(value=False)
+        self.job = None
+        self.workdir = tempfile.mkdtemp(prefix="a2r_pos_")
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _close(self):
+        if self.job:
+            self.job.stop_ev.set()
+        shutil.rmtree(self.workdir, ignore_errors=True)
+        self.destroy()
+
+    # --- عناصر مشتركة
+    def _btn(self, parent, text, cmd, color=None, w=None, **kw):
+        t = self.t
+        col, hov = color or t["primary"], t["hover"]
+        if col == t["success"]:          # الأخضر الفسفوري بيتبدل بأخضر غامق عشان الكتابة تبان
+            col, hov = _GREEN, _GREEN_H
+        elif col == t["warning"]:        # نفس الفكرة للأصفر/البرتقالي
+            col, hov = _AMBER, _AMBER_H
+        elif col == t["card"]:           # الأزرار العادية: رمادي-أزرق واضح على الخلفية
+            col, hov = _SLATE, _SLATE_H
+        kw.setdefault("height", 32)
+        return ctk.CTkButton(parent, text=text, command=cmd, font=(self.F, 11, "bold"),
+                             fg_color=col, hover_color=hov, text_color="#FFFFFF",
+                             text_color_disabled="#CBD5E1", width=w or 120, **kw)
+
+    def _build_source_bar(self, parent):
+        t, F = self.t, self.F
+        bar = ctk.CTkFrame(parent, fg_color=t["card"], border_color=t["border"], border_width=1)
+        bar.pack(fill="x", padx=12, pady=(8, 4))
+        r = ctk.CTkFrame(bar, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=6)
+        self._btn(r, "📁 اختيار مجلد", self.pick_folder, w=125).pack(side="right", padx=4)
+        self._btn(r, "🗂️ اختيار ملفات", self.pick_files, w=125).pack(side="right", padx=4)
+        ctk.CTkCheckBox(r, text="يشمل المجلدات الفرعية", variable=self.recursive, font=(F, 10),
+                        text_color=t["text"]).pack(side="right", padx=10)
+        self.lbl_src = ctk.CTkLabel(r, text="لم يتم اختيار مصدر بعد", font=(F, 11, "bold"),
+                                    text_color=t["muted"], anchor="w", justify="left")
+        self.lbl_src.pack(side="left", fill="x", expand=True)
+
+    def _src_summary(self):
+        imgs, pdfs = E.expand_sources(self.sources, self.recursive.get())
+        self._imgs, self._pdfs = imgs, pdfs
+        self.lbl_src.configure(
+            text="%d صورة + %d ملف PDF" % (len(imgs), len(pdfs)) + ("" if (imgs or pdfs) else "  ⚠️ مفيش حاجة مناسبة"),
+            text_color=self.t["success"] if (imgs or pdfs) else self.t["warning"])
+
+    def pick_folder(self):
+        d = filedialog.askdirectory(parent=self, title="اختار المجلد اللي فيه الصور أو ملفات PDF")
+        if d:
+            self.sources = [d]
+            self._src_summary()
+
+    def pick_files(self):
+        fs = filedialog.askopenfilenames(
+            parent=self, title="اختار صور أو ملفات PDF",
+            filetypes=[("صور و PDF", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf"),
+                       ("صور", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff"), ("PDF", "*.pdf"),
+                       ("كل الملفات", "*.*")])
+        if fs:
+            self.sources = list(fs)
+            self._src_summary()
+
+    def _build_progress(self, parent):
+        t, F = self.t, self.F
+        fr = ctk.CTkFrame(parent, fg_color="transparent")
+        fr.pack(fill="x", padx=12, pady=2)
+        self.btn_start = self._btn(fr, "▶ بدء القراءة", self.start, color=t["success"], w=130)
+        self.btn_start.pack(side="right", padx=4)
+        self.btn_stop = self._btn(fr, "⏹ إيقاف", self.stop, color=t["danger"], w=85, state="disabled")
+        self.btn_stop.pack(side="right", padx=4)
+        self.bar = ctk.CTkProgressBar(fr, progress_color=t["accent"])
+        self.bar.set(0)
+        self.bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.lbl_status = ctk.CTkLabel(parent, text="", font=(F, 10, "bold"), text_color=t["muted"], anchor="w",
+                                       justify="left", wraplength=700)
+        self.lbl_status.pack(fill="x", padx=14, pady=(0, 2))
+
+    def _tree(self, parent, columns, widths, height=10):
+        name = _style_tree(self.t)
+        fr = ctk.CTkFrame(parent, fg_color="transparent")
+        fr.pack(fill="both", expand=True, padx=12, pady=4)
+        tv = ttk.Treeview(fr, columns=[c for c, _ in columns], show="headings", style=name, height=height,
+                          selectmode="browse")
+        for (cid, title), wd in zip(columns, widths):
+            tv.heading(cid, text=title)
+            tv.column(cid, width=wd, anchor="center", stretch=(cid in ("file", "status", "name")))
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        tv.tag_configure("ok", foreground=self.t["success"])
+        tv.tag_configure("warn", foreground=self.t["warning"])
+        tv.tag_configure("skip", foreground=self.t["muted"])
+        return tv
+
+    def stop(self):
+        if self.job:
+            self.job.stop_ev.set()
+            self.lbl_status.configure(text="جاري الإيقاف بعد العملية الحالية...")
+
+    def _set_busy(self, busy):
+        self.btn_start.configure(state="disabled" if busy else "normal")
+        self.btn_stop.configure(state="normal" if busy else "disabled")
+
+    def _run_job(self, fn, on_done):
+        self._set_busy(True)
+        self.bar.set(0)
+        self.job = _Job(fn)
+        self.job.start()
+        self._poll(on_done)
+
+    def _poll(self, on_done):
+        job = self.job
+        try:
+            while True:
+                m = job.q.get_nowait()
+                if m[0] == "progress":
+                    self.bar.set(max(0.0, min(1.0, m[1])))
+                    self.lbl_status.configure(text=m[2], text_color=self.t["muted"])
+                elif m[0] == "error":
+                    self._set_busy(False)
+                    self.lbl_status.configure(text="⚠️ " + m[1], text_color=self.t["danger"])
+                    messagebox.showerror("A2R", m[1], parent=self)
+                    return
+                else:
+                    self._set_busy(False)
+                    self.bar.set(1)
+                    on_done(m[1])
+                    return
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+        self.after(150, lambda: self._poll(on_done))
+
+    def start(self):
+        raise NotImplementedError
+
+
+# ───────────────────────── التقفيل ─────────────────────────
+class _ReceiptViewer(ctk.CTkToplevel):
+    """نافذة واحدة: عرض الإيصال (زوم بالعجلة أو بالضغط على أي جزء) + تعديل الماكينة والمبلغ."""
+
+    MIN_Z, MAX_Z = 0.1, 8.0
+
+    def __init__(self, parent, item, on_save=None):
+        super().__init__(parent)
+        self.item, self.on_save = item, on_save
+        from PIL import Image as _Img, ImageTk as _ImgTk
+        self._Img, self._ImgTk = _Img, _ImgTk
+        t, F = _theme(parent), _font()
+        self.t = t
+        self.title("A2R - %s" % item.label)
+        _icon(self)
+        self.configure(fg_color=t["bg"])
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        mw, mh = min(760, int(sw * 0.55)), int(sh * 0.86)
+        self.geometry("%dx%d+%d+%d" % (mw, mh, max(0, sw - mw - 40), 30))
+        self.minsize(420, 380)
+        info = "%s  |  %s  |  المبلغ المقروء: %s" % (
+            item.label, E.terminal_label(item.tid) if item.tid else "ماكينة غير محددة",
+            "%.2f" % item.amount if item.amount else "—")
+        info_lbl = ctk.CTkLabel(self, text=info, font=(F, 11, "bold"), text_color=t["accent"], wraplength=mw - 20)
+        info_lbl.pack(pady=(6, 2))
+        self._info_w = mw - 20
+
+        # الصور المتاحة: الإيصال المقصوص + الصورة الكاملة (لو مختلفين)
+        self._srcs = []
+        try:
+            if item.crop is not None:
+                self._srcs.append(("الإيصال", item.crop.copy().convert("RGB")))
+            if item.image is not None and (item.crop is None or item.image.size != item.crop.size):
+                self._srcs.append(("الصورة الكاملة", item.image.copy().convert("RGB")))
+        except Exception:
+            pass
+        self._src_i = 0
+        self._zoom, self._fit, self._ox, self._oy, self._iw, self._ih = 1.0, True, 0, 0, 1, 1
+        self._photo = None
+        self._tot_w = self._tot_h = 1
+
+        tb = ctk.CTkFrame(self, fg_color="transparent")
+        tb.pack(fill="x", padx=8, pady=2)
+        tb.grid_columnconfigure(tuple(range(6)), weight=1, uniform="v")
+
+        def vb(col, text, cmd, color=_SLATE):
+            b = ctk.CTkButton(tb, text=text, command=cmd, height=30, font=(F, 11, "bold"), fg_color=color,
+                              hover_color=_SLATE_H, text_color="#FFFFFF")
+            b.grid(row=0, column=col, padx=2, sticky="ew")
+            return b
+
+        vb(0, "➕ تكبير", lambda: self._step(1.25), "#0369A1")
+        vb(1, "➖ تصغير", lambda: self._step(0.8), "#0369A1")
+        vb(2, "⛶ مناسب", self.fit)
+        vb(3, "1:1 أصلي", lambda: self._set_zoom(1.0))
+        vb(4, "↻ تدوير", self.rotate)
+        self.b_swap = vb(5, "🔀 " + (self._srcs[1][0] if len(self._srcs) > 1 else "—"), self.swap)
+        if len(self._srcs) < 2:
+            self.b_swap.configure(state="disabled")
+        self.lbl_zoom = ctk.CTkLabel(self, text="", font=(F, 10, "bold"), text_color=t["muted"])
+        self.lbl_zoom.pack()
+
+        # --- التعديل (في نفس النافذة)
+        self.lbl_info = info_lbl
+        ed = ctk.CTkFrame(self, fg_color=t["card"], border_color=t["border"], border_width=1)
+        ed.pack(fill="x", padx=8, pady=(2, 4))
+        row = ctk.CTkFrame(ed, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=6)
+        ctk.CTkButton(row, text="💾 حفظ", width=80, height=30, font=(F, 11, "bold"), fg_color=_GREEN,
+                      hover_color=_GREEN_H, text_color="#FFFFFF", command=self._save).pack(side="left", padx=2)
+        self.e_amt = ctk.CTkEntry(row, justify="center", width=100, font=(F, 12, "bold"))
+        self.e_amt.pack(side="right", padx=4)
+        self.e_amt.insert(0, "%.2f" % item.amount if item.amount else "")
+        ctk.CTkLabel(row, text="المبلغ:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
+        self.cb = ttk.Combobox(row, values=_terminal_choices(), state="readonly", width=26, justify="right")
+        self.cb.pack(side="right", padx=4)
+        cur = E.terminal_label(item.tid) if item.tid else "— غير محدد —"
+        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
+        ctk.CTkLabel(row, text="الماكينة:", font=(F, 11, "bold"), text_color=t["text"]).pack(side="right", padx=2)
+        self.e_amt.bind("<Return>", lambda e: self._save())
+        self.lbl_msg = ctk.CTkLabel(ed, text="", font=(F, 10, "bold"), text_color=t["danger"])
+        self.lbl_msg.pack(pady=(0, 4))
+
+        fr = tk.Frame(self, bg=t["bg"])
+        fr.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+        fr.grid_rowconfigure(0, weight=1)
+        fr.grid_columnconfigure(0, weight=1)
+        self.cv = tk.Canvas(fr, bg="#0B1220", highlightthickness=0, cursor="fleur")
+        vs = ttk.Scrollbar(fr, orient="vertical", command=self.cv.yview)
+        hs = ttk.Scrollbar(fr, orient="horizontal", command=self.cv.xview)
+        self.cv.configure(xscrollcommand=hs.set, yscrollcommand=vs.set)
+        self.cv.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        self._img_id = self.cv.create_image(0, 0, anchor="nw")
+
+        self.cv.bind("<Configure>", lambda e: self._on_resize())
+        self._press = None
+        self._moved = False
+        self.cv.bind("<ButtonPress-1>", self._on_press)
+        self.cv.bind("<B1-Motion>", self._on_drag)
+        self.cv.bind("<ButtonRelease-1>", self._on_release)
+        self.cv.bind("<Button-3>", lambda e: self._set_zoom(self._zoom / 1.6, e.x, e.y))
+        self.cv.bind("<MouseWheel>", self._wheel_zoom)          # العجلة = زوم إن / أوت
+        self.cv.bind("<Button-4>", self._wheel_zoom)            # لينكس
+        self.cv.bind("<Button-5>", self._wheel_zoom)
+        self.cv.bind("<Shift-MouseWheel>", lambda e: self.cv.xview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.bind("<KeyPress-plus>", lambda e: self._step(1.25))
+        self.bind("<KeyPress-equal>", lambda e: self._step(1.25))
+        self.bind("<KeyPress-minus>", lambda e: self._step(0.8))
+        self.bind("<Control-Key-0>", lambda e: self.fit())
+        self.lift()
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+        if not self._srcs:
+            ctk.CTkLabel(self, text="مش قادر أعرض الصورة", text_color=t["danger"]).pack(pady=20)
+        self.after(80, self.fit)
+
+    # --- أدوات
+    def _src(self):
+        return self._srcs[self._src_i][1] if self._srcs else None
+
+    def _max_z(self):
+        im = self._src()
+        if im is None:
+            return self.MAX_Z
+        return max(1.0, min(self.MAX_Z, (30e6 / max(1, im.width * im.height)) ** 0.5))
+
+    def _cw(self):
+        return max(50, self.cv.winfo_width())
+
+    def _ch(self):
+        return max(50, self.cv.winfo_height())
+
+    def _on_resize(self):
+        if self._fit:
+            self.fit()
+        else:
+            self._render()
+
+    def fit(self):
+        im = self._src()
+        if im is None:
+            return
+        z = min(self._cw() / im.width, self._ch() / im.height)
+        self._fit = True
+        self._zoom = max(self.MIN_Z, min(self._max_z(), z))
+        self._render()
+
+    def _step(self, f):
+        self._set_zoom(self._zoom * f)
+
+    def _set_zoom(self, z, ax=None, ay=None):
+        im = self._src()
+        if im is None:
+            return
+        z = max(self.MIN_Z, min(self._max_z(), z))
+        ax = self._cw() / 2 if ax is None else ax
+        ay = self._ch() / 2 if ay is None else ay
+        fx = (self.cv.canvasx(ax) - self._ox) / max(1, self._iw)
+        fy = (self.cv.canvasy(ay) - self._oy) / max(1, self._ih)
+        self._fit = False
+        self._zoom = z
+        self._render()
+        tw, th = self._tot_w, self._tot_h
+        nx = self._ox + fx * self._iw - ax
+        ny = self._oy + fy * self._ih - ay
+        self.cv.xview_moveto(max(0.0, nx) / max(1, tw))
+        self.cv.yview_moveto(max(0.0, ny) / max(1, th))
+
+    def _render(self):
+        im = self._src()
+        if im is None:
+            return
+        w, h = max(1, int(im.width * self._zoom)), max(1, int(im.height * self._zoom))
+        try:
+            res = self._Img.LANCZOS if self._zoom < 1 else self._Img.BICUBIC
+            disp = im.resize((w, h), res)
+            self._photo = self._ImgTk.PhotoImage(disp)
+        except Exception:
+            return
+        self._iw, self._ih = w, h
+        self._tot_w, self._tot_h = max(w, self._cw()), max(h, self._ch())
+        self._ox, self._oy = (self._tot_w - w) // 2, (self._tot_h - h) // 2
+        self.cv.itemconfigure(self._img_id, image=self._photo)
+        self.cv.coords(self._img_id, self._ox, self._oy)
+        self.cv.configure(scrollregion=(0, 0, self._tot_w, self._tot_h))
+        self.lbl_zoom.configure(text="التكبير: %d%%   (عجلة الماوس = زوم • اضغط على أي جزء لتكبيره • كليك يمين = تصغير • اسحب للتحريك)"
+                                % round(self._zoom * 100))
+
+    def _on_press(self, e):
+        self._press, self._moved = (e.x, e.y), False
+        self.cv.scan_mark(e.x, e.y)
+
+    def _on_drag(self, e):
+        if self._press and (abs(e.x - self._press[0]) > 4 or abs(e.y - self._press[1]) > 4):
+            self._moved = True
+        if self._moved:
+            self.cv.scan_dragto(e.x, e.y, gain=1)
+
+    def _on_release(self, e):
+        # ضغطة من غير سحب = تكبير الجزء اللي اتضغط عليه
+        if self._press and not self._moved:
+            self._set_zoom(self._zoom * 1.6, e.x, e.y)
+        self._press = None
+
+    def _wheel_zoom(self, e):
+        up = (getattr(e, "delta", 0) > 0) or getattr(e, "num", 0) == 4
+        self._set_zoom(self._zoom * (1.15 if up else 1 / 1.15), e.x, e.y)
+        return "break"
+
+    def _save(self):
+        tid = _tid_from_choice(self.cb.get())
+        try:
+            amt = float(self.e_amt.get().replace(",", "").strip())
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.lbl_msg.configure(text="اكتب مبلغ صحيح أكبر من صفر", text_color=self.t["danger"])
+            return
+        amt = E.round2(amt)
+        if self.on_save:
+            self.on_save(self.item, tid, amt)
+        it = self.item
+        self.lbl_info.configure(text="%s  |  %s  |  المبلغ المقروء: %s" % (
+            it.label, E.terminal_label(it.tid) if it.tid else "ماكينة غير محددة",
+            "%.2f" % it.amount if it.amount else "—"))
+        self.lbl_msg.configure(text="✓ تم الحفظ", text_color=self.t["success"])
+
+    def rotate(self):
+        if not self._srcs:
+            return
+        nm, im = self._srcs[self._src_i]
+        self._srcs[self._src_i] = (nm, im.rotate(-90, expand=True))
+        self.fit()
+
+    def swap(self):
+        if len(self._srcs) > 1:
+            self._src_i = (self._src_i + 1) % len(self._srcs)
+            self.b_swap.configure(text="🔀 " + self._srcs[(self._src_i + 1) % len(self._srcs)][0])
+            self.fit()
+
+
+class ClosingWindow(_FeatureWindow):
+    TITLE = "التقفيل"
+
+    def __init__(self, parent):
+        super().__init__(parent, 780, 520)
+        self.minsize(700, 440)
+        t, F = self.t, self.F
+        self.raw_all, self.kept, self.warnings, self.outputs = [], [], [], None
+        _st = _load_settings()
+        self.out_dir = _st.get("closing_out") or os.path.join(_documents_dir(), "Closing")
+        self.template = _st.get("closing_template") if os.path.exists(_st.get("closing_template") or "") else None
+        ctk.CTkLabel(self, text="📑 التقفيل - قراءة باتشات الماكينات", font=(F, 15, "bold"),
+                     text_color=t["accent"]).pack(pady=(8, 0))
+        self._build_source_bar(self)
+        # سطر معلومات بس (الناتج + القالب) - الأزرار بتاعتهم اتشالت، وفتح مكان الملفات من الشريط اللي تحت
+        self.lbl_out = ctk.CTkLabel(self, text="", font=(F, 9), text_color=t["muted"], anchor="w", justify="left",
+                                    wraplength=720)
+        self.lbl_out.pack(fill="x", padx=16, pady=(0, 2))
+        self._refresh_out_label()
+        self._build_progress(self)
+        # الشريط السفلي والملاحظات الأول (side=bottom) عشان الأزرار ماتختفيش في الشاشات الصغيرة
+        bt = ctk.CTkFrame(self, fg_color="transparent")
+        bt.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
+        self.txt = ctk.CTkTextbox(self, height=70, font=(F, 10), fg_color=t["input"], text_color=t["text"])
+        self.txt.pack(side="bottom", fill="x", padx=12, pady=4)
+        self.txt.configure(state="disabled")
+        cols = [("n", "م"), ("file", "الملف"), ("tid", "الماكينة"), ("unit", "الوحدة"), ("amount", "المبلغ"),
+                ("status", "الحالة")]
+        self.tv = self._tree(self, cols, [40, 190, 90, 110, 85, 230], height=6)
+        self.tv.bind("<Double-1>", lambda e: self.view_selected())
+        # أي صف محتاج تأكيد يدوي يظهر بالأحمر (خلفية حمرا فاتحة + كتابة حمرا غامقة)
+        self.tv.tag_configure("err", foreground="#B91C1C", background="#FDE2E2")
+        self.b_view = self._btn(bt, "🔍 عرض وتعديل", self.view_selected, color=t["warning"], w=10)
+        self.b_rebuild = self._btn(bt, "🔄 إعادة بناء", self.rebuild, w=10)
+        self.b_folder = self._btn(bt, "📂 مكان الملفات", self.show_folder, color=t["card"], w=10)
+        self.b_pdf = self._btn(bt, "📄 فتح الـ PDF", lambda: self._open_out("pdf"), color=t["success"], w=10)
+        self.b_xlsx = self._btn(bt, "📊 فتح الإكسيل", lambda: self._open_out("xlsx"), color=t["success"], w=10)
+        # صف واحد، أعمدة متساوية، مرتبين من اليمين لليسار
+        bt.grid_columnconfigure(tuple(range(5)), weight=1, uniform="cb")
+        for i, b in enumerate((self.b_view, self.b_rebuild, self.b_folder, self.b_pdf, self.b_xlsx)):
+            b.grid(row=0, column=4 - i, padx=3, sticky="ew")
+
+    def _refresh_out_label(self):
+        tpl = self.template or E.find_template([self.out_dir])
+        self._tpl_eff = tpl
+        self.lbl_out.configure(text="الناتج: %s   |   القالب: %s" % (
+            self.out_dir, tpl if tpl else "مش موجود - هيتعمل إكسيل بسيط بنفس الترتيب"))
+
+    def pick_out(self):
+        d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الناتج")
+        if d:
+            self.out_dir = d
+            _save_setting("closing_out", d)
+            self._refresh_out_label()
+
+    def pick_template(self):
+        f = filedialog.askopenfilename(parent=self, title="اختار قالب الإكسيل (الاسكندريه 00.xlsx)",
+                                       filetypes=[("Excel", "*.xlsx")])
+        if f:
+            self.template = f
+            _save_setting("closing_template", f)
+            self._refresh_out_label()
+
+    def _out_file(self, kind):
+        p = (self.outputs or {}).get(kind)
+        if p and os.path.exists(p):
+            return p
+        return _newest(self.out_dir, ".pdf" if kind == "pdf" else ".xlsx")
+
+    def _open_out(self, kind):
+        p = self._out_file(kind)
+        if not p:
+            messagebox.showinfo("A2R", "لسه ما اتعملش ملف. اضغط «بدء القراءة» الأول.", parent=self)
+            return
+        _open_path(p)
+
+    def show_folder(self):
+        """بيفتح فولدر الملفات اللي اتغيّر اسمها بعد التسمية (raw_images: رقم الماكينة.jpg)."""
+        raw = os.path.join(self.out_dir, "raw_images")
+        if os.path.isdir(raw):
+            _open_path(raw)
+        else:
+            messagebox.showinfo("A2R", "لسه ما فيش ملفات متسمّاة. اضغط «بدء القراءة» الأول.", parent=self)
+
+    def view_selected(self):
+        sel = self.tv.selection()
+        item = self._iid.get(sel[0]) if sel and getattr(self, "_iid", None) else None
+        if item is None:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        try:
+            if getattr(self, "_viewer", None) is not None and self._viewer.winfo_exists():
+                self._viewer.destroy()
+        except Exception:
+            pass
+        self._viewer = _ReceiptViewer(self, item, on_save=self.apply_edit)
+
+    # --- التشغيل
+    def start(self):
+        self._src_summary()
+        if not (self._imgs or self._pdfs):
+            messagebox.showwarning("A2R", "اختار مجلد أو ملفات صور / PDF الأول.", parent=self)
+            return
+        ok, msg = E.ocr_ready()
+        if not ok:
+            messagebox.showerror("A2R", msg, parent=self)
+            return
+        imgs, pdfs, out_dir, tpl = self._imgs, self._pdfs, self.out_dir, self._tpl_eff
+        fixes = _load_fixes()
+        wd = self.workdir
+
+        def job(j):
+            kept, excl, warns, raw = E.process_closing(
+                imgs, pdfs, wd, progress=lambda f, m: j.progress(f, m), stop=j.stop_ev.is_set, fixes=fixes)
+            outs = None
+            if kept and not j.stop_ev.is_set():
+                j.progress(0.93, "بناء ملفات الـ PDF والإكسيل...")
+                outs = E.build_closing_outputs(kept, out_dir, tpl)
+            return kept, warns, raw, outs
+
+        self._run_job(job, self._done)
+
+    def _done(self, res):
+        kept, warns, raw, outs = res
+        self.raw_all, self.kept, self.warnings, self.outputs = raw, kept, warns, outs
+        self._fill()
+        if not raw:
+            self.lbl_status.configure(text="مفيش باتشات اتقرت في المصدر ده.", text_color=self.t["warning"])
+        else:
+            self._status_after_build()
+
+    def _status_after_build(self):
+        o = self.outputs or {}
+        total = sum((o.get("totals") or {}).values())
+        bad = sum(1 for r in self.kept if r.needs_review)
+        msg = "اكتمل: %d باتش" % len(self.kept)
+        if o:
+            msg += " | تقفيل يوم %s | الإجمالي %s ج.م" % (o.get("report_date"), format(total, ",.2f"))
+        if bad:
+            msg += " | ⚠️ %d محتاج مراجعة" % bad
+        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
+
+    def _status_text(self, r):
+        if r.skip:
+            return "مستبعد - مكرر"
+        notes = []
+        if r.amount <= 0:
+            notes.append("المبلغ مش مقروء")
+        elif not r.ok:
+            notes.append("مبلغ غير مؤكد")
+        if r.row is None:
+            notes.append("الوحدة مش معروفة")
+        if r.alt is not None:
+            notes.append("قراءة تانية %.2f" % r.alt)
+        if r.how == "extra-batch":
+            notes.append("باتش إضافي %s" % r.suffix)
+        elif r.how in ("auto-number", "conflict"):
+            notes.append("رقم الماكينة تلقائي")
+        elif r.how == "manual":
+            return "✓ تعديل يدوي"
+        return "⚠️ " + " ، ".join(notes) if notes else "✓ مؤكد"
+
+    def _fill(self):
+        self.tv.delete(*self.tv.get_children())
+        order = sorted(self.raw_all, key=lambda r: ((r.order or 99), (r.suffix or 1), r.label))
+        self._iid = {}
+        for r in order:
+            st = self._status_text(r)
+            tag = "skip" if r.skip else ("err" if (st.startswith("⚠️") or r.needs_review) else "ok")
+            sfx = "_%d" % r.suffix if r.suffix else ""
+            iid = self.tv.insert("", "end", values=(
+                "%s%s" % (r.order or "-", sfx), r.label, r.tid or "—", E.unit_label(r.tid, r.unit),
+                "%.2f" % r.amount if r.amount else "—", st), tags=(tag,))
+            self._iid[iid] = r
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        lines = list(self.warnings)
+        o = self.outputs or {}
+        if o.get("missing"):
+            lines.append("ماكينات ما ظهرش لها باتش: " + "، ".join(str(i) for i in o["missing"]))
+        if o.get("extra_pdfs"):
+            lines.append("فيه إيصالات بتواريخ تانية: اتعمل لها PDF منفصل ومش داخلة في الإجمالي.")
+        if o.get("xlsx_error"):
+            lines.append("⚠️ فشل الإكسيل: " + o["xlsx_error"])
+        tot = o.get("totals") or {}
+        if tot:
+            lines.insert(0, "الإجماليات: " + " | ".join(
+                "%s %s" % (E.ROW_NAMES[r], format(v, ",.2f")) for r, v in sorted(tot.items()) if v))
+        self.txt.insert("1.0", ("ملاحظات للمراجعة (%d):\n• " % len(lines) + "\n• ".join(lines)) if lines else "مفيش ملاحظات ✓")
+        self.txt.configure(state="disabled")
+
+    def apply_edit(self, item, tid, amt):
+        if tid in E.TERMINALS:
+            i = E.TERMINALS[tid]
+            item.det = (tid, i.order, i.row, i.unit, "manual")
+        else:
+            item.det = (None, None, None, None, "manual")
+        item.amount, item.batches, item.ok, item.alt, item.how = amt, [amt], True, None, "manual"
+        _save_fix(item.key, tid, amt)
+        self.kept, self.warnings = E.renumber(self.raw_all)
+        self.outputs = dict(self.outputs or {})
+        self._fill()
+        self.lbl_status.configure(text="اتعدّل. اضغط «إعادة بناء» عشان الـ PDF والإكسيل يتحدّثوا.",
+                                  text_color=self.t["warning"])
+
+    def rebuild(self):
+        if not self.kept:
+            return
+        kept, out_dir, tpl = self.kept, self.out_dir, self._tpl_eff
+
+        def job(j):
+            j.progress(0.3, "بناء ملفات الـ PDF والإكسيل...")
+            return E.build_closing_outputs(kept, out_dir, tpl)
+
+        def done(outs):
+            self.outputs = outs
+            self._fill()
+            self._status_after_build()
+
+        self._run_job(job, done)
+
+
+# ───────────────────────── إيصالات الدفع ─────────────────────────
+class _EditPayDialog(_Modal):
+    """تحديد/تعديل ملف إيصالات: الماكينة واليوم والشهر والعدد + \"الصح\" (عدد الباتش) لو عايز تكتبه بإيدك."""
+
+    def __init__(self, parent, r, on_ok):
+        super().__init__(parent, "تحديد / تعديل ملف إيصالات", 500, 390)
+        t, F = self.t, _font()
+        self.on_ok = on_ok
+        ctk.CTkLabel(self, text=r.name, font=(F, 11, "bold"), text_color=t["accent"], wraplength=460).pack(pady=(12, 6))
+        fr = ctk.CTkFrame(self, fg_color="transparent")
+        fr.pack(fill="x", padx=20)
+        rows = [("الماكينة:", None), ("اليوم:", r.day), ("الشهر:", r.month),
+                ("عدد الإيصالات:", r.count if r.count >= 0 else ""),
+                ("الصح (عدد الباتش) - اختياري:", r.expected)]
+        ctk.CTkLabel(fr, text=rows[0][0], font=(F, 11, "bold"), text_color=t["text"]).grid(row=0, column=1, sticky="e", pady=4)
+        self.cb = ttk.Combobox(fr, values=_terminal_choices(), state="readonly", width=38, justify="right")
+        self.cb.grid(row=0, column=0, padx=8, pady=4)
+        cur = E.terminal_label(r.tid) if r.tid else "— غير محدد —"
+        self.cb.set(cur if cur in self.cb["values"] else "— غير محدد —")
+        self.ents = []
+        for i, (lbl, val) in enumerate(rows[1:], 1):
+            ctk.CTkLabel(fr, text=lbl, font=(F, 11, "bold"), text_color=t["text"]).grid(row=i, column=1, sticky="e", pady=4)
+            e = ctk.CTkEntry(fr, justify="center", width=120, font=(F, 12, "bold"))
+            e.grid(row=i, column=0, padx=8, pady=4, sticky="w")
+            e.insert(0, "" if val is None else str(val))
+            self.ents.append(e)
+        ctk.CTkLabel(self, text="لو سيبت العدد فاضي هيتعدّ تاني بالقراءة الآلية.", font=(F, 10),
+                     text_color=t["muted"]).pack()
+        self.lbl = ctk.CTkLabel(self, text="", text_color=t["danger"], font=(F, 10, "bold"))
+        self.lbl.pack()
+        ctk.CTkButton(self, text="حفظ وإعادة التسمية", font=(F, 12, "bold"), fg_color=_GREEN, hover_color=_GREEN_H,
+                      text_color="#FFFFFF", command=self.save).pack(fill="x", padx=20, pady=8)
+
+    def save(self):
+        tid = _tid_from_choice(self.cb.get())
+        try:
+            d, m = int(self.ents[0].get()), int(self.ents[1].get())
+            c_raw = self.ents[2].get().strip()
+            c = int(c_raw) if c_raw else None
+            e_raw = self.ents[3].get().strip()
+            ex = int(e_raw) if e_raw else None
+            if not (1 <= d <= 31 and 1 <= m <= 12) or (c is not None and c < 0) or (ex is not None and ex < 0):
+                raise ValueError
+        except ValueError:
+            self.lbl.configure(text="اليوم 1-31 والشهر 1-12 والأعداد أرقام صحيحة")
+            return
+        if tid not in E.TERMINALS:
+            self.lbl.configure(text="اختار الماكينة")
+            return
+        cb = self.on_ok
+        self.destroy()
+        cb(tid, str(d), str(m), c, ex)
+
+
+# ───────────── حفظ حالة إيصالات الدفع (علشان لو البرنامج اتقفل يكمّل من مكانه) ─────────────
+_PAY_KEYS = ("src", "size", "name", "pages", "count", "tid", "day", "month", "new_name", "out_path",
+             "id_notes", "cnt_notes", "id_ok", "cnt_ok", "detail", "verdict", "expected", "votes",
+             "alt_tids", "seq_min", "seq_max", "seq_missing", "other_day")
+
+
+def _pay_state_path():
+    return os.path.join(_appdata_dir(), "pos_payments_state.json")
+
+
+def _pay_save(results):
+    try:
+        data = [{k: getattr(r, k) for k in _PAY_KEYS} for r in list(results)]
+        tmp = _pay_state_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, _pay_state_path())
+    except Exception:
+        logging.exception("pay state save")
+
+
+def _pay_load():
+    out = []
+    try:
+        with open(_pay_state_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return out
+    for d in data if isinstance(data, list) else []:
+        try:
+            if not isinstance(d, dict) or not d.get("src"):
+                continue
+            r = E.PayResult(d["src"])
+            for k in _PAY_KEYS:
+                if k in d:
+                    setattr(r, k, d[k])
+            out.append(r)
+        except Exception:
+            continue
+    return out
+
+
+class _PayOverview(_Modal):
+    """ملخص الماكينات: كل ماكينة (1-19) جاب ليها ملف ولا لأ، وعددها مقارنة بالباتش."""
+
+    def __init__(self, parent, results):
+        super().__init__(parent, "ملخص ماكينات إيصالات الدفع", 820, 560)
+        t, F = self.t, _font()
+        self.resizable(True, True)
+        by = {}
+        for r in results:
+            if not r.excluded and r.order != 99:
+                by.setdefault(r.order, []).append(r)
+        miss = [n for n in range(1, 20) if n not in by]
+        total = sum(r.count for rs in by.values() for r in rs if r.count > 0)
+        pend = sum(1 for rs in by.values() for r in rs if r.pending)
+        bad = sum(1 for rs in by.values() for r in rs if r.count >= 0 and not r.ok)
+        ctk.CTkLabel(self, text="📊 ملخص الماكينات", font=(F, 15, "bold"), text_color=t["accent"]).pack(pady=(10, 2))
+        ctk.CTkLabel(self, text="إجمالي الإيصالات: %d  |  ماكينات ناقصة: %d  |  لسه ما اتعدّتش: %d  |  محتاج مراجعة: %d"
+                     % (total, len(miss), pend, bad), font=(F, 11, "bold"),
+                     text_color=t["warning"] if (miss or pend or bad) else t["success"]).pack(pady=2)
+        name = _style_tree(t)
+        fr = ctk.CTkFrame(self, fg_color="transparent")
+        fr.pack(fill="both", expand=True, padx=12, pady=6)
+        cols = ("n", "unit", "file", "count", "batch", "diff", "status")
+        heads = ("م", "الوحدة", "الملف", "العدد", "الباتش", "الفرق", "الحالة")
+        wid = (40, 150, 200, 70, 70, 90, 150)
+        tv = ttk.Treeview(fr, columns=cols, show="headings", style=name, height=19, selectmode="browse")
+        for c, h, w in zip(cols, heads, wid):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="center", stretch=(c in ("file", "status")))
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        tv.tag_configure("ok", foreground=t["success"])
+        tv.tag_configure("warn", foreground=t["warning"])
+        tv.tag_configure("bad", foreground=t["danger"])
+        dash = "—"
+        for n in range(1, 20):
+            info = E.TERMINALS[E.NUM_TO_TID[n]]
+            rs = sorted(by.get(n, []), key=lambda x: x.new_name or x.name)
+            if not rs:
+                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), dash, dash, dash, dash, "ناقصة - مفيش ملف"),
+                          tags=("bad",))
+                continue
+            for r in rs:
+                b, d = E.batch_of(r), E.batch_diff(r)
+                st, tag = E.pay_status(r)
+                if tag == "ok" and E.batch_match(r) is False:
+                    tag = "warn"
+                tv.insert("", "end", values=(n, E.unit_label(E.NUM_TO_TID[n]), r.new_name or r.name,
+                                             r.count if r.count >= 0 else dash, b if b is not None else dash,
+                                             E.diff_text(d) if d is not None else dash, st), tags=(tag,))
+
+
+class PaymentsWindow(_FeatureWindow):
+    TITLE = "إيصالات الدفع"
+
+    def __init__(self, parent):
+        super().__init__(parent, 1120, 720)
+        t, F = self.t, self.F
+        st = _load_settings()
+        self.dest = st.get("pay_dest") or os.path.join(_documents_dir(), "وحدات")
+        self.fast = tk.BooleanVar(value=bool(st.get("pay_fast", True)))
+        self.skip_done = tk.BooleanVar(value=bool(st.get("pay_skip_done", True)))
+        self.results = _pay_load()
+        self._iid = {}
+        ctk.CTkLabel(self, text="🧾 إيصالات الدفع", font=(F, 16, "bold"), text_color=t["accent"]).pack(pady=(10, 0))
+        self._build_source_bar(self)
+        fr = ctk.CTkFrame(self, fg_color="transparent")
+        fr.pack(fill="x", padx=12, pady=2)
+        self._btn(fr, "📂 فتح فولدر الملفات المسمّاة", self.open_dest, color=t["card"], w=230).pack(side="right", padx=4)
+        self._btn(fr, "✏️ تغيير المكان", self.pick_dest, color=t["card"], w=130).pack(side="right", padx=4)
+        self.lbl_dest = ctk.CTkLabel(fr, text="الناتج: " + self.dest, font=(F, 10), text_color=t["muted"], anchor="w")
+        self.lbl_dest.pack(side="left", fill="x", expand=True)
+        self._build_progress(self)
+        # خطّين: ① إعادة التسمية  ② العد
+        self.btn_start.configure(text="① فحص وإعادة تسمية", width=160)
+        self.btn_count = self._btn(self.btn_start.master, "② عدّ الإيصالات", self.start_count, color=t["warning"], w=150,
+                                   state="disabled")
+        self.btn_count.pack(side="right", padx=4)
+        opt = ctk.CTkFrame(self, fg_color="transparent")
+        opt.pack(fill="x", padx=12, pady=(0, 2))
+        ctk.CTkCheckBox(opt, text="عدّ سريع (قراءة كل صفحة مرة واحدة من الصورة الأصلية)", variable=self.fast, font=(F, 10),
+                        text_color=t["text"], command=lambda: _save_setting("pay_fast", bool(self.fast.get()))
+                        ).pack(side="right", padx=8)
+        ctk.CTkCheckBox(opt, text="تخطّي الملفات اللي اتفحصت قبل كده", variable=self.skip_done, font=(F, 10),
+                        text_color=t["text"], command=lambda: _save_setting("pay_skip_done", bool(self.skip_done.get()))
+                        ).pack(side="right", padx=8)
+        cols = [("n", "م"), ("file", "الملف الأصلي"), ("unit", "الماكينة"), ("pages", "صفحات"), ("count", "العدد"),
+                ("batch", "الباتش"), ("diff", "الفرق"), ("day", "اليوم"), ("name", "الاسم الجديد"), ("status", "الحالة")]
+        self.tv = self._tree(self, cols, [34, 160, 150, 55, 60, 60, 80, 55, 190, 110], height=10)
+        self.tv.tag_configure("bad", foreground=t["danger"])
+        self.tv.bind("<<TreeviewSelect>>", lambda e: self._show_notes())
+        self.tv.bind("<Double-1>", lambda e: self.open_selected())   # دبل كليك = فتح الـ PDF
+        self.txt = ctk.CTkTextbox(self, height=130, font=(F, 10), fg_color=t["input"], text_color=t["text"], wrap="word")
+        self.txt.pack(fill="x", padx=12, pady=4)
+        self.txt.configure(state="disabled")
+        self.lbl_total = ctk.CTkLabel(self, text="", font=(F, 11, "bold"), text_color=t["text"])
+        self.lbl_total.pack(fill="x", padx=14)
+        bt = ctk.CTkFrame(self, fg_color="transparent")
+        bt.pack(fill="x", padx=12, pady=(2, 10))
+        for txt, cmd, col, w in (("🗑 مسح الكل", self.clear_all, t["danger"], 100),
+                                 ("💾 تقرير TXT", self.save_report, t["card"], 110),
+                                 ("📊 ملخص الماكينات", self.open_overview, t["card"], 140),
+                                 ("↻ إعادة عدّ", self.recount_selected, t["card"], 105),
+                                 ("✏️ تحديد/تعديل", self.edit_selected, t["warning"], 120),
+                                 ("الباقي صح", self.mark_rest_ok, t["card"], 95),
+                                 ("✗ غلط", lambda: self.set_verdict(-1), t["danger"], 80),
+                                 ("✓ صح", lambda: self.set_verdict(1), t["success"], 80)):
+            self._btn(bt, txt, cmd, color=col, w=w).pack(side="right", padx=3)
+        if self.results:
+            self._fill()
+            pend = sum(1 for r in self.results if r.pending)
+            self.lbl_status.configure(
+                text=("فيه %d ملف لسه ما اتعدّش. دوس \"② عدّ الإيصالات\" لما تحب." % pend) if pend
+                else "آخر نتيجة: %d ملف." % len(self.results), text_color=self.t["muted"])
+            self.btn_count.configure(state="normal")
+
+    # ---------- عام ----------
+    def _set_busy(self, busy):
+        super()._set_busy(busy)
+        self.btn_count.configure(state="disabled" if (busy or not self.results) else "normal")
+
+    def job_running(self):
+        return str(self.btn_stop.cget("state")) == "normal"
+
+    def open_dest(self):
+        """بيفتح الفولدر اللي فيه الملفات المسمّاة (مش نافذة اختيار)."""
+        try:
+            os.makedirs(self.dest, exist_ok=True)
+        except OSError:
+            pass
+        _open_path(self.dest)
+
+    def pick_dest(self):
+        d = filedialog.askdirectory(parent=self, title="اختار مكان حفظ الملفات المسمّاة", initialdir=self.dest)
+        if d:
+            self.dest = d
+            _save_setting("pay_dest", d)
+            self.lbl_dest.configure(text="الناتج: " + self.dest)
+
+    def _selected(self):
+        sel = self.tv.selection()
+        return self._iid.get(sel[0]) if sel else None
+
+    def _sort(self):
+        self.results.sort(key=lambda x: (x.order, x.new_name or x.name))
+
+    # ---------- ① التعريف وإعادة التسمية ----------
+    def start(self):
+        self._src_summary()
+        if not self._pdfs:
+            messagebox.showwarning("A2R", "اختار مجلد أو ملفات PDF الأول (الصور مش بتتحسب في الفكرة دي).", parent=self)
+            return
+        ok, msg = E.pay_ocr_ready()
+        if not ok:
+            messagebox.showerror("A2R", msg, parent=self)
+            return
+        existing = list(self.results)
+        have = set(r.key for r in existing)
+        todo, skipped = [], 0
+        for p in self._pdfs:
+            try:
+                k = "%s:%d" % (os.path.basename(p), os.path.getsize(p))
+            except OSError:
+                continue
+            if self.skip_done.get() and k in have:
+                skipped += 1
+                continue
+            todo.append(p)
+        if not todo:
+            messagebox.showinfo("A2R", "كل الملفات في المصدر ده اتفحصت قبل كده (%d ملف)." % skipped, parent=self)
+            return
+        fast = bool(self.fast.get())
+        dest, wd, ignored = self.dest, self.workdir, len(self._imgs)
+
+        def job(j):
+            newkeys = set("%s:%d" % (os.path.basename(p), os.path.getsize(p)) for p in todo)
+            kept = []
+            for r in existing:
+                if r.key in newkeys:       # بنعيد فحصه: نمسح نسخته المسمّاة القديمة (الأصلي مش بيتمس)
+                    try:
+                        if (r.out_path and os.path.exists(r.out_path) and os.path.abspath(r.out_path) != os.path.abspath(r.src)
+                                and os.path.abspath(r.out_path).startswith(os.path.abspath(dest))):
+                            os.remove(r.out_path)
+                    except OSError:
+                        pass
+                else:
+                    kept.append(r)
+            res = []
+            for i, p in enumerate(todo):
+                if j.stop_ev.is_set():
+                    break
+                base = i / float(len(todo))
+                name = os.path.basename(p)
+                try:
+                    r = E.identify_payment_pdf(
+                        p, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
+                            base, "① ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
+                        stop=j.stop_ev.is_set, fast=fast)
+                except E.OcrUnavailable:
+                    raise
+                except Exception as e:
+                    logging.exception("identify")
+                    r = E.PayResult(p)
+                    r.id_ok = False
+                    r.id_notes.append("فشل التعريف: %s" % str(e).split("\n")[0])
+                res.append(r)
+            allres = kept + res
+            for r in res:
+                if r.pending:               # الملفات الضعيفة (مش إيصال ماكينة) مش بتتسمّى
+                    try:
+                        E.apply_payment_name(allres, r, dest)
+                    except Exception as e:
+                        r.id_ok = False
+                        r.id_notes.append("فشل التسمية: %s" % e)
+            E.resolve_payment_duplicates(allres, dest)
+            E.flag_payment_duplicates(allres)
+            _pay_save(allres)
+            return allres, ignored, skipped
+
+        self._run_job(job, self._done_rename)
+
+    def _done_rename(self, payload):
+        allres, ignored, skipped = payload
+        self.results = allres
+        self._sort()
+        self._fill()
+        named = sum(1 for r in self.results if r.new_name and not r.excluded)
+        bad = sum(1 for r in self.results if not r.ok)
+        msg = "① اكتمل الفحص: %d ملف، %d اتسمّى" % (len(self.results), named)
+        if bad:
+            msg += " | ⚠️ %d محتاج مراجعة" % bad
+        if skipped:
+            msg += " | (اتخطّيت %d اتفحصوا قبل كده)" % skipped
+        if ignored:
+            msg += " | (اتجاهلت %d صورة)" % ignored
+        pend = sum(1 for r in self.results if r.pending)
+        if pend:
+            msg += "  —  دوس \"② عدّ الإيصالات\" لعدّ %d ملف." % pend
+        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if bad else self.t["success"])
+        self.btn_count.configure(state="normal" if self.results else "disabled")
+
+    # ---------- ② العد ----------
+    def start_count(self):
+        todo = [r for r in self.results if r.pending]
+        if not todo:
+            messagebox.showinfo("A2R", "كل الملفات اتعدّت. اختار ملف ودوس \"↻ إعادة عدّ\" لو عايز تعيد.", parent=self)
+            return
+        ok, msg = E.pay_ocr_ready()
+        if not ok:
+            messagebox.showerror("A2R", msg, parent=self)
+            return
+        fast, dest, wd = bool(self.fast.get()), self.dest, self.workdir
+
+        def job(j):
+            for i, r in enumerate(todo):
+                if j.stop_ev.is_set():
+                    break
+                if r.excluded:
+                    continue
+                base = i / float(len(todo))
+                name = r.new_name or r.name
+                try:
+                    done = E.count_payment_pdf(
+                        r, wd, progress=lambda m, base=base, i=i, name=name: j.progress(
+                            base, "② ملف %d من %d: %s — %s" % (i + 1, len(todo), name, m)),
+                        stop=j.stop_ev.is_set, fast=fast)
+                    if done and r.new_name is None and r.tid and r.day and r.month:
+                        E.apply_payment_name(self.results, r, dest)    # التعريف فشل: نسمّي من نتيجة العد
+                except E.OcrUnavailable:
+                    raise
+                except Exception:
+                    logging.exception("count")
+                    r.count = 0
+                    r.cnt_ok = False
+                    r.cnt_notes.append("فشل العد")
+                _pay_save(self.results)
+            E.flag_payment_duplicates(self.results)
+            _pay_save(self.results)
+            return todo
+
+        self._run_job(job, self._done_count)
+
+    def _done_count(self, _items):
+        self._sort()
+        self._fill()
+        done = [r for r in self.results if r.counted and not r.excluded]
+        n = sum(r.count for r in done)
+        bad = sum(1 for r in self.results if r.counted and not r.ok)
+        pend = sum(1 for r in self.results if r.pending)
+        msg = "② اكتمل العد: %d ملف | إجمالي الإيصالات %d" % (len(done), n)
+        if pend:
+            msg += " | فاضل %d لسه (اتوقف) - دوس ② تاني يكمّل من مكانه" % pend
+        if bad:
+            msg += " | ⚠️ %d محتاج مراجعة" % bad
+        self.lbl_status.configure(text=msg, text_color=self.t["warning"] if (bad or pend) else self.t["success"])
+
+    def recount_selected(self):
+        r = self._selected()
+        if not r:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        if self.job_running():
+            return
+        r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
+        _pay_save(self.results)
+        self._fill()
+        self.start_count()
+
+    # ---------- العرض ----------
+    def _fill(self):
+        keep = None
+        r0 = self._selected()
+        if r0 is not None:
+            keep = r0
+        self.tv.delete(*self.tv.get_children())
+        self._iid = {}
+        dash = "—"
+        sel_iid = None
+        for r in self.results:
+            b, d = E.batch_of(r), E.batch_diff(r)
+            stt, tag = E.pay_status(r)
+            if tag == "ok" and E.batch_match(r) is False:
+                tag = "warn"
+            if r.counted and not r.excluded and E.batch_match(r) is False and r.verdict == 0 and tag != "skip":
+                tag = "warn"
+            iid = self.tv.insert("", "end", values=(
+                r.order if r.order != 99 else "-", r.name, E.terminal_label(r.tid) if r.tid else "غير محدد",
+                r.pages or dash, r.count if r.count >= 0 else dash, b if b is not None else dash,
+                E.diff_text(d) if d is not None else dash, ("%s/%s" % (r.day, r.month)) if r.day else dash,
+                r.new_name or dash, stt), tags=(tag,))
+            self._iid[iid] = r
+            if r is keep:
+                sel_iid = iid
+        if sel_iid:
+            self.tv.selection_set(sel_iid)
+        counted = [r for r in self.results if r.counted and not r.excluded]
+        miss = E.missing_machines(self.results) if self.results else []
+        self.lbl_total.configure(text="إجمالي الإيصالات: %d  |  الملفات: %d  |  اتعدّت: %d  |  لسه: %d  |  محتاج مراجعة: %d  |  ماكينات ناقصة: %d" % (
+            sum(r.count for r in counted), len(self.results), len(counted),
+            sum(1 for r in self.results if r.pending), sum(1 for r in counted if not r.ok), len(miss)))
+        self.btn_count.configure(state="normal" if (self.results and not self.job_running()) else "disabled")
+        self._show_notes()
+
+    def _show_notes(self):
+        r = self._selected()
+        out = []
+        if r:
+            st, _tag = E.pay_status(r)
+            out.append("[%s]  %s" % (st, E.pay_summary(r).replace("\n", "  |  ")))
+            if r.detail:
+                out.append("التفاصيل: " + r.detail)
+            seen = set()
+            for n in r.notes:
+                k = E.note_kind(n)
+                out.append("")
+                out.append("%s %s" % ("🔴" if k[1] == 2 else ("🟠" if k[1] == 1 else "ℹ️"), k[2]))
+                out.append("   • " + n)
+                if k[0] not in seen:
+                    seen.add(k[0])
+                    out.append("   لماذا: " + k[3])
+                    out.append("   الحل: " + k[4])
+            if not r.notes:
+                out.append("\nمفيش ملاحظات ✓")
+        else:
+            lines = []
+            for x in self.results:
+                for n in x.notes:
+                    lines.append("• %s: %s" % (x.name, n))
+            miss = E.missing_machines(self.results) if self.results else []
+            if miss:
+                lines.append("• ماكينات ملهاش ملف: " + " ، ".join(miss))
+            out.append("\n".join(lines) if lines else "اختار ملف لعرض ملاحظاته.")
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", "\n".join(out))
+        self.txt.configure(state="disabled")
+
+    def open_selected(self):
+        r = self._selected()
+        if r:
+            p = r.out_path if (r.out_path and os.path.exists(r.out_path)) else r.src
+            _open_path(p)
+
+    def open_overview(self):
+        if not self.results:
+            messagebox.showinfo("A2R", "مفيش نتايج لسه.", parent=self)
+            return
+        _PayOverview(self, self.results)
+
+    # ---------- المراجعة: صح / غلط / تعديل ----------
+    def set_verdict(self, v):
+        """صح = يفضل مع ملفات اليوم، غلط = يتشال من العد والفولدر. الضغط تاني بيلغي الاختيار."""
+        r = self._selected()
+        if not r:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        if self.job_running():
+            return
+        nv = 0 if r.verdict == v else v
+        was_ex = r.excluded
+        r.verdict = nv
+        try:
+            op = r.out_path
+            inside = bool(op) and os.path.abspath(op).startswith(os.path.abspath(self.dest)) \
+                and os.path.abspath(op) != os.path.abspath(r.src)
+            if nv < 0 and not was_ex:
+                if inside and os.path.exists(op):
+                    os.remove(op)        # النسخة المسمّاة بس (مش الأصلي أبداً)
+            elif nv >= 0 and was_ex and inside and os.path.exists(r.src) and not os.path.exists(op):
+                os.makedirs(os.path.dirname(op), exist_ok=True)
+                shutil.copy2(r.src, op)
+        except OSError:
+            logging.exception("verdict file")
+        E.flag_payment_duplicates(self.results)
+        _pay_save(self.results)
+        self._fill()
+        # علّمته صح بس البرنامج مش عارف ماكينته: اسأل عليها
+        if nv > 0 and not r.tid:
+            self.edit_selected()
+
+    def mark_rest_ok(self):
+        lst = [r for r in self.results if not r.ok]
+        if not lst:
+            messagebox.showinfo("A2R", "مفيش حاجة محتاجة مراجعة.", parent=self)
+            return
+        if not messagebox.askyesno("A2R", "هتعلّم %d ملف على إنهم صح؟" % len(lst), parent=self):
+            return
+        for r in lst:
+            r.verdict = 1
+        _pay_save(self.results)
+        self._fill()
+
+    def edit_selected(self):
+        r = self._selected()
+        if not r:
+            messagebox.showinfo("A2R", "اختار صف الأول.", parent=self)
+            return
+        if self.job_running():
+            return
+
+        def ok(tid, d, m, c, ex):
+            r.tid, r.day, r.month = tid, d, m
+            r.expected = ex
+            r.id_ok, r.id_notes = True, []
+            r.verdict = 1
+            if c is None:
+                r.count, r.cnt_notes, r.cnt_ok, r.detail = -1, [], True, ""
+            else:
+                r.count, r.cnt_notes, r.cnt_ok, r.detail = c, [], True, "تعديل يدوي"
+            try:
+                E.apply_payment_name(self.results, r, self.dest)
+            except Exception as e:
+                r.id_ok = False
+                r.id_notes.append("فشل التسمية: %s" % e)
+            E.flag_payment_duplicates(self.results)
+            self._sort()
+            _pay_save(self.results)
+            self._fill()
+            if c is None:
+                self.lbl_status.configure(text="اتسمّى. دوس \"② عدّ الإيصالات\" لعدّ إيصالاته.", text_color=self.t["warning"])
+
+        _EditPayDialog(self, r, ok)
+
+    def clear_all(self):
+        if not self.results:
+            return
+        mine = [r for r in self.results if r.out_path]
+        if not messagebox.askyesno(
+                "A2R", "هيتمسح %d ملف مسمّى من:\n%s\n\nوهتتمسح نتيجة الفحص.\n(ملفاتك الأصلية مش هتتمس)" % (len(mine), self.dest),
+                parent=self):
+            return
+        for r in mine:
+            try:
+                p = os.path.abspath(r.out_path)
+                if p.startswith(os.path.abspath(self.dest)) and p != os.path.abspath(r.src) and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        self.results = []
+        _pay_save(self.results)
+        self._fill()
+        self.lbl_status.configure(text="تم المسح. اختار مصدر وابدأ يوم جديد.", text_color=self.t["muted"])
+
+    def save_report(self):
+        if not self.results:
+            return
+        p = filedialog.asksaveasfilename(parent=self, defaultextension=".txt", filetypes=[("Text", "*.txt")],
+                                         initialfile="تقرير إيصالات الدفع %s.txt" % datetime.date.today().strftime("%d-%m-%Y"))
+        if not p:
+            return
+        lines = ["تقرير إيصالات الدفع", "=" * 44]
+        for r in self.results:
+            st, _t = E.pay_status(r)
+            lines.append("%s | %s | العدد %s | %s | %s" % (
+                E.terminal_label(r.tid) if r.tid else "غير محدد", r.name, r.count if r.count >= 0 else "—",
+                r.new_name or "بدون اسم", st))
+            b, d = E.batch_of(r), E.batch_diff(r)
+            if b is not None and d is not None:
+                lines.append("    الباتش: %d • الفعلي: %d • %s" % (b, r.count, E.diff_text(d)))
+            if r.detail:
+                lines.append("    " + r.detail)
+            lines += ["    - " + n for n in r.notes]
+        miss = E.missing_machines(self.results)
+        if miss:
+            lines += ["-" * 44, "ماكينات ملهاش ملف: " + " ، ".join(miss)]
+        lines.append("-" * 44)
+        lines.append("إجمالي الإيصالات: %d" % sum(r.count for r in self.results if r.count > 0 and not r.excluded))
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        _open_path(p)
+
+
+# ───────────────────────── النافذة الرئيسية للأدوات + نقطة الدخول ─────────────────────────
+class PosToolsHub(_Modal):
+    def __init__(self, app):
+        super().__init__(app, _L("A2R - أدوات المشرف", "A2R - Supervisor"), 440, 215)
+        self.app = app
+        t, F = self.t, _font()
+        self._wins = {}
+        ctk.CTkLabel(self, text=_L("🛠️ المشرف", "🛠️ Supervisor"), font=(F, 17, "bold"),
+                     text_color=t["accent"]).pack(pady=(14, 2))
+        ctk.CTkLabel(self, text=_L("كل صلاحيات المشرف في مكان واحد", "All supervisor tools in one place"),
+                     font=(F, 10, "bold"), text_color=t["muted"]).pack(pady=(0, 8))
+        g = ctk.CTkFrame(self, fg_color="transparent")
+        g.pack(fill="both", expand=True, padx=20, pady=4)
+        g.grid_columnconfigure((0, 1), weight=1, uniform="a")
+
+        def mk(r, c, text, cmd, color):
+            ctk.CTkButton(g, text=text, height=64, font=(F, 12, "bold"), fg_color=color, hover_color=t["hover"],
+                          command=cmd).grid(row=r, column=c, padx=5, pady=5, sticky="nsew")
+
+        mk(0, 0, _L("📑 التقفيل", "📑 Closing"), lambda: self.ask("التقفيل", ClosingWindow), t["primary"])
+        mk(0, 1, _L("🧾 إيصالات الدفع", "🧾 Payment receipts"),
+           lambda: self.ask("إيصالات الدفع", PaymentsWindow), t["primary"])
+        ctk.CTkLabel(self, text="A2R %s" % TOOLS_VERSION, font=(F, 9, "bold"), text_color="#64748B").pack(pady=(4, 8))
+
+    def run_app(self, name):
+        fn = getattr(self.app, name, None)
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+        if fn:
+            try:
+                fn()
+            except Exception as e:
+                messagebox.showerror("A2R", str(e))
+
+    def ask(self, title, cls):
+        w = self._wins.get(title)
+        try:
+            if w is not None and w.winfo_exists():
+                w.deiconify()
+                w.lift()
+                return
+        except Exception:
+            pass
+
+        # الباسورد التاني بيتسأل مرة واحدة على زرار المشرف نفسه، مش على كل أداة
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self._wins[title] = cls(self.app)
+
+
+_HUB = None
+
+
+def open_pos_tools(app):
+    """بيتنادى من زر المشرف. لو المستخدم مش مشرف بيترفض."""
+    global _HUB
+    if not getattr(app, "is_supervisor", False):
+        messagebox.showwarning("A2R", "هذه الصلاحية متاحة للمشرف فقط!")
+        return
+    try:
+        if _HUB is not None and _HUB.winfo_exists():
+            _HUB.deiconify()
+            _HUB.lift()
+            return
+    except Exception:
+        pass
+    def _go():
+        global _HUB
+        _HUB = PosToolsHub(app)
+
+    PosPasswordDialog(app, _L("المشرف", "Supervisor"), _go)
+
+
+def pos_tools_button_text():
+    return _L("🛠️ المشرف", "🛠️ Supervisor")
+
+
+def refresh_pos_tools_button(app):
+    b = getattr(app, "btn_pos_tools", None)
+    if b is not None:
+        try:
+            b.configure(text=pos_tools_button_text())
+        except Exception:
+            pass
+
+
+def make_pos_tools_button(app, parent, **kw):
+    """بيعمل الزر (من غير ما يحطه). الاسم بيتغير مع لغة البرنامج."""
+    t = _theme(app)
+    btn = ctk.CTkButton(parent, text=pos_tools_button_text(), font=(_font(), 11, "bold"), fg_color=t["primary"],
+                        hover_color=t["hover"], command=lambda: open_pos_tools(app), **kw)
+    app.btn_pos_tools = btn
+    return btn
+'''
+
+POS_TOOLS_ERROR = ""
+try:
+    _a2r_embed("a2r_pos_engine", _A2R_POS_ENGINE_SRC)
+    _a2r_embed("a2r_pos_tools", _A2R_POS_TOOLS_SRC)
+    from a2r_pos_tools import open_pos_tools, make_pos_tools_button, refresh_pos_tools_button
+    POS_TOOLS_AVAILABLE = True
+except Exception as _pos_exc:
+    POS_TOOLS_AVAILABLE = False
+    POS_TOOLS_ERROR = repr(_pos_exc)
+    try:
+        logging.error("POS tools failed to load: %s", POS_TOOLS_ERROR)
+    except Exception as _e:
+        _log_silent("module#1", _e)
 ctk.set_appearance_mode("Dark")
 try:
     _tm = ctk.ThemeManager.theme
@@ -256,6 +4364,8 @@ def load_print_paper():
     global _PRINT_PAPER_MM
     try:
         v = _read_app_config().get("print_paper_mm")
+        if not v:
+            return   # لسه مفيش مقاس محفوظ: استخدم الافتراضي من غير ضوضاء في السجل
         w, h = float(v[0]), float(v[1])
         if 20 <= w <= 300 and 20 <= h <= 600:
             _PRINT_PAPER_MM = (w, h)
@@ -584,6 +4694,20 @@ def archive_day_dir(folder_path, d):
                         f"{d.month:02d}-{d.strftime('%B')}", f"{d.day:02d}")
 
 THEMES = {
+    "Windows Dark": {
+        "mode": "Dark",
+        "bg": "#202020", "card": "#2B2B2B", "sub_card": "#272727",
+        "border": "#454545", "input": "#232323", "text": "#FFFFFF",
+        "text_muted": "#9E9E9E", "primary": "#0078D4", "primary_hover": "#1B86D9",
+        "success": "#6CCB5F", "danger": "#F1707B", "warning": "#FFB900", "accent": "#60CDFF"
+    },
+    "Windows Light": {
+        "mode": "Light",
+        "bg": "#F3F3F3", "card": "#FFFFFF", "sub_card": "#FAFAFA",
+        "border": "#DDDDDD", "input": "#FFFFFF", "text": "#1B1B1B",
+        "text_muted": "#616161", "primary": "#0078D4", "primary_hover": "#106EBE",
+        "success": "#107C10", "danger": "#C42B1C", "warning": "#B44A0C", "accent": "#005A9E"
+    },
     "Modern Dark": {
         "mode": "Dark",
         "bg": "#1A1F2B", "card": "#262D3E", "sub_card": "#202636",
@@ -595,50 +4719,50 @@ THEMES = {
         "mode": "Light",
         "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
         "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
-        "text_muted": "#71717A", "primary": "#2563EB", "primary_hover": "#1D4ED8",
-        "success": "#16A34A", "danger": "#DC2626", "warning": "#D97706", "accent": "#A16207"
+        "text_muted": "#52525B", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#15803D", "danger": "#B91C1C", "warning": "#B45309", "accent": "#854D0E"
     },
     "Aero Dark": {
         "mode": "Dark",
         "bg": "#080E17", "card": "#121E2E", "sub_card": "#0F1926",
         "border": "#1E2E42", "input": "#0A131F", "text": "#FFFFFF",
         "text_muted": "#8FA3B8", "primary": "#0284C7", "primary_hover": "#0369A1",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#38BDF8"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#38BDF8"
     },
     "Light Modern": {
         "mode": "Light",
         "bg": "#F1F5F9", "card": "#FFFFFF", "sub_card": "#E2E8F0",
         "border": "#CBD5E1", "input": "#F8FAFC", "text": "#0F172A",
-        "text_muted": "#64748B", "primary": "#0284C7", "primary_hover": "#0369A1",
-        "success": "#059669", "danger": "#DC2626", "warning": "#D97706", "accent": "#0284C7"
+        "text_muted": "#475569", "primary": "#0284C7", "primary_hover": "#0369A1",
+        "success": "#047857", "danger": "#B91C1C", "warning": "#B45309", "accent": "#0369A1"
     },
     "Cyber Amber": {
         "mode": "Dark",
         "bg": "#0B0B0D", "card": "#17171C", "sub_card": "#111114",
         "border": "#282832", "input": "#0E0E12", "text": "#FFFFFF",
         "text_muted": "#9CA3AF", "primary": "#D97706", "primary_hover": "#B45309",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#FBBF24"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#FBBF24"
     },
     "Emerald Glass": {
         "mode": "Dark",
         "bg": "#04120D", "card": "#0A291E", "sub_card": "#061F17",
         "border": "#123829", "input": "#051811", "text": "#FFFFFF",
         "text_muted": "#86EFAC", "primary": "#059669", "primary_hover": "#047857",
-        "success": "#10B981", "danger": "#F43F5E", "warning": "#F59E0B", "accent": "#34D399"
+        "success": "#10B981", "danger": "#FB7185", "warning": "#F59E0B", "accent": "#34D399"
     },
     "Royal Purple": {
         "mode": "Dark",
         "bg": "#0E0717", "card": "#1E1033", "sub_card": "#170C28",
         "border": "#2C1B4D", "input": "#110920", "text": "#FFFFFF",
         "text_muted": "#A8A29E", "primary": "#7C3AED", "primary_hover": "#6D28D9",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#C084FC"
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#C084FC"
     },
     "Luxury Gold": {
         "mode": "Dark",
         "bg": "#110F0A", "card": "#1D1911", "sub_card": "#16130C",
         "border": "#52431E", "input": "#14110B", "text": "#FFFBEB",
-        "text_muted": "#D4B872", "primary": "#B8860B", "primary_hover": "#9A6F08",
-        "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B", "accent": "#F5C542"
+        "text_muted": "#D4B872", "primary": "#9A6F08", "primary_hover": "#7A5806",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#F5C542"
     },
     "Metallic Silver": {
         "mode": "Dark",
@@ -660,6 +4784,12 @@ THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
 #  primary = الإجراء الأساسي | success_btn = إنشاء/إضافة | tool = تقارير وأرشيف | warn_btn = طباعة ودفع
 #  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
 _ROLE_BTN = {
+    "Windows Dark": {
+        "secondary": ("#333333", "#414141"), "success_btn": ("#2B2B2B", "#17352B"),
+        "tool": ("#2B2B2B", "#242145"), "warn_btn": ("#2B2B2B", "#3A2A14"), "danger_btn": ("#2B2B2B", "#3A1D1D")},
+    "Windows Light": {
+        "secondary": ("#FFFFFF", "#F0F0F0"), "success_btn": ("#FFFFFF", "#F0F0F0"),
+        "tool": ("#FFFFFF", "#F0F0F0"), "warn_btn": ("#FFFFFF", "#F0F0F0"), "danger_btn": ("#C42B1C", "#A5231B")},
     "Modern Dark": {
         "secondary": ("#334155", "#475569"), "success_btn": ("#059669", "#047857"),
         "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
@@ -693,11 +4823,25 @@ for _n, _roles in _ROLE_BTN.items():
         THEMES[_n][_k] = _c
         THEMES[_n][_k + "_hover"] = _h
 
+# الأزرار المحايدة في الثيم الفاتح تحتاج نصًا داكنًا بأسلوب ويندوز
+for _rk in ("secondary", "success_btn", "tool", "warn_btn"):
+    THEMES["Windows Light"][_rk + "_text"] = "#1B1B1B"
+
+# ستايل زر التصفير لكل الأزرار في الوضع الداكن: خلفية محايدة وإطار ونص بلون الزر
+# ألوان الأزرار الأصلية من الثيمات الحالية (Modern Dark) بنفس التوزيع المعتاد
+THEMES["Windows Dark"].update(
+    primary_fg="#2B2B2B", primary_hoverbg="#1E2A44", primary_border="#2563EB", primary_text="#3B82F6",
+    success_btn_border="#059669", success_btn_text="#34D399",
+    tool_border="#4F46E5", tool_text="#818CF8",
+    warn_btn_border="#D97706", warn_btn_text="#F59E0B",
+    danger_btn_border="#DC2626", danger_btn_text="#F87171",
+)
+
 # أي زر في أي دور (أسماء الـ attributes في النافذة الرئيسية)
 BUTTON_ROLES = {
     "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
     "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
-    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_full"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_full", "btn_pos_tools"],
     "warn_btn": ["btn_print_slip", "btn_fix_printer", "btn_mini_reprint"],
     "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
     "danger_btn": ["btn_elevate"],
@@ -721,11 +4865,11 @@ TAG_COLORS = {
 FONT_FAMILY = "Segoe UI"
 FONT_TITLE_LOGO = (FONT_FAMILY, 18, "bold")
 FONT_SECTION_LBL = (FONT_FAMILY, 10, "bold")
-FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "normal")
+FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "bold")
 FONT_KPI_VAL = (FONT_FAMILY, 16, "bold")
 FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
 FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
-FONT_ENTRY = (FONT_FAMILY, 11, "normal")
+FONT_ENTRY = (FONT_FAMILY, 11, "bold")
 
 
 def theme_btn_colors(t, kind="quiet"):
@@ -733,6 +4877,24 @@ def theme_btn_colors(t, kind="quiet"):
     if kind == "primary": return t["primary"], t["primary_hover"]
     if kind == "danger": return t["danger_btn"], t["danger_btn_hover"]
     return t["secondary"], t["secondary_hover"]
+
+
+_KIND_ROLE = {"primary": "primary", "success": "success_btn", "tool": "tool",
+              "warn": "warn_btn", "danger": "danger_btn", "quiet": "secondary"}
+
+def _ghost(t, role):
+    """ألوان زر حسب الثيم: ثيمات الإطار الملون (Windows) ترجع خلفية محايدة وإطارًا ونصًا بلون الزر، وغيرها اللون المعبأ المعتاد."""
+    if t.get(role + "_text"):
+        return {"fg_color": t.get(role + "_fg", t[role]),
+                "hover_color": t.get(role + "_hoverbg", t[role + "_hover"]),
+                "border_width": 1, "border_color": t.get(role + "_border", t["border"]),
+                "text_color": t[role + "_text"], "text_color_disabled": t["text_muted"]}
+    return {"fg_color": t[role], "hover_color": t[role + "_hover"], "text_color": "#FFFFFF"}
+
+def make_themed_button(parent, t, kind="quiet", **kw):
+    role = _KIND_ROLE.get(kind, "secondary")
+    kw.update(_ghost(t, role))
+    return ctk.CTkButton(parent, **kw)
 
 
 def style_entry(w, t):
@@ -759,7 +4921,7 @@ def apply_tree_style(t, rowheight=30):
     try: style.layout("A2R.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
     except Exception as _e: _log_silent("apply_tree_style#2", _e)
     style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
-                    font=(FONT_FAMILY, 10, "normal"), rowheight=rowheight, borderwidth=0, relief="flat")
+                    font=(FONT_FAMILY, 10, "bold"), rowheight=rowheight, borderwidth=0, relief="flat")
     style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
                     font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0, padding=(6, 6))
     style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
@@ -1715,12 +5877,12 @@ CHROME_EXT_DIR = os.path.join(ARCHIVE_BACKUP_DIR, "A2R_Chrome_Extension")
 LOCAL_BRIDGE_HOST = "127.0.0.1"
 LOCAL_BRIDGE_PORT = 47221
 _CHROME_EXT_TEXT_FILES = {
-    'manifest.json': '{\n  "manifest_version": 3,\n  "name": "A2R Operations Console",\n  "version": "2.8.0",\n  "description": "A2R Operations Console - Persistent Slim Resizable Sidebar (132px) & Offline Traffic Portal Manager",\n  "permissions": [\n    "tabs",\n    "alarms",\n    "sidePanel",\n    "activeTab",\n    "scripting",\n    "storage"\n  ],\n  "host_permissions": [\n    "http://127.0.0.1:47221/*"\n  ],\n  "action": {\n    "default_title": "A2R Operations Console",\n    "default_icon": {\n      "16": "icons/icon16.png",\n      "48": "icons/icon48.png",\n      "128": "icons/icon128.png"\n    }\n  },\n  "side_panel": {\n    "default_path": "sidepanel.html"\n  },\n  "content_scripts": [\n    {\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ],\n      "js": [\n        "content_sidebar.js"\n      ],\n      "run_at": "document_end"\n    }\n  ],\n  "web_accessible_resources": [\n    {\n      "resources": [\n        "sidepanel.html",\n        "sidepanel.css",\n        "sidepanel.js",\n        "icons/*"\n      ],\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ]\n    }\n  ],\n  "background": {\n    "service_worker": "background.js"\n  },\n  "icons": {\n    "16": "icons/icon16.png",\n    "48": "icons/icon48.png",\n    "128": "icons/icon128.png"\n  }\n}\n',
-    'background.js': '// A2R Operations Console - Chrome Extension v2.7.0 (100% Offline)\n// 1) Persistent resizable slim sidebar (132px) across ALL web tabs (state & width saved in chrome.storage.local)\n// 2) Auto-pin Traffic Portal tab & keep last 4 PDF receipt tabs\n// 3) 40-second IDLE auto-return to Traffic Portal (192.168.235.50)\n\nconst PORTAL_HOST = "192.168.235.50";\nconst MAX_RECEIPT_TABS = 4;\nconst DEFAULT_IDLE_SEC = 40;\nlet idleReturnSec = DEFAULT_IDLE_SEC;\ntry {\n  chrome.storage.local.get({ a2r_idle_sec: DEFAULT_IDLE_SEC }, (res) => {\n    idleReturnSec = Number(res.a2r_idle_sec);\n    if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n  });\n  chrome.storage.onChanged.addListener((changes, area) => {\n    if (area === "local" && changes.a2r_idle_sec) {\n      idleReturnSec = Number(changes.a2r_idle_sec.newValue);\n      if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n    }\n  });\n} catch (_) {}\nconst KEY_OPEN = "a2r_sidebar_open";\nconst KEY_WIDTH = "a2r_sidebar_width";\n\nlet lastActivityTs = Date.now();\nlet returnedForCurrentIdle = false;\n\ntry {\n  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {\n    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});\n  }\n} catch (_) {}\n\nfunction getTabUrl(tab) {\n  return ((tab && (tab.url || tab.pendingUrl)) || "").toLowerCase();\n}\n\nfunction canInjectSlimSidebar(tab) {\n  const u = getTabUrl(tab);\n  if (!u.startsWith("http://") && !u.startsWith("https://")) return false;\n  if (u.startsWith("https://chrome.google.com/webstore") || u.startsWith("https://chromewebstore.google.com")) return false;\n  if (u.endsWith(".pdf") || u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return false;\n  return true;\n}\n\nchrome.action.onClicked.addListener((tab) => {\n  if (!tab || tab.id === undefined) return;\n  markUserActive();\n\n  if (!canInjectSlimSidebar(tab)) {\n    try {\n      if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n        chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n      }\n    } catch (_) {}\n    return;\n  }\n\n  chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 132 }, (res) => {\n    const nextOpen = !(res[KEY_OPEN] !== false);\n    const savedWidth = res[KEY_WIDTH] || 132;\n    chrome.storage.local.set({ [KEY_OPEN]: nextOpen });\n\n    chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth }).catch(async () => {\n      try {\n        await chrome.scripting.executeScript({\n          target: { tabId: tab.id },\n          files: ["content_sidebar.js"],\n        });\n        await chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth });\n      } catch (_) {\n        try {\n          if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n            chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n          }\n        } catch (_) {}\n      }\n    });\n  });\n});\n\nfunction isPortalTab(tab) {\n  const u = getTabUrl(tab);\n  if (!u.includes(PORTAL_HOST)) return false;\n  if (u.includes("quote_receipt") || u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt")) {\n    return false;\n  }\n  return true;\n}\n\nfunction isProtectedChromePage(tab) {\n  const u = getTabUrl(tab);\n  return u.startsWith("chrome://extensions") || u.startsWith("chrome://settings");\n}\n\nfunction isReceiptPdfTab(tab, portalTabIds) {\n  if (!tab || tab.pinned) return false;\n  const u = getTabUrl(tab);\n  if (!u) return false;\n  if (isPortalTab(tab)) return false;\n\n  if (u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return true;\n  if (u.includes(PORTAL_HOST) && (u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt"))) {\n    return true;\n  }\n  if (\n    tab.openerTabId &&\n    portalTabIds.has(tab.openerTabId) &&\n    (u.includes(".pdf") || u.startsWith("blob:") || u.startsWith("data:application/pdf"))\n  ) {\n    return true;\n  }\n  return false;\n}\n\nfunction markUserActive() {\n  lastActivityTs = Date.now();\n  returnedForCurrentIdle = false;\n}\n\nasync function maintainPinAndReceipts(windowId) {\n  try {\n    const tabs = await chrome.tabs.query({ windowId });\n    const portalTabs = tabs.filter(isPortalTab);\n    const portalTabIds = new Set(portalTabs.map((t) => t.id));\n    for (const pt of portalTabs) {\n      if (!pt.pinned) {\n        chrome.tabs.update(pt.id, { pinned: true }).catch(() => {});\n      }\n    }\n    const receiptTabs = tabs\n      .filter((t) => isReceiptPdfTab(t, portalTabIds))\n      .sort((a, b) => a.id - b.id);\n    if (receiptTabs.length > MAX_RECEIPT_TABS) {\n      const toClose = receiptTabs.slice(0, receiptTabs.length - MAX_RECEIPT_TABS);\n      for (const oldTab of toClose) {\n        chrome.tabs.remove(oldTab.id).catch(() => {});\n      }\n    }\n  } catch (_) {}\n}\n\nasync function checkIdleAndReturnToPortal() {\n  try {\n    if (returnedForCurrentIdle) return;\n    const idleSec = (Date.now() - lastActivityTs) / 1000;\n    if (!idleReturnSec) return;\n    if (idleSec < idleReturnSec) return;\n\n    let activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });\n    if (!activeTabs || !activeTabs.length) {\n      activeTabs = await chrome.tabs.query({ active: true });\n    }\n    if (!activeTabs || !activeTabs.length) return;\n\n    const curTab = activeTabs[0];\n    if (!curTab || isPortalTab(curTab) || isProtectedChromePage(curTab)) return;\n\n    let winTabs = await chrome.tabs.query({ windowId: curTab.windowId });\n    let portal = winTabs.find(isPortalTab);\n\n    if (portal) {\n      if (!portal.active) {\n        returnedForCurrentIdle = true;\n        await chrome.tabs.update(portal.id, { active: true });\n      }\n      return;\n    }\n\n    const allTabs = await chrome.tabs.query({});\n    portal = allTabs.find(isPortalTab);\n    if (portal && portal.id !== curTab.id) {\n      returnedForCurrentIdle = true;\n      if (portal.windowId !== undefined) {\n        await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n      }\n      await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n    }\n  } catch (_) {}\n}\n\nsetInterval(checkIdleAndReturnToPortal, 2000);\n\nfunction scheduleAlarmFallback() {\n  try {\n    if (!idleReturnSec) return;\n    chrome.alarms.clear("a2r_idle_check").catch(() => {});\n    chrome.alarms.create("a2r_idle_check", { when: Date.now() + idleReturnSec * 1000 });\n  } catch (_) {}\n}\n\nchrome.alarms.onAlarm.addListener((alarm) => {\n  if (alarm && alarm.name === "a2r_idle_check") {\n    checkIdleAndReturnToPortal();\n  }\n});\n\nchrome.runtime.onMessage.addListener((msg) => {\n  if (!msg) return;\n  if (msg.type === "A2R_USER_ACTIVITY") {\n    markUserActive();\n    scheduleAlarmFallback();\n  } else if (msg.type === "A2R_OPEN_TAB" && msg.url) {\n    chrome.tabs.create({ url: msg.url }).catch(() => {});\n  }\n});\n\nchrome.tabs.onCreated.addListener((tab) => {\n  if (!tab) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n});\n\nchrome.tabs.onActivated.addListener((activeInfo) => {\n  if (!activeInfo) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (activeInfo.windowId !== undefined) maintainPinAndReceipts(activeInfo.windowId);\n});\n\nchrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {\n  if (!tab) return;\n  if (changeInfo.status === "complete" || changeInfo.url) {\n    if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n  }\n});\n',
-    'content_sidebar.js': '// A2R Operations Console - Persistent Resizable Slim Sidebar (132px, Push-Layout, Chrome Dark) + Idle Detector\n(() => {\n  const HOST_ID = "a2r-slim-sidebar-host";\n  const PUSH_STYLE_ID = "a2r-slim-sidebar-push-style";\n  const KEY_OPEN = "a2r_sidebar_open";\n  const KEY_WIDTH = "a2r_sidebar_width";\n  const KEY_SITES = "a2r_sidebar_sites";\n  const PORTAL_HOST = "192.168.235.50";\n  const DEFAULT_WIDTH = 132;\n  const MIN_WIDTH = 115;\n  const MAX_WIDTH = 480;\n\n  let currentWidth = DEFAULT_WIDTH;\n\n  function clampWidth(w) {\n    const n = Math.round(Number(w) || DEFAULT_WIDTH);\n    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, n));\n  }\n\n  function applyPagePush(w) {\n    let st = document.getElementById(PUSH_STYLE_ID);\n    if (!st) {\n      st = document.createElement("style");\n      st.id = PUSH_STYLE_ID;\n      (document.head || document.documentElement).appendChild(st);\n    }\n    st.textContent = `\n      html {\n        width: calc(100% - ${w}px) !important;\n        max-width: calc(100% - ${w}px) !important;\n        margin-right: ${w}px !important;\n        box-sizing: border-box !important;\n      }\n      body {\n        max-width: 100% !important;\n        box-sizing: border-box !important;\n      }\n    `;\n  }\n\n  function removePagePush() {\n    const st = document.getElementById(PUSH_STYLE_ID);\n    if (st) st.remove();\n  }\n\n  function applyWidth(w) {\n    currentWidth = clampWidth(w);\n    const host = document.getElementById(HOST_ID);\n    if (host) {\n      host.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n    }\n  }\n\n  function closeSidebar() {\n    const el = document.getElementById(HOST_ID);\n    if (el) el.remove();\n    removePagePush();\n  }\n\n  function openSidebar(widthPx = currentWidth) {\n    currentWidth = clampWidth(widthPx);\n    const existing = document.getElementById(HOST_ID);\n    if (existing) {\n      existing.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      return;\n    }\n\n    applyPagePush(currentWidth);\n\n    const host = document.createElement("div");\n    host.id = HOST_ID;\n    host.style.cssText = [\n      "position:fixed",\n      "top:0",\n      "right:0",\n      `width:${currentWidth}px`,\n      "height:100vh",\n      "z-index:2147483647",\n      "box-shadow:-1px 0 8px rgba(0,0,0,0.35)",\n      "border-left:1px solid #3C4043",\n      "background:#202124",\n      "margin:0",\n      "padding:0",\n      "overflow:hidden",\n      "box-sizing:border-box"\n    ].join(" !important;") + " !important;";\n\n    // Easy-to-grab 8px left-edge drag handle with subtle center grip pill\n    const handle = document.createElement("div");\n    handle.title = "اسحب لتكبير أو تصغير العرض (دبل كليك للحجم الافتراضي 132px)";\n    handle.style.cssText = [\n      "position:absolute",\n      "top:0",\n      "left:0",\n      "width:8px",\n      "height:100%",\n      "cursor:ew-resize",\n      "z-index:10",\n      "background:transparent",\n      "display:flex",\n      "align-items:center",\n      "justify-content:center",\n      "transition:background 0.15s ease"\n    ].join(" !important;") + " !important;";\n\n    const grip = document.createElement("div");\n    grip.style.cssText = [\n      "width:3px",\n      "height:38px",\n      "border-radius:3px",\n      "background:rgba(154,160,166,0.45)",\n      "pointer-events:none"\n    ].join(" !important;") + " !important;";\n    handle.appendChild(grip);\n\n    handle.addEventListener("mouseenter", () => {\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.25)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n    });\n    handle.addEventListener("mouseleave", () => {\n      if (!handle.dataset.dragging) {\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n      }\n    });\n\n    handle.addEventListener("dblclick", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      applyWidth(DEFAULT_WIDTH);\n      try { chrome.storage.local.set({ [KEY_WIDTH]: DEFAULT_WIDTH }); } catch (_) {}\n    });\n\n    handle.addEventListener("mousedown", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      handle.dataset.dragging = "1";\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.45)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n\n      const shield = document.createElement("div");\n      shield.style.cssText = "position:fixed !important;inset:0 !important;z-index:2147483647 !important;cursor:ew-resize !important;background:transparent !important;";\n      (document.documentElement || document.body).appendChild(shield);\n\n      const onMove = (mEv) => {\n        const w = clampWidth(window.innerWidth - mEv.clientX);\n        applyWidth(w);\n        notifyActivity();\n      };\n\n      const onUp = () => {\n        delete handle.dataset.dragging;\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n        window.removeEventListener("mousemove", onMove, true);\n        window.removeEventListener("mouseup", onUp, true);\n        shield.remove();\n        try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n      };\n\n      window.addEventListener("mousemove", onMove, true);\n      window.addEventListener("mouseup", onUp, true);\n    });\n\n    const iframe = document.createElement("iframe");\n    iframe.src = chrome.runtime.getURL("sidepanel.html?mode=slim");\n    iframe.style.cssText = "width:100% !important;height:100% !important;border:0 !important;display:block !important;background:#202124 !important;";\n    iframe.allow = "clipboard-write";\n\n    host.appendChild(handle);\n    host.appendChild(iframe);\n    (document.documentElement || document.body).appendChild(host);\n  }\n\n  function setSidebarOpen(open, persist = false) {\n    if (open) openSidebar(currentWidth);\n    else closeSidebar();\n    if (persist) {\n      try { chrome.storage.local.set({ [KEY_OPEN]: !!open }); } catch (_) {}\n    }\n    return { open: !!open };\n  }\n\n  function toggleSidebar() {\n    const next = !document.getElementById(HOST_ID);\n    return setSidebarOpen(next, true);\n  }\n\n  window.__a2rToggleSidebar = toggleSidebar;\n\n  if (window.__a2rSlimSidebarLoaded) return;\n  window.__a2rSlimSidebarLoaded = true;\n\n  let lastPing = 0;\n  function notifyActivity() {\n    const now = Date.now();\n    if (now - lastPing < 2000) return;\n    lastPing = now;\n    try {\n      chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {});\n    } catch (_) {}\n  }\n\n  ["mousedown", "pointerdown", "click", "keydown", "input", "wheel", "scroll", "mousemove", "touchstart"].forEach((evName) => {\n    window.addEventListener(evName, notifyActivity, { passive: true, capture: true });\n  });\n\n  // الفتح التلقائي: على بوابة المرور + المواقع المثبتة فقط (بدل كل المواقع)\n  let lastOpenEnabled = true;\n  let pinnedSites = {};\n  function siteAllowed() {\n    const host = location.hostname;\n    return host === PORTAL_HOST || !!pinnedSites[host];\n  }\n  try {\n    chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: DEFAULT_WIDTH, [KEY_SITES]: {} }, (res) => {\n      if (chrome.runtime.lastError) return;\n      currentWidth = clampWidth(res[KEY_WIDTH]);\n      lastOpenEnabled = res[KEY_OPEN] !== false;\n      pinnedSites = res[KEY_SITES] || {};\n      if (lastOpenEnabled && siteAllowed()) {\n        openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  // Live sync open/close state and resized width across ALL open tabs simultaneously\n  try {\n    chrome.storage.onChanged.addListener((changes, area) => {\n      if (area !== "local") return;\n      if (changes[KEY_WIDTH] && changes[KEY_WIDTH].newValue !== undefined) {\n        applyWidth(changes[KEY_WIDTH].newValue);\n      }\n      if (changes[KEY_OPEN] && changes[KEY_OPEN].newValue !== undefined) {\n        lastOpenEnabled = changes[KEY_OPEN].newValue !== false;\n        if (changes[KEY_OPEN].newValue) openSidebar(currentWidth);\n        else closeSidebar();\n      }\n      if (changes[KEY_SITES]) {\n        pinnedSites = changes[KEY_SITES].newValue || {};\n        if (!siteAllowed()) closeSidebar();\n        else if (lastOpenEnabled) openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {\n    if (!msg) return;\n    if (msg.type === "A2R_TOGGLE_SIDEBAR") {\n      sendResponse(toggleSidebar());\n      return true;\n    }\n    if (msg.type === "A2R_SET_SIDEBAR") {\n      if (msg.width !== undefined) currentWidth = clampWidth(msg.width);\n      sendResponse(setSidebarOpen(!!msg.open, false));\n      return true;\n    }\n  });\n\n  window.addEventListener("message", (ev) => {\n    if (!ev || !ev.data) return;\n    if (ev.data.type === "A2R_TOGGLE_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          const fixed = host === PORTAL_HOST;\n          if (!fixed) {\n            if (sites[host]) { delete sites[host]; closeSidebar(); }\n            else sites[host] = true;\n            pinnedSites = sites;\n            chrome.storage.local.set({ [KEY_SITES]: sites });\n          }\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: fixed || !!sites[host], fixed }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_QUERY_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: host === PORTAL_HOST || !!sites[host], fixed: host === PORTAL_HOST }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_CLOSE_SIDEBAR") {\n      setSidebarOpen(false, true);\n    } else if (ev.data.type === "A2R_USER_ACTIVITY") {\n      notifyActivity();\n    }\n  });\n})();\n',
-    'sidepanel.html': '<!DOCTYPE html>\n<html lang="ar" dir="rtl">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>A2R Operations Console</title>\n  <link rel="stylesheet" href="sidepanel.css">\n</head>\n<body>\n  <header class="topbar">\n    <div class="brand">\n      <span class="logo">A2R</span>\n      <span id="connBadge" class="badge offline">● مغلق</span>\n    </div>\n    <div class="top-actions">\n      <button id="btnPinSite" class="icon-btn hidden" title="تشغيل الإضافة تلقائيًا على هذا الموقع">📍</button>\n      <button id="btnTopOpenApp" class="icon-btn" title="إظهار البرنامج">🖥️</button>\n      <button id="btnCloseSlim" class="icon-btn close-btn hidden" title="إغلاق">✕</button>\n    </div>\n  </header>\n\n  <nav class="tabs">\n    <button class="tab-btn active" data-tab="home">الرئيسية</button>\n    <button class="tab-btn" data-tab="records">السجلات</button>\n    <button class="tab-btn" data-tab="archive">الأرشيف</button>\n  </nav>\n\n  <div id="toast" class="toast hidden"></div>\n\n  <main class="content">\n    <!-- TAB 1: HOME -->\n    <section id="tab-home" class="tab-pane active">\n      <div class="stack">\n        <div class="kpi-card green">\n          <div class="kpi-title">إجمالي السيستم</div>\n          <div id="kpiSum" class="kpi-val green-txt">0.00</div>\n        </div>\n\n        <div class="kpi-card blue">\n          <div class="kpi-title">عدد العمليات</div>\n          <div id="kpiCount" class="kpi-val">0</div>\n        </div>\n\n        <div class="kpi-mini-stack">\n          <div class="mini-line"><span>مطبوع اليوم</span><strong id="kpiPrinted">0</strong></div>\n          <div class="mini-line"><span>ملغي</span><strong id="kpiVoid">0</strong></div>\n          <div class="mini-line"><span>مكرر</span><strong id="kpiDup">0</strong></div>\n        </div>\n\n        <!-- الأزرار بالترتيب المطلوب -->\n        <button id="btnScan" class="btn primary full">⚡ فحص اليوم</button>\n        <div id="scanProg" class="scan-prog hidden"><div id="scanProgFill" class="scan-prog-fill"></div><span id="scanProgPct" class="scan-prog-pct">0%</span></div>\n\n        <button id="btnSummaryPdf" class="btn neutral full">📄 ملخص الفحص PDF</button>\n        <div id="summaryBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">اختر الوحدة للملخص</span>\n            <button id="btnSumCancel" class="chip-btn">✕</button>\n          </div>\n          <select id="sumUnit" class="input full mt-4"></select>\n          <div id="sumTid" class="hint mt-4">الماكينة: —</div>\n          <button id="btnSumPrint" class="btn primary full mt-4">📄 فتح الملخص PDF</button>\n        </div>\n\n        <button id="btnQuickManual" class="btn neutral full">➕ معاملة يدوية</button>\n        <div id="manualBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">معاملة يدوية PDF</span>\n            <button id="btnManualCancel" class="chip-btn">✕</button>\n          </div>\n          <input id="mAmount" type="number" step="0.01" placeholder="المبلغ + Enter *" class="input full mt-4">\n          <input id="mName" type="text" placeholder="اسم المؤمن له (اختياري)" class="input full mt-4">\n          <input id="mPlate" type="text" placeholder="رقم اللوحة (اختياري)" class="input full mt-4">\n          <select id="mUnit" class="input full mt-4"></select>\n          <button id="btnAddManual" class="btn primary full mt-4">توليد وطباعة (Enter)</button>\n        </div>\n\n        <button id="btnViewRecords" class="btn neutral full">🔍 عرض السجل</button>\n\n        <button id="btnReprintLast" class="btn neutral full">🖨️ طباعة الأخير</button>\n\n        <div id="archStatus" class="arch-pill">—</div>\n\n        <div class="settings-row">\n          <span>الرجوع التلقائي للبوابة</span>\n          <select id="selIdle" class="input">\n            <option value="0">إيقاف</option>\n            <option value="40">40 ثانية</option>\n            <option value="120">دقيقتان</option>\n          </select>\n        </div>\n      </div>\n    </section>\n\n    <!-- TAB 2: RECORDS -->\n    <section id="tab-records" class="tab-pane">\n      <div class="card compact">\n        <input id="recSearch" type="text" placeholder="بحث اسم، لوحة، شاسيه، مبلغ..." class="input full">\n        <select id="recFilter" class="input full mt-4">\n          <option value="all">كل الحالات</option>\n          <option value="ok">سليم</option>\n          <option value="manual">يدوي</option>\n          <option value="dup">مكرر</option>\n          <option value="void">ملغي</option>\n        </select>\n        <div id="recStats" class="hint mt-4">0 سجل</div>\n      </div>\n      <div id="recList" class="list-box"></div>\n    </section>\n\n    <!-- TAB 3: ARCHIVE -->\n    <section id="tab-archive" class="tab-pane">\n      <div class="card compact">\n        <input id="archQuery" type="text" placeholder="بحث في الأرشيف..." class="input full">\n        <button id="btnArchSearch" class="btn primary full mt-4">🔎 بحث</button>\n        <div id="archAuthRow" class="mt-4">\n          <input id="archPwd" type="password" placeholder="كلمة مرور المشرف" class="input full">\n          <button id="btnArchUnlock" class="btn neutral full mt-4">دخول المشرف</button>\n        </div>\n        <div id="archRoleHint" class="hint mt-4">آخر 7 أيام (للمشرف: الكل)</div>\n      </div>\n      <div id="archResults" class="list-box"></div>\n    </section>\n  </main>\n\n  <footer class="footer">\n    <span id="footVer">A2R • Ahmed Ramadan</span>\n  </footer>\n\n  <script src="sidepanel.js"></script>\n</body>\n</html>\n',
-    'sidepanel.css': '* { box-sizing: border-box; margin: 0; padding: 0; }\n:root {\n  --bg: #202124;\n  --surface: #292A2D;\n  --surface-hover: #35363A;\n  --input: #171717;\n  --border: #3C4043;\n  --text: #E8EAED;\n  --muted: #9AA0A6;\n  --accent: #8AB4F8;\n  --accent-bg: #1A73E8;\n  --accent-bg-h: #1B66C9;\n  --green: #81C995;\n  --warn: #FDD663;\n  --danger: #F28B82;\n}\nbody {\n  font-family: "Segoe UI", Roboto, Tahoma, sans-serif;\n  background: var(--bg);\n  color: var(--text);\n  font-size: 11px;\n  display: flex;\n  flex-direction: column;\n  height: 100vh;\n  overflow: hidden;\n  -webkit-font-smoothing: antialiased;\n}\n.topbar {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 6px 6px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.brand { display: flex; align-items: center; gap: 5px; }\n.logo { font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: 0.4px; }\n.badge { font-size: 8.5px; font-weight: 600; padding: 1px 5px; border-radius: 99px; }\n.badge.online { background: rgba(129, 201, 149, 0.14); color: var(--green); }\n.badge.offline { background: rgba(242, 139, 130, 0.14); color: var(--danger); }\n.top-actions { display: flex; gap: 3px; }\n.icon-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 10.5px;\n  display: flex; align-items: center; justify-content: center; transition: background 0.15s;\n}\n.icon-btn:hover { background: var(--surface-hover); color: var(--text); }\n.icon-btn.close-btn:hover { background: rgba(242, 139, 130, 0.18); color: var(--danger); }\n\n.tabs {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 3px;\n  padding: 5px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.tab-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 14px; padding: 5px 2px; font-weight: 600; font-size: 10px; cursor: pointer;\n  transition: background 0.15s, color 0.15s;\n}\n.tab-btn:hover { background: var(--surface); color: var(--text); }\n.tab-btn.active {\n  background: rgba(138, 180, 248, 0.16);\n  color: var(--accent);\n  border-color: rgba(138, 180, 248, 0.35);\n}\n\n.content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 5px; }\n.content::-webkit-scrollbar { width: 4px; }\n.content::-webkit-scrollbar-thumb { background: #4A4D51; border-radius: 4px; }\n.tab-pane { display: none; }\n.tab-pane.active { display: block; }\n\n.stack { display: flex; flex-direction: column; gap: 6px; }\n.hidden { display: none !important; }\n\n.card {\n  background: var(--surface); border: 1px solid var(--border);\n  border-radius: 8px; padding: 7px 6px; margin-bottom: 6px;\n}\n.card.compact { padding: 6px; }\n.card-title { font-size: 10px; font-weight: 600; color: var(--accent); }\n.hint { font-size: 8.5px; color: var(--muted); }\n.center { text-align: center; }\n\n.row-between { display: flex; align-items: center; justify-content: space-between; }\n.full { width: 100%; }\n.mt-4 { margin-top: 5px; }\n\n.input {\n  background: var(--input); color: var(--text); border: 1px solid var(--border);\n  border-radius: 6px; padding: 6px 6px; font-size: 10px; outline: none; width: 100%;\n  transition: border-color 0.15s;\n}\n.input:focus { border-color: var(--accent); }\n.input::placeholder { color: #7F868C; }\n\n/* أزرار بنمط جوجل كروم الداكن */\n.btn {\n  border: 1px solid var(--border); border-radius: 18px; padding: 8px 6px; min-height: 34px;\n  color: var(--text); font-weight: 600; font-size: 10.5px; line-height: 1.25;\n  cursor: pointer; text-align: center; display: flex; align-items: center;\n  justify-content: center; gap: 4px; word-break: break-word;\n  transition: background 0.15s, border-color 0.15s;\n}\n.btn.primary {\n  background: var(--accent-bg); border-color: var(--accent-bg); color: #FFFFFF;\n}\n.btn.primary:hover { background: var(--accent-bg-h); border-color: var(--accent-bg-h); }\n.btn.neutral { background: var(--surface); color: var(--text); }\n.btn.neutral:hover { background: var(--surface-hover); border-color: #5F6368; }\n.btn:disabled { opacity: 0.5; cursor: not-allowed; }\n\n.chip-btn {\n  background: var(--surface-hover); color: var(--text); border: 1px solid var(--border);\n  border-radius: 12px; padding: 1px 6px; font-size: 9px; font-weight: 600; cursor: pointer;\n}\n.chip-btn:hover { border-color: var(--accent); color: var(--accent); }\n\n.kpi-card {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 7px;\n}\n.kpi-title { font-size: 9px; color: var(--muted); font-weight: 600; }\n.kpi-val { font-size: 15px; font-weight: 700; margin-top: 2px; direction: ltr; text-align: right; color: var(--text); }\n.green-txt { color: var(--green); }\n\n.kpi-mini-stack {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; font-size: 9.5px;\n}\n.mini-line { display: flex; justify-content: space-between; color: var(--muted); }\n.mini-line strong { color: var(--text); font-weight: 600; }\n\n.arch-pill {\n  background: transparent; border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 4px; font-size: 8.5px; font-weight: 600; text-align: center; color: var(--green);\n}\n\n.match-result { font-size: 9.5px; font-weight: 600; margin-top: 4px; min-height: 12px; }\n.match-ok { color: var(--green); }\n.match-short { color: var(--danger); }\n.match-extra { color: var(--warn); }\n\n.list-box { display: flex; flex-direction: column; gap: 5px; }\n.rec-item {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 5px; border-right: 3px solid var(--accent);\n}\n.rec-item.kind-dup { background: rgba(242, 139, 130, 0.12); border-right-color: var(--danger); }\n.rec-item.kind-void { background: rgba(197, 138, 249, 0.12); border-right-color: #C58AF9; }\n.rec-item.kind-manual { background: rgba(138, 180, 248, 0.1); border-right-color: var(--accent); }\n.rec-item.kind-missing, .rec-item.kind-wrong { background: rgba(253, 214, 99, 0.1); border-right-color: var(--warn); }\n\n.rec-top { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 9.5px; gap: 3px; }\n.rec-amt { color: var(--green); font-size: 10px; white-space: nowrap; }\n.rec-item.kind-void .rec-amt { color: #D7AEFB; text-decoration: line-through; }\n.rec-meta { font-size: 8.5px; color: var(--muted); margin-top: 2px; line-height: 1.3; word-break: break-word; }\n.rec-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }\n.rec-actions button {\n  width: 100%; padding: 4px 4px; font-size: 9.5px; border-radius: 12px; border: 1px solid var(--border);\n  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;\n}\n.rec-actions button:hover { background: var(--surface-hover); border-color: var(--accent); }\n.rec-actions button.btn-v { color: var(--danger); }\n.rec-actions button.btn-r { color: var(--green); }\n\n.denom-stack { display: flex; flex-direction: column; gap: 3px; }\n.denom-item { display: flex; align-items: center; gap: 3px; font-size: 9.5px; }\n.denom-item span { width: 32px; color: var(--muted); font-weight: 600; }\n.denom-item input { flex: 1; text-align: center; padding: 3px 2px; }\n.cash-summary {\n  background: var(--input); border: 1px solid var(--border); border-radius: 6px;\n  padding: 5px; font-size: 9.5px; display: flex; flex-direction: column; gap: 2px;\n}\n\n.toast {\n  position: fixed; bottom: 24px; left: 5px; right: 5px; z-index: 99;\n  background: #303134; color: var(--text); border: 1px solid var(--border);\n  box-shadow: 0 2px 8px rgba(0,0,0,0.45);\n  border-radius: 8px; padding: 6px 6px; font-size: 9.5px; font-weight: 600; text-align: center;\n}\n\n.footer {\n  padding: 4px 5px; background: var(--bg); border-top: 1px solid var(--border);\n  text-align: center; font-size: 8.5px; color: var(--muted); font-weight: 500;\n}\n\n/* تكيف تلقائي عند تكبير عرض الشريط الجانبي بالسحب */\n@media (min-width: 210px) {\n  body { font-size: 12px; }\n  .logo { font-size: 13.5px; }\n  .badge { font-size: 10px; padding: 2px 7px; }\n  .tab-btn { font-size: 11px; padding: 6px 4px; }\n  .kpi-title { font-size: 10.5px; }\n  .kpi-val { font-size: 19px; }\n  .btn { font-size: 11.5px; min-height: 36px; padding: 9px 10px; }\n  .input { font-size: 11.5px; padding: 7px 8px; }\n  .rec-top { font-size: 11.5px; }\n  .rec-amt { font-size: 12px; }\n  .rec-meta { font-size: 10px; }\n  .rec-actions { flex-direction: row; }\n}\n\n/* v2.8: شريط تقدم الفحص + صف سبب الإلغاء + صف الإعدادات + زر تثبيت الموقع */\n.scan-prog { position: relative; background: var(--input); border: 1px solid var(--border); border-radius: 99px; height: 14px; overflow: hidden; }\n.scan-prog-fill { height: 100%; width: 0%; background: var(--accent-bg); transition: width 0.3s ease; }\n.scan-prog-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; color: var(--text); direction: ltr; }\n.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 9px; color: var(--muted); font-weight: 600; padding: 2px 1px; }\n.settings-row select { width: auto; padding: 3px 4px; }\n.icon-btn.pinned { color: var(--accent); border-color: rgba(138,180,248,0.4); }\n.void-row { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }\n.void-row .void-btns { display: flex; gap: 3px; }\n.void-row .void-btns button { flex: 1; padding: 4px 2px; font-size: 9px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; }\n.void-row .void-btns button.btn-confirm { color: var(--danger); }\n.void-row .void-btns button:hover { background: var(--surface-hover); border-color: var(--accent); }\n',
-    'sidepanel.js': 'const API = "http://127.0.0.1:47221";\nconst IS_SLIM = new URLSearchParams(location.search).get("mode") === "slim";\n\nlet state = {\n  connected: false,\n  systemSum: 0,\n  records: [],\n  units: [],\n  terminals: {},\n  isSupervisor: false,\n  metaLoaded: false,\n  initialSynced: false,\n  isProcessing: false,\n};\n\nconst $ = (id) => document.getElementById(id);\n\nfunction showToast(msg, ms = 2400) {\n  const el = $("toast");\n  el.textContent = msg;\n  el.classList.remove("hidden");\n  clearTimeout(el._t);\n  el._t = setTimeout(() => el.classList.add("hidden"), ms);\n}\n\nfunction fmtMoney(n) {\n  return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n\nfunction todayISO() {\n  const d = new Date();\n  const y = d.getFullYear();\n  const m = String(d.getMonth() + 1).padStart(2, "0");\n  const day = String(d.getDate()).padStart(2, "0");\n  return `${y}-${m}-${day}`;\n}\n\nasync function apiGet(path) {\n  const r = await fetch(API + path, { cache: "no-store" });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nasync function apiPost(path, body = {}) {\n  const r = await fetch(API + path, {\n    method: "POST",\n    headers: { "Content-Type": "application/json" },\n    body: JSON.stringify(body),\n  });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nfunction setConnected(ok, version = "") {\n  state.connected = ok;\n  const b = $("connBadge");\n  if (ok) {\n    b.textContent = "● متصل";\n    b.className = "badge online";\n    if (version) $("footVer").textContent = `A2R ${version} • Ahmed Ramadan`;\n  } else {\n    b.textContent = "● مغلق";\n    b.className = "badge offline";\n  }\n}\n\nfunction populateSelects() {\n  if (state.metaLoaded) return;\n  const fill = (sel, items, placeholder) => {\n    if (!sel) return;\n    sel.innerHTML = "";\n    const opt0 = document.createElement("option");\n    opt0.value = "";\n    opt0.textContent = placeholder;\n    sel.appendChild(opt0);\n    items.forEach((v) => {\n      const o = document.createElement("option");\n      o.value = v;\n      o.textContent = v;\n      sel.appendChild(o);\n    });\n  };\n  fill($("mUnit"), state.units, "وحدة المرور (اختياري)");\n  fill($("sumUnit"), state.units, "اختر الوحدة (إجباري)");\n  state.metaLoaded = true;\n}\n\nfunction applyStatus(d) {\n  setConnected(true, d.version || "");\n  if (d.units && d.units.length) {\n    state.units = d.units;\n    state.terminals = d.terminals || {};\n    populateSelects();\n  }\n  state.isSupervisor = !!d.is_supervisor;\n  $("kpiPrinted").textContent = String(d.printed_today || 0);\n\n  const s = d.summary || {};\n  state.systemSum = Number(s.total_sum || 0);\n  $("kpiCount").textContent = String(s.total_count || 0);\n  $("kpiSum").textContent = fmtMoney(state.systemSum);\n  $("kpiVoid").textContent = String(s.void_count || 0);\n  $("kpiDup").textContent = String(s.duplicates || 0);\n\n  const archEl = $("archStatus");\n  if (d.archive_done_today) {\n    archEl.textContent = `✓ الأرشفة مكتملة${d.archive_time ? " (" + d.archive_time + ")" : ""}`;\n    archEl.style.color = "#81C995";\n  } else {\n    archEl.textContent = "● الأرشفة جاهزة";\n    archEl.style.color = "#9AA0A6";\n  }\n\n  if (state.isSupervisor) {\n    $("archAuthRow").style.display = "none";\n    $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n  }\n\n  // شريط تقدم الفحص (v2.8)\n  state.isProcessing = !!d.is_processing;\n  const progEl = $("scanProg");\n  if (progEl) {\n    if (state.isProcessing) {\n      const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));\n      progEl.classList.remove("hidden");\n      $("scanProgFill").style.width = pct + "%";\n      $("scanProgPct").textContent = pct + "%";\n    } else {\n      progEl.classList.add("hidden");\n    }\n  }\n}\n\nasync function refreshStatus() {\n  try {\n    const d = await apiGet("/api/status");\n    applyStatus(d);\n    if (!state.initialSynced) {\n      state.initialSynced = true;\n      const cnt = Number((d.summary || {}).total_count || 0);\n      if (cnt === 0 && !d.is_processing) {\n        apiPost("/api/scan", { date: todayISO() })\n          .then(async (res) => {\n            if (res && res.ok) {\n              const d2 = await apiGet("/api/status");\n              applyStatus(d2);\n              await refreshRecords();\n            }\n          })\n          .catch(() => {});\n      }\n    }\n    return true;\n  } catch (_) {\n    setConnected(false);\n    return false;\n  }\n}\n\nasync function refreshRecords() {\n  try {\n    const d = await apiGet("/api/records");\n    state.records = d.records || [];\n    renderRecords();\n  } catch (_) {}\n}\n\nfunction renderRecords() {\n  const q = ($("recSearch").value || "").trim().toLowerCase();\n  const filt = $("recFilter").value;\n  const list = $("recList");\n  list.innerHTML = "";\n\n  let shown = 0;\n  let shownSum = 0;\n  state.records.forEach((r) => {\n    if (filt !== "all" && r.kind !== filt) return;\n    if (q) {\n      const hay = `${r.unit} ${r.plate} ${r.insured} ${r.amount} ${r.chassis} ${r.motor} ${r.file} ${r.status_text}`.toLowerCase();\n      if (!hay.includes(q)) return;\n    }\n    shown++;\n    if (!r.is_void) shownSum += Number(r.amount || 0);\n\n    const card = document.createElement("div");\n    card.className = `rec-item kind-${r.kind || "ok"}`;\n\n    const top = document.createElement("div");\n    top.className = "rec-top";\n    const title = document.createElement("span");\n    title.textContent = `#${r.idx} ${r.plate !== "-" ? r.plate : r.insured}`;\n    const amt = document.createElement("span");\n    amt.className = "rec-amt";\n    amt.textContent = fmtMoney(r.amount);\n    top.append(title, amt);\n\n    const meta = document.createElement("div");\n    meta.className = "rec-meta";\n    meta.textContent = `${r.insured} | ${r.time} · ${r.status_text}`;\n\n    const acts = document.createElement("div");\n    acts.className = "rec-actions";\n\n    const bOpen = document.createElement("button");\n    bOpen.textContent = "📄 فتح";\n    bOpen.addEventListener("click", () => apiPost("/api/open_file", { file: r.file }).catch(() => showToast("تعذر الفتح")));\n\n    const bPrint = document.createElement("button");\n    bPrint.textContent = "🖨️ طباعة";\n    bPrint.addEventListener("click", async () => {\n      try {\n        const res = await apiPost("/api/reprint", { file: r.file });\n        showToast(res.ok ? "✓ أُرسل للطابعة" : "تعذرت الطباعة");\n      } catch (_) { showToast("البرنامج مغلق"); }\n    });\n\n    const bVoid = document.createElement("button");\n    if (r.is_void) {\n      bVoid.className = "btn-r";\n      bVoid.textContent = "↩️ استرجاع";\n      bVoid.addEventListener("click", async () => {\n        try {\n          await apiPost("/api/unvoid", { file: r.file });\n          showToast("✓ تم الاسترجاع");\n          await refreshStatus();\n          await refreshRecords();\n        } catch (_) { showToast("تعذر الاسترجاع"); }\n      });\n    } else {\n      bVoid.className = "btn-v";\n      bVoid.textContent = "❌ إلغاء";\n      bVoid.addEventListener("click", () => {\n        const old = card.querySelector(".void-row");\n        if (old) { old.remove(); return; }\n        const row = document.createElement("div");\n        row.className = "void-row";\n        const inp = document.createElement("input");\n        inp.className = "input";\n        inp.placeholder = `سبب إلغاء #${r.idx} (${fmtMoney(r.amount)} ج.م)`;\n        const btns = document.createElement("div");\n        btns.className = "void-btns";\n        const bOk = document.createElement("button");\n        bOk.className = "btn-confirm";\n        bOk.textContent = "تأكيد الإلغاء";\n        const bNo = document.createElement("button");\n        bNo.textContent = "تراجع";\n        bNo.addEventListener("click", () => row.remove());\n        bOk.addEventListener("click", async () => {\n          bOk.disabled = true;\n          try {\n            await apiPost("/api/void", { file: r.file, reason: inp.value.trim() });\n            showToast("✓ تم الإلغاء");\n            await refreshStatus();\n            await refreshRecords();\n          } catch (_) {\n            showToast("تعذر الإلغاء");\n            bOk.disabled = false;\n          }\n        });\n        btns.append(bOk, bNo);\n        row.append(inp, btns);\n        card.appendChild(row);\n        inp.focus();\n      });\n    }\n\n    acts.append(bOpen, bPrint, bVoid);\n    card.append(top, meta, acts);\n    list.appendChild(card);\n  });\n\n  $("recStats").textContent = `${shown} سجل | ${fmtMoney(shownSum)} ج.م`;\n  if (!shown) {\n    const empty = document.createElement("div");\n    empty.className = "hint center mt-4";\n    empty.textContent = state.records.length ? "لا توجد نتائج" : "اضغط (⚡ فحص اليوم)";\n    list.appendChild(empty);\n  }\n}\n\nasync function loadArchiveDays() {\n  try {\n    const d = await apiGet("/api/archive/days");\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.days || []).forEach((item) => {\n      const card = document.createElement("div");\n      card.className = "rec-item" + (item.dup ? " kind-dup" : item.missing ? " kind-missing" : "");\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      top.innerHTML = `<span>📅 ${item.day}</span><span class="rec-amt">${fmtMoney(item.total)}</span>`;\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `العدد: ${item.ops} | ملغي: ${item.void} | يدوي: ${item.manual}`;\n      card.append(top, meta);\n      box.appendChild(card);\n    });\n    if (!(d.days || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد أيام مؤرشفة</div>\';\n    }\n  } catch (_) {}\n}\n\nasync function doArchiveSearch() {\n  const q = ($("archQuery").value || "").trim();\n  if (!q) return loadArchiveDays();\n  try {\n    const d = await apiGet(`/api/archive/search?q=${encodeURIComponent(q)}`);\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.results || []).forEach((r) => {\n      const card = document.createElement("div");\n      card.className = `rec-item ${r.is_void ? "kind-void" : r.is_manual ? "kind-manual" : ""}`;\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      const t1 = document.createElement("span");\n      t1.textContent = `${r.day} ${r.plate !== "-" ? r.plate : ""}`;\n      const t2 = document.createElement("span");\n      t2.className = "rec-amt";\n      t2.textContent = fmtMoney(r.amount);\n      top.append(t1, t2);\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `${r.insured} | ${r.time}`;\n      const acts = document.createElement("div");\n      acts.className = "rec-actions";\n      const bOpen = document.createElement("button");\n      bOpen.textContent = "📄 فتح الإيصال";\n      bOpen.addEventListener("click", () => apiPost("/api/open_file", { path: r.path }).catch(() => showToast("تعذر الفتح")));\n      acts.appendChild(bOpen);\n      card.append(top, meta, acts);\n      box.appendChild(card);\n    });\n    if (!(d.results || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد نتائج</div>\';\n    }\n  } catch (_) {\n    showToast("تعذر البحث");\n  }\n}\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  if (IS_SLIM) {\n    $("btnCloseSlim").classList.remove("hidden");\n    $("btnCloseSlim").addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_CLOSE_SIDEBAR" }, "*");\n    });\n    const pinBtn = $("btnPinSite");\n    pinBtn.classList.remove("hidden");\n    pinBtn.addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_TOGGLE_SITE" }, "*");\n    });\n    window.parent.postMessage({ type: "A2R_QUERY_SITE" }, "*");\n    window.addEventListener("message", (ev) => {\n      if (!ev || !ev.data || ev.data.type !== "A2R_SITE_STATE") return;\n      pinBtn.classList.toggle("pinned", !!ev.data.pinned);\n      pinBtn.title = ev.data.fixed\n        ? "الإضافة تعمل دائمًا على بوابة المرور"\n        : (ev.data.pinned ? "الإضافة مثبتة على هذا الموقع — اضغط للإيقاف" : "تشغيل الإضافة تلقائيًا على هذا الموقع");\n    });\n  }\n\n  // إعداد الرجوع التلقائي للبوابة (v2.8)\n  const selIdle = $("selIdle");\n  if (selIdle) {\n    try {\n      chrome.storage.local.get({ a2r_idle_sec: 40 }, (res) => {\n        if (chrome.runtime.lastError) return;\n        const v = Number(res.a2r_idle_sec);\n        selIdle.value = String(isNaN(v) ? 40 : v);\n      });\n    } catch (_) {}\n    selIdle.addEventListener("change", () => {\n      try {\n        chrome.storage.local.set({ a2r_idle_sec: Number(selIdle.value) });\n        showToast("✓ تم حفظ إعداد الرجوع التلقائي");\n      } catch (_) {}\n    });\n  }\n  let _lastAct = 0;\n  const _pingAct = () => {\n    const now = Date.now();\n    if (now - _lastAct < 2000) return;\n    _lastAct = now;\n    try { chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {}); } catch (_) {}\n    if (IS_SLIM) window.parent.postMessage({ type: "A2R_USER_ACTIVITY" }, "*");\n  };\n  ["mousedown", "keydown", "input", "wheel", "mousemove"].forEach((ev) => {\n    window.addEventListener(ev, _pingAct, { passive: true, capture: true });\n  });\n\n  document.querySelectorAll(".tab-btn").forEach((btn) => {\n    btn.addEventListener("click", () => {\n      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));\n      document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));\n      btn.classList.add("active");\n      $("tab-" + btn.dataset.tab).classList.add("active");\n      if (btn.dataset.tab === "records") refreshRecords();\n      if (btn.dataset.tab === "archive") loadArchiveDays();\n    });\n  });\n\n  // 1. فحص اليوم\n  $("btnScan").addEventListener("click", async () => {\n    const b = $("btnScan");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفحص...";\n    try {\n      const res = await apiPost("/api/scan", { date: todayISO() });\n      if (res.ok) {\n        await refreshStatus();\n        await refreshRecords();\n        showToast(`✓ ${res.total_count} عملية (${fmtMoney(res.total_sum)})`);\n      } else {\n        showToast(res.error || "لا توجد إيصالات اليوم");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق — شغّل A2R Console");\n    } finally {\n      b.disabled = false;\n      b.textContent = "⚡ فحص اليوم";\n    }\n  });\n\n  // 2. ملخص الفحص PDF\n  $("btnSummaryPdf").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n    $("summaryBox").classList.toggle("hidden");\n  });\n  $("btnSumCancel").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n  });\n  $("sumUnit").addEventListener("change", () => {\n    const tid = state.terminals[$("sumUnit").value] || "";\n    $("sumTid").textContent = tid ? `الماكينة: ${tid}` : "الماكينة: —";\n  });\n  $("btnSumPrint").addEventListener("click", async () => {\n    const unit = ($("sumUnit").value || "").trim();\n    if (!unit) return showToast("اختر الوحدة أولاً");\n    const b = $("btnSumPrint");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفتح...";\n    try {\n      const res = await apiPost("/api/summary_pdf", { unit, print: false });\n      if (res.ok) {\n        $("summaryBox").classList.add("hidden");\n        showToast("✓ تم فتح ملخص الفحص PDF");\n      } else {\n        showToast(res.error || "تعذر إنشاء الملخص");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "📄 فتح الملخص PDF";\n    }\n  });\n\n  // 3. معاملة يدوية (فتح فوري + تنفيذ بـ Enter)\n  $("btnQuickManual").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n    const box = $("manualBox");\n    box.classList.toggle("hidden");\n    if (!box.classList.contains("hidden")) {\n      setTimeout(() => { if ($("mAmount")) $("mAmount").focus(); }, 40);\n    }\n  });\n  $("btnManualCancel").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n  });\n\n  async function submitManualReceipt() {\n    const b = $("btnAddManual");\n    if (b.disabled) return;\n    const amount = ($("mAmount").value || "").trim();\n    if (!amount) return showToast("أدخل المبلغ أولاً");\n    b.disabled = true;\n    b.textContent = "⏳ جاري التنفيذ...";\n    try {\n      const res = await apiPost("/api/manual", {\n        amount,\n        insured: $("mName").value.trim(),\n        plate: $("mPlate").value.trim(),\n        unit: $("mUnit").value.trim(),\n      });\n      if (res.ok) {\n        $("mAmount").value = "";\n        $("mName").value = "";\n        $("mPlate").value = "";\n        showToast(`✓ إيصال يدوي (${fmtMoney(res.amount)})`);\n        if (res.pdf_url) {\n          try {\n            chrome.runtime.sendMessage({ type: "A2R_OPEN_TAB", url: res.pdf_url }).catch(() => {\n              window.open(res.pdf_url, "_blank");\n            });\n          } catch (_) {\n            window.open(res.pdf_url, "_blank");\n          }\n        }\n        await refreshStatus();\n        await refreshRecords();\n        $("mAmount").focus();\n      } else {\n        showToast(res.error || "مبلغ غير صالح");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "توليد وطباعة (Enter)";\n    }\n  }\n  $("btnAddManual").addEventListener("click", submitManualReceipt);\n  ["mAmount", "mName", "mPlate", "mUnit"].forEach((id) => {\n    $(id).addEventListener("keydown", (e) => {\n      if (e.key === "Enter") {\n        e.preventDefault();\n        submitManualReceipt();\n      }\n    });\n  });\n\n  // 4. عرض السجل\n  $("btnViewRecords").addEventListener("click", () => {\n    const tabBtn = document.querySelector(\'.tab-btn[data-tab="records"]\');\n    if (tabBtn) tabBtn.click();\n  });\n\n  // 5. طباعة الأخير\n  $("btnReprintLast").addEventListener("click", async () => {\n    try {\n      const res = await apiPost("/api/reprint_last");\n      showToast(res.ok ? "✓ تمت إعادة طباعة الأخير" : (res.error || "لا يوجد إيصال اليوم"));\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  $("btnTopOpenApp").addEventListener("click", () => {\n    apiPost("/api/open_app", { mode: "show" }).catch(() => showToast("البرنامج مغلق"));\n  });\n\n  $("recSearch").addEventListener("input", renderRecords);\n  $("recFilter").addEventListener("change", renderRecords);\n\n  $("btnArchSearch").addEventListener("click", doArchiveSearch);\n  $("archQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") doArchiveSearch(); });\n  $("btnArchUnlock").addEventListener("click", async () => {\n    const pwd = ($("archPwd").value || "").trim();\n    if (!pwd) return;\n    try {\n      const res = await apiPost("/api/auth", { password: pwd });\n      if (res.ok && res.is_supervisor) {\n        state.isSupervisor = true;\n        $("archPwd").value = "";\n        $("archAuthRow").style.display = "none";\n        $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n        showToast("✓ تم تفعيل المشرف");\n        loadArchiveDays();\n      } else {\n        showToast(res.error || "كلمة المرور غير صحيحة");\n      }\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  // تحديث الحالة: يتوقف وهي مخفية، ويتسارع أثناء الفحص (v2.8)\n  let pollTimer = null;\n  function schedulePoll() {\n    clearTimeout(pollTimer);\n    if (document.hidden) return;\n    pollTimer = setTimeout(pollTick, state.isProcessing ? 1000 : 4000);\n  }\n  async function pollTick() {\n    await refreshStatus();\n    schedulePoll();\n  }\n  document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      clearTimeout(pollTimer);\n    } else {\n      refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n    }\n  });\n  refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n});\n',
+    'manifest.json': '{\n  "manifest_version": 3,\n  "name": "A2R Operations Console",\n  "version": "2.9.3",\n  "description": "A2R Operations Console - Persistent Slim Resizable Sidebar (170px) & Offline Traffic Portal Manager",\n  "permissions": [\n    "tabs",\n    "alarms",\n    "sidePanel",\n    "activeTab",\n    "scripting",\n    "storage"\n  ],\n  "host_permissions": [\n    "http://127.0.0.1:47221/*"\n  ],\n  "action": {\n    "default_title": "A2R Operations Console",\n    "default_icon": {\n      "16": "icons/icon16.png",\n      "48": "icons/icon48.png",\n      "128": "icons/icon128.png"\n    }\n  },\n  "side_panel": {\n    "default_path": "sidepanel.html"\n  },\n  "content_scripts": [\n    {\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ],\n      "js": [\n        "content_sidebar.js"\n      ],\n      "run_at": "document_start"\n    }\n  ],\n  "web_accessible_resources": [\n    {\n      "resources": [\n        "sidepanel.html",\n        "sidepanel.css",\n        "sidepanel.js",\n        "icons/*"\n      ],\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ]\n    }\n  ],\n  "background": {\n    "service_worker": "background.js"\n  },\n  "icons": {\n    "16": "icons/icon16.png",\n    "48": "icons/icon48.png",\n    "128": "icons/icon128.png"\n  }\n}\n',
+    'background.js': '// A2R Operations Console - Chrome Extension v2.7.0 (100% Offline)\n// 1) Persistent resizable slim sidebar (132px) across ALL web tabs (state & width saved in chrome.storage.local)\n// 2) Auto-pin Traffic Portal tab & keep last 4 PDF receipt tabs\n// 3) 40-second IDLE auto-return to Traffic Portal (192.168.235.50)\n\nconst PORTAL_HOST = "192.168.235.50";\nconst MAX_RECEIPT_TABS = 4;\nconst DEFAULT_IDLE_SEC = 40;\nlet idleReturnSec = DEFAULT_IDLE_SEC;\ntry {\n  chrome.storage.local.get({ a2r_idle_sec: DEFAULT_IDLE_SEC }, (res) => {\n    idleReturnSec = Number(res.a2r_idle_sec);\n    if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n  });\n  chrome.storage.onChanged.addListener((changes, area) => {\n    if (area === "local" && changes.a2r_idle_sec) {\n      idleReturnSec = Number(changes.a2r_idle_sec.newValue);\n      if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n    }\n  });\n} catch (_) {}\nconst KEY_OPEN = "a2r_sidebar_open";\nconst KEY_WIDTH = "a2r_sidebar_width_v3";\n\nlet lastActivityTs = Date.now();\nlet returnedForCurrentIdle = false;\n\ntry {\n  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {\n    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});\n  }\n} catch (_) {}\n\nfunction getTabUrl(tab) {\n  return ((tab && (tab.url || tab.pendingUrl)) || "").toLowerCase();\n}\n\nfunction canInjectSlimSidebar(tab) {\n  const u = getTabUrl(tab);\n  if (!u.startsWith("http://") && !u.startsWith("https://")) return false;\n  if (u.startsWith("https://chrome.google.com/webstore") || u.startsWith("https://chromewebstore.google.com")) return false;\n  if (u.endsWith(".pdf") || u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return false;\n  return true;\n}\n\nchrome.action.onClicked.addListener((tab) => {\n  if (!tab || tab.id === undefined) return;\n  markUserActive();\n\n  if (!canInjectSlimSidebar(tab)) {\n    try {\n      if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n        chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n      }\n    } catch (_) {}\n    return;\n  }\n\n  chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 0 }, (res) => {\n    // v92: الضغط على أيقونة الإضافة يفتح الشريط دائمًا (الإغلاق من زر ✕ فقط)\n    const nextOpen = true;\n    const savedWidth = res[KEY_WIDTH] || 0;\n    chrome.storage.local.set({ [KEY_OPEN]: nextOpen });\n\n    chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth }).catch(async () => {\n      try {\n        await chrome.scripting.executeScript({\n          target: { tabId: tab.id },\n          files: ["content_sidebar.js"],\n        });\n        await chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth });\n      } catch (_) {\n        try {\n          if (chrome.sidePanel && chrome.sidePanel.open && tab.windowId !== undefined) {\n            chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});\n          }\n        } catch (_) {}\n      }\n    });\n  });\n});\n\nfunction isPortalTab(tab) {\n  const u = getTabUrl(tab);\n  if (!u.includes(PORTAL_HOST)) return false;\n  if (u.includes("quote_receipt") || u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt")) {\n    return false;\n  }\n  return true;\n}\n\nfunction isProtectedChromePage(tab) {\n  const u = getTabUrl(tab);\n  return u.startsWith("chrome://extensions") || u.startsWith("chrome://settings");\n}\n\nfunction isReceiptPdfTab(tab, portalTabIds) {\n  if (!tab || tab.pinned) return false;\n  const u = getTabUrl(tab);\n  if (!u) return false;\n  if (isPortalTab(tab)) return false;\n  // v93: أي رابط يبدأ بـ 192.168 لا يُغلق تلقائيًا أبدًا\n  if (u.includes("192.168")) return false;\n\n  if (u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return true;\n  if (u.includes(PORTAL_HOST) && (u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt"))) {\n    return true;\n  }\n  if (\n    tab.openerTabId &&\n    portalTabIds.has(tab.openerTabId) &&\n    (u.includes(".pdf") || u.startsWith("blob:") || u.startsWith("data:application/pdf"))\n  ) {\n    return true;\n  }\n  return false;\n}\n\nfunction markUserActive() {\n  lastActivityTs = Date.now();\n  returnedForCurrentIdle = false;\n}\n\nasync function maintainPinAndReceipts(windowId) {\n  try {\n    const tabs = await chrome.tabs.query({ windowId });\n    const portalTabs = tabs.filter(isPortalTab);\n    const portalTabIds = new Set(portalTabs.map((t) => t.id));\n    // v93: لا يتم تثبيت تبويب البوابة بعد الآن\n    const receiptTabs = tabs\n      .filter((t) => isReceiptPdfTab(t, portalTabIds))\n      .sort((a, b) => a.id - b.id);\n    if (receiptTabs.length > MAX_RECEIPT_TABS) {\n      const toClose = receiptTabs.slice(0, receiptTabs.length - MAX_RECEIPT_TABS);\n      for (const oldTab of toClose) {\n        chrome.tabs.remove(oldTab.id).catch(() => {});\n      }\n    }\n  } catch (_) {}\n}\n\nasync function checkIdleAndReturnToPortal() {\n  try {\n    if (returnedForCurrentIdle) return;\n    const idleSec = (Date.now() - lastActivityTs) / 1000;\n    if (!idleReturnSec) return;\n    if (idleSec < idleReturnSec) return;\n\n    let activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });\n    if (!activeTabs || !activeTabs.length) {\n      activeTabs = await chrome.tabs.query({ active: true });\n    }\n    if (!activeTabs || !activeTabs.length) return;\n\n    const curTab = activeTabs[0];\n    if (!curTab || isPortalTab(curTab) || isProtectedChromePage(curTab)) return;\n\n    let winTabs = await chrome.tabs.query({ windowId: curTab.windowId });\n    let portal = winTabs.find(isPortalTab);\n\n    if (portal) {\n      if (!portal.active) {\n        returnedForCurrentIdle = true;\n        await chrome.tabs.update(portal.id, { active: true });\n      }\n      return;\n    }\n\n    const allTabs = await chrome.tabs.query({});\n    portal = allTabs.find(isPortalTab);\n    if (portal && portal.id !== curTab.id) {\n      returnedForCurrentIdle = true;\n      if (portal.windowId !== undefined) {\n        await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n      }\n      await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n    }\n  } catch (_) {}\n}\n\nsetInterval(checkIdleAndReturnToPortal, 2000);\n\nfunction scheduleAlarmFallback() {\n  try {\n    if (!idleReturnSec) return;\n    chrome.alarms.clear("a2r_idle_check").catch(() => {});\n    chrome.alarms.create("a2r_idle_check", { when: Date.now() + idleReturnSec * 1000 });\n  } catch (_) {}\n}\n\nchrome.alarms.onAlarm.addListener((alarm) => {\n  if (alarm && alarm.name === "a2r_idle_check") {\n    checkIdleAndReturnToPortal();\n  }\n});\n\nchrome.runtime.onMessage.addListener((msg) => {\n  if (!msg) return;\n  if (msg.type === "A2R_USER_ACTIVITY") {\n    markUserActive();\n    scheduleAlarmFallback();\n  } else if (msg.type === "A2R_GOTO_PORTAL") {\n    (async () => {\n      try {\n        const all = await chrome.tabs.query({});\n        const portal = all.find(isPortalTab);\n        if (portal) {\n          if (portal.windowId !== undefined) await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n          await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n        } else {\n          await chrome.tabs.create({ url: "http://" + PORTAL_HOST + "/" }).catch(() => {});\n        }\n      } catch (_) {}\n    })();\n  } else if (msg.type === "A2R_OPEN_TAB" && msg.url) {\n    chrome.tabs.create({ url: msg.url }).catch(() => {});\n  }\n});\n\nchrome.tabs.onCreated.addListener((tab) => {\n  if (!tab) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n});\n\nchrome.tabs.onActivated.addListener((activeInfo) => {\n  if (!activeInfo) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (activeInfo.windowId !== undefined) maintainPinAndReceipts(activeInfo.windowId);\n});\n\nchrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {\n  if (!tab) return;\n  if (changeInfo.status === "complete" || changeInfo.url) {\n    if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n  }\n});\n',
+    'content_sidebar.js': '// A2R Operations Console - Persistent Resizable Slim Sidebar (170px, Push-Layout, Chrome Dark) + Idle Detector\n(() => {\n  const HOST_ID = "a2r-slim-sidebar-host";\n  const PUSH_STYLE_ID = "a2r-slim-sidebar-push-style";\n  const KEY_OPEN = "a2r_sidebar_open";\n  const KEY_WIDTH = "a2r_sidebar_width_v3";\n  const KEY_SITES = "a2r_sidebar_sites";\n  const PORTAL_HOST = "192.168.235.50";\n  const DEFAULT_WIDTH = 170;\n  const MIN_WIDTH = 145;\n  const MAX_WIDTH = 480;\n\n  // v91: العرض الافتراضي نسبة من عرض نافذة المتصفح (12%) بحد أدنى 150 وأقصى 300\n  function autoWidth() {\n    return Math.max(150, Math.min(300, Math.round(window.innerWidth * 0.12)));\n  }\n  let currentWidth = autoWidth();\n\n  function clampWidth(w) {\n    const n = Math.round(Number(w) || DEFAULT_WIDTH);\n    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, n));\n  }\n\n  function applyPagePush(w) {\n    let st = document.getElementById(PUSH_STYLE_ID);\n    if (!st) {\n      st = document.createElement("style");\n      st.id = PUSH_STYLE_ID;\n      (document.head || document.documentElement).appendChild(st);\n    }\n    st.textContent = `\n      html {\n        width: calc(100% - ${w}px) !important;\n        max-width: calc(100% - ${w}px) !important;\n        margin-right: ${w}px !important;\n        box-sizing: border-box !important;\n      }\n      body {\n        max-width: 100% !important;\n        box-sizing: border-box !important;\n      }\n    `;\n  }\n\n\n  // v94: إصلاح العناصر التي تتجاهل تصغير الصفحة (fixed / absolute / عرض بوحدات vw) حتى لا تختفي تحت الشريط.\n  // يعمل مرة عند الفتح ومرة بعد ثانية وعند تغيير الحجم فقط، بدون مراقبين مستمرين.\n  const FIX_PROPS = ["right", "max-width", "box-sizing"];\n  const fixedOrig = new Map();\n  let fixTimer = 0;\n\n  function restoreFixups() {\n    fixedOrig.forEach((orig, el) => {\n      try {\n        FIX_PROPS.forEach((pr) => {\n          if (orig[pr] && orig[pr][0]) el.style.setProperty(pr, orig[pr][0], orig[pr][1]);\n          else el.style.removeProperty(pr);\n        });\n      } catch (_) {}\n    });\n    fixedOrig.clear();\n  }\n\n  function remember(el) {\n    if (fixedOrig.has(el)) return;\n    const o = {};\n    FIX_PROPS.forEach((pr) => { o[pr] = [el.style.getPropertyValue(pr), el.style.getPropertyPriority(pr)]; });\n    fixedOrig.set(el, o);\n  }\n\n  function runFixups() {\n    try {\n      const host = document.getElementById(HOST_ID);\n      const body = document.body;\n      if (!host || !body) return;\n      restoreFixups();\n      const vw = window.innerWidth;\n      const limit = vw - currentWidth;\n      const list = [];\n      const add = (el) => { if (el && el !== host && el.nodeType === 1 && list.length < 160) list.push(el); };\n      Array.from(body.children).forEach((el) => {\n        add(el);\n        Array.from(el.children).forEach(add);\n      });\n      const reads = [];\n      for (const el of list) {\n        if (el.id === PUSH_STYLE_ID || /^(SCRIPT|STYLE|LINK|META|NOSCRIPT)$/.test(el.tagName)) continue;\n        const cs = getComputedStyle(el);\n        if (cs.display === "none" || cs.visibility === "hidden") continue;\n        const r = el.getBoundingClientRect();\n        if (r.width < 40 || r.height < 4) continue;\n        if (r.right <= limit + 2 || r.left >= limit) continue;\n        reads.push([el, cs.position, r, Math.abs(vw - r.right) <= 3]);\n      }\n      for (const [el, pos, r, rightAnchored] of reads) {\n        remember(el);\n        if ((pos === "fixed" || pos === "absolute") && rightAnchored) {\n          el.style.setProperty("right", currentWidth + "px", "important");\n        } else if (r.width >= limit * 0.85 || pos === "fixed" || pos === "absolute") {\n          el.style.setProperty("box-sizing", "border-box", "important");\n          el.style.setProperty("max-width", Math.max(60, Math.floor(limit - r.left)) + "px", "important");\n        }\n      }\n    } catch (_) {}\n  }\n\n  function scheduleFixups(delay) {\n    clearTimeout(fixTimer);\n    fixTimer = setTimeout(runFixups, delay);\n  }\n\n  window.addEventListener("resize", () => { if (document.getElementById(HOST_ID)) scheduleFixups(200); });\n  window.addEventListener("load", () => { if (document.getElementById(HOST_ID)) scheduleFixups(50); });\n\n  function removePagePush() {\n    const st = document.getElementById(PUSH_STYLE_ID);\n    if (st) st.remove();\n  }\n\n  function applyWidth(w) {\n    currentWidth = clampWidth(w);\n    const host = document.getElementById(HOST_ID);\n    if (host) {\n      host.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      scheduleFixups(250);\n    }\n  }\n\n  function closeSidebar() {\n    const el = document.getElementById(HOST_ID);\n    if (el) el.remove();\n    removePagePush();\n    restoreFixups();\n  }\n\n  function openSidebar(widthPx = currentWidth) {\n    currentWidth = clampWidth(widthPx);\n    const existing = document.getElementById(HOST_ID);\n    if (existing) {\n      existing.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      return;\n    }\n\n    applyPagePush(currentWidth);\n\n    const host = document.createElement("div");\n    host.id = HOST_ID;\n    host.style.cssText = [\n      "position:fixed",\n      "top:0",\n      "right:0",\n      `width:${currentWidth}px`,\n      "height:100vh",\n      "z-index:2147483647",\n      "box-shadow:-1px 0 8px rgba(0,0,0,0.35)",\n      "border-left:1px solid #3C4043",\n      "background:#202124",\n      "margin:0",\n      "padding:0",\n      "overflow:hidden",\n      "box-sizing:border-box"\n    ].join(" !important;") + " !important;";\n\n    // Easy-to-grab 8px left-edge drag handle with subtle center grip pill\n    const handle = document.createElement("div");\n    handle.title = "اسحب لتكبير أو تصغير العرض (دبل كليك للحجم التلقائي حسب المتصفح)";\n    handle.style.cssText = [\n      "position:absolute",\n      "top:0",\n      "left:0",\n      "width:8px",\n      "height:100%",\n      "cursor:ew-resize",\n      "z-index:10",\n      "background:transparent",\n      "display:flex",\n      "align-items:center",\n      "justify-content:center",\n      "transition:background 0.15s ease"\n    ].join(" !important;") + " !important;";\n\n    const grip = document.createElement("div");\n    grip.style.cssText = [\n      "width:3px",\n      "height:38px",\n      "border-radius:3px",\n      "background:rgba(154,160,166,0.45)",\n      "pointer-events:none"\n    ].join(" !important;") + " !important;";\n    handle.appendChild(grip);\n\n    handle.addEventListener("mouseenter", () => {\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.25)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n    });\n    handle.addEventListener("mouseleave", () => {\n      if (!handle.dataset.dragging) {\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n      }\n    });\n\n    handle.addEventListener("dblclick", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      applyWidth(autoWidth());\n      try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n    });\n\n    handle.addEventListener("mousedown", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      handle.dataset.dragging = "1";\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.45)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n\n      const shield = document.createElement("div");\n      shield.style.cssText = "position:fixed !important;inset:0 !important;z-index:2147483647 !important;cursor:ew-resize !important;background:transparent !important;";\n      (document.documentElement || document.body).appendChild(shield);\n\n      const onMove = (mEv) => {\n        const w = clampWidth(window.innerWidth - mEv.clientX);\n        applyWidth(w);\n        notifyActivity();\n      };\n\n      const onUp = () => {\n        delete handle.dataset.dragging;\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n        window.removeEventListener("mousemove", onMove, true);\n        window.removeEventListener("mouseup", onUp, true);\n        shield.remove();\n        try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n      };\n\n      window.addEventListener("mousemove", onMove, true);\n      window.addEventListener("mouseup", onUp, true);\n    });\n\n    const iframe = document.createElement("iframe");\n    iframe.src = chrome.runtime.getURL("sidepanel.html?mode=slim");\n    iframe.style.cssText = "width:100% !important;height:100% !important;border:0 !important;display:block !important;background:#202124 !important;";\n    iframe.allow = "clipboard-write";\n\n    host.appendChild(handle);\n    host.appendChild(iframe);\n    (document.documentElement || document.body).appendChild(host);\n    scheduleFixups(60);\n    setTimeout(() => { if (document.getElementById(HOST_ID)) runFixups(); }, 1000);\n  }\n\n  function setSidebarOpen(open, persist = false) {\n    if (open) openSidebar(currentWidth);\n    else closeSidebar();\n    if (persist) {\n      try { chrome.storage.local.set({ [KEY_OPEN]: !!open }); } catch (_) {}\n    }\n    return { open: !!open };\n  }\n\n  function toggleSidebar() {\n    const next = !document.getElementById(HOST_ID);\n    return setSidebarOpen(next, true);\n  }\n\n  window.__a2rToggleSidebar = toggleSidebar;\n\n  if (window.__a2rSlimSidebarLoaded) return;\n  window.__a2rSlimSidebarLoaded = true;\n\n  let lastPing = 0;\n  function notifyActivity() {\n    const now = Date.now();\n    if (now - lastPing < 2000) return;\n    lastPing = now;\n    try {\n      chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {});\n    } catch (_) {}\n  }\n\n  ["mousedown", "pointerdown", "click", "keydown", "input", "wheel", "scroll", "mousemove", "touchstart"].forEach((evName) => {\n    window.addEventListener(evName, notifyActivity, { passive: true, capture: true });\n  });\n\n  // الفتح التلقائي: على بوابة المرور + المواقع المثبتة فقط (بدل كل المواقع)\n  let lastOpenEnabled = true;\n  let pinnedSites = {};\n  function siteAllowed() {\n    const host = location.hostname;\n    return host === PORTAL_HOST || !!pinnedSites[host];\n  }\n  try {\n    chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 0, [KEY_SITES]: {} }, (res) => {\n      if (chrome.runtime.lastError) return;\n      currentWidth = Number(res[KEY_WIDTH]) > 0 ? clampWidth(res[KEY_WIDTH]) : autoWidth();\n      lastOpenEnabled = res[KEY_OPEN] !== false;\n      pinnedSites = res[KEY_SITES] || {};\n      if (lastOpenEnabled && siteAllowed()) {\n        openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  // Live sync open/close state and resized width across ALL open tabs simultaneously\n  try {\n    chrome.storage.onChanged.addListener((changes, area) => {\n      if (area !== "local") return;\n      if (changes[KEY_WIDTH] && changes[KEY_WIDTH].newValue !== undefined) {\n        applyWidth(changes[KEY_WIDTH].newValue);\n      }\n      if (changes[KEY_OPEN] && changes[KEY_OPEN].newValue !== undefined) {\n        lastOpenEnabled = changes[KEY_OPEN].newValue !== false;\n        if (changes[KEY_OPEN].newValue) openSidebar(currentWidth);\n        else closeSidebar();\n      }\n      if (changes[KEY_SITES]) {\n        pinnedSites = changes[KEY_SITES].newValue || {};\n        if (!siteAllowed()) closeSidebar();\n        else if (lastOpenEnabled) openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {\n    if (!msg) return;\n    if (msg.type === "A2R_TOGGLE_SIDEBAR") {\n      sendResponse(toggleSidebar());\n      return true;\n    }\n    if (msg.type === "A2R_SET_SIDEBAR") {\n      if (Number(msg.width) > 0) currentWidth = clampWidth(msg.width);\n      sendResponse(setSidebarOpen(!!msg.open, false));\n      return true;\n    }\n  });\n\n  window.addEventListener("message", (ev) => {\n    if (!ev || !ev.data) return;\n    if (ev.data.type === "A2R_TOGGLE_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          const fixed = host === PORTAL_HOST;\n          if (!fixed) {\n            if (sites[host]) { delete sites[host]; closeSidebar(); }\n            else sites[host] = true;\n            pinnedSites = sites;\n            chrome.storage.local.set({ [KEY_SITES]: sites });\n          }\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: fixed || !!sites[host], fixed }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_QUERY_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: host === PORTAL_HOST || !!sites[host], fixed: host === PORTAL_HOST }, "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_CLOSE_SIDEBAR") {\n      setSidebarOpen(false, true);\n    } else if (ev.data.type === "A2R_USER_ACTIVITY") {\n      notifyActivity();\n    }\n  });\n})();\n',
+    'sidepanel.html': '<!DOCTYPE html>\n<html lang="ar" dir="rtl">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>A2R Operations Console</title>\n  <link rel="stylesheet" href="sidepanel.css">\n</head>\n<body>\n  <header class="topbar">\n    <div class="brand">\n      <span class="logo">A2R</span>\n      <span id="connBadge" class="badge offline">● مغلق</span>\n    </div>\n    <div class="top-actions">\n      <button id="btnPinSite" class="icon-btn hidden" title="تشغيل الإضافة تلقائيًا على هذا الموقع">📍</button>\n      <button id="btnTopOpenApp" class="icon-btn" title="إظهار البرنامج">🖥️</button>\n      <button id="btnCloseSlim" class="icon-btn close-btn hidden" title="إغلاق">✕</button>\n    </div>\n  </header>\n\n  <nav class="tabs">\n    <button class="tab-btn active" data-tab="home">الرئيسية</button>\n    <button class="tab-btn" data-tab="records">السجلات</button>\n    <button class="tab-btn" data-tab="archive">الأرشيف</button>\n  </nav>\n\n  <div id="toast" class="toast hidden"></div>\n\n  <main class="content">\n    <!-- TAB 1: HOME -->\n    <section id="tab-home" class="tab-pane active">\n      <div class="stack">\n        <div class="kpi-card green">\n          <div class="kpi-title">إجمالي السيستم</div>\n          <div id="kpiSum" class="kpi-val green-txt">0.00</div>\n        </div>\n\n        <div class="kpi-card blue">\n          <div class="kpi-title">عدد العمليات</div>\n          <div id="kpiCount" class="kpi-val">0</div>\n        </div>\n\n        <div class="kpi-mini-stack hidden" aria-hidden="true">\n          <div class="mini-line"><span>مطبوع اليوم</span><strong id="kpiPrinted">0</strong></div>\n          <div class="mini-line"><span>ملغي</span><strong id="kpiVoid">0</strong></div>\n          <div class="mini-line"><span>مكرر</span><strong id="kpiDup">0</strong></div>\n        </div>\n\n        <!-- الأزرار بالترتيب المطلوب -->\n        <button id="btnScan" class="btn primary full">⚡ فحص اليوم</button>\n        <div id="scanProg" class="scan-prog hidden"><div id="scanProgFill" class="scan-prog-fill"></div><span id="scanProgPct" class="scan-prog-pct">0%</span></div>\n\n        <button id="btnSummaryPdf" class="btn neutral full">📄 ملخص الفحص PDF</button>\n        <div id="summaryBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">اختر الوحدة للملخص</span>\n            <button id="btnSumCancel" class="chip-btn">✕</button>\n          </div>\n          <select id="sumUnit" class="input full mt-4"></select>\n          <div id="sumTid" class="hint mt-4">الماكينة: —</div>\n          <button id="btnSumPrint" class="btn primary full mt-4">📄 فتح الملخص PDF</button>\n        </div>\n\n        <button id="btnQuickManual" class="btn neutral full">➕ معاملة يدوية</button>\n        <div id="manualBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">معاملة يدوية PDF</span>\n            <button id="btnManualCancel" class="chip-btn">✕</button>\n          </div>\n          <input id="mAmount" type="number" step="0.01" placeholder="المبلغ + Enter *" class="input full mt-4">\n          <input id="mName" type="text" placeholder="اسم المؤمن له (اختياري)" class="input full mt-4">\n          <input id="mPlate" type="text" placeholder="رقم اللوحة (اختياري)" class="input full mt-4">\n          <select id="mUnit" class="input full mt-4"></select>\n          <button id="btnAddManual" class="btn primary full mt-4">توليد وطباعة (Enter)</button>\n        </div>\n\n        <button id="btnViewRecords" class="btn neutral full">🔍 عرض السجل</button>\n\n        <button id="btnReprintLast" class="btn neutral full">🖨️ طباعة الأخير</button>\n\n        <div id="archStatus" class="arch-pill">—</div>\n\n        <div class="settings-row">\n          <span>الرجوع التلقائي للبوابة</span>\n          <select id="selIdle" class="input">\n            <option value="0">إيقاف</option>\n            <option value="5">5 ثانية</option>\n            <option value="10">10 ثانية</option>\n            <option value="15">15 ثانية</option>\n            <option value="20">20 ثانية</option>\n            <option value="25">25 ثانية</option>\n            <option value="30">30 ثانية</option>\n            <option value="35">35 ثانية</option>\n            <option value="40">40 ثانية</option>\n            <option value="45">45 ثانية</option>\n            <option value="50">50 ثانية</option>\n            <option value="55">55 ثانية</option>\n            <option value="60">60 ثانية</option>\n          </select>\n        </div>\n      </div>\n    </section>\n\n    <!-- TAB 2: RECORDS -->\n    <section id="tab-records" class="tab-pane">\n      <div class="card compact">\n        <input id="recSearch" type="text" placeholder="بحث اسم، لوحة، شاسيه، مبلغ..." class="input full">\n        <select id="recFilter" class="input full mt-4">\n          <option value="all">كل الحالات</option>\n          <option value="ok">سليم</option>\n          <option value="manual">يدوي</option>\n          <option value="dup">مكرر</option>\n          <option value="void">ملغي</option>\n        </select>\n        <div id="recStats" class="hint mt-4">0 سجل</div>\n      </div>\n      <div id="recList" class="list-box"></div>\n    </section>\n\n    <!-- TAB 3: ARCHIVE -->\n    <section id="tab-archive" class="tab-pane">\n      <div class="card compact">\n        <input id="archQuery" type="text" placeholder="بحث في الأرشيف..." class="input full">\n        <button id="btnArchSearch" class="btn primary full mt-4">🔎 بحث</button>\n        <div id="archAuthRow" class="mt-4">\n          <input id="archPwd" type="password" placeholder="كلمة مرور المشرف" class="input full">\n          <button id="btnArchUnlock" class="btn neutral full mt-4">دخول المشرف</button>\n        </div>\n        <div id="archRoleHint" class="hint mt-4">آخر 7 أيام (للمشرف: الكل)</div>\n      </div>\n      <div id="archResults" class="list-box"></div>\n    </section>\n  </main>\n\n  <footer class="footer">\n    <span id="footVer">A2R • Ahmed Ramadan</span>\n  </footer>\n\n  <script src="sidepanel.js"></script>\n</body>\n</html>\n',
+    'sidepanel.css': '* { box-sizing: border-box; margin: 0; padding: 0; }\n:root {\n  --bg: #202124;\n  --surface: #292A2D;\n  --surface-hover: #35363A;\n  --input: #171717;\n  --border: #3C4043;\n  --text: #E8EAED;\n  --muted: #9AA0A6;\n  --accent: #8AB4F8;\n  --accent-bg: #1A73E8;\n  --accent-bg-h: #1B66C9;\n  --green: #81C995;\n  --warn: #FDD663;\n  --danger: #F28B82;\n}\nbody {\n  font-family: "Segoe UI", Roboto, Tahoma, sans-serif;\n  background: var(--bg);\n  color: var(--text);\n  font-size: 11px;\n  display: flex;\n  flex-direction: column;\n  height: 100vh;\n  overflow: hidden;\n  -webkit-font-smoothing: antialiased;\n}\n.topbar {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 6px 6px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.brand { display: flex; align-items: center; gap: 5px; }\n.logo { font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: 0.4px; }\n.badge { font-size: 8.5px; font-weight: 600; padding: 1px 5px; border-radius: 99px; }\n.badge.online { background: rgba(129, 201, 149, 0.14); color: var(--green); }\n.badge.offline { background: rgba(242, 139, 130, 0.14); color: var(--danger); }\n.top-actions { display: flex; gap: 3px; }\n.icon-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 10.5px;\n  display: flex; align-items: center; justify-content: center; transition: background 0.15s;\n}\n.icon-btn:hover { background: var(--surface-hover); color: var(--text); }\n.icon-btn.close-btn:hover { background: rgba(242, 139, 130, 0.18); color: var(--danger); }\n\n.tabs {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 3px;\n  padding: 5px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.tab-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 14px; padding: 5px 2px; font-weight: 600; font-size: 10px; cursor: pointer;\n  transition: background 0.15s, color 0.15s;\n}\n.tab-btn:hover { background: var(--surface); color: var(--text); }\n.tab-btn.active {\n  background: rgba(138, 180, 248, 0.16);\n  color: var(--accent);\n  border-color: rgba(138, 180, 248, 0.35);\n}\n\n.content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 5px; }\n.content::-webkit-scrollbar { width: 4px; }\n.content::-webkit-scrollbar-thumb { background: #4A4D51; border-radius: 4px; }\n.tab-pane { display: none; }\n.tab-pane.active { display: block; }\n\n.stack { display: flex; flex-direction: column; gap: 6px; }\n.hidden { display: none !important; }\n\n.card {\n  background: var(--surface); border: 1px solid var(--border);\n  border-radius: 8px; padding: 7px 6px; margin-bottom: 6px;\n}\n.card.compact { padding: 6px; }\n.card-title { font-size: 10px; font-weight: 600; color: var(--accent); }\n.hint { font-size: 8.5px; color: var(--muted); }\n.center { text-align: center; }\n\n.row-between { display: flex; align-items: center; justify-content: space-between; }\n.full { width: 100%; }\n.mt-4 { margin-top: 5px; }\n\n.input {\n  background: var(--input); color: var(--text); border: 1px solid var(--border);\n  border-radius: 6px; padding: 6px 6px; font-size: 10px; outline: none; width: 100%;\n  transition: border-color 0.15s;\n}\n.input:focus { border-color: var(--accent); }\n.input::placeholder { color: #7F868C; }\n\n/* أزرار بنمط جوجل كروم الداكن */\n.btn {\n  border: 1px solid var(--border); border-radius: 18px; padding: 8px 6px; min-height: 34px;\n  color: var(--text); font-weight: 600; font-size: 10.5px; line-height: 1.25;\n  cursor: pointer; text-align: center; display: flex; align-items: center;\n  justify-content: center; gap: 4px; word-break: break-word;\n  transition: background 0.15s, border-color 0.15s;\n}\n.btn.primary {\n  background: var(--accent-bg); border-color: var(--accent-bg); color: #FFFFFF;\n}\n.btn.primary:hover { background: var(--accent-bg-h); border-color: var(--accent-bg-h); }\n.btn.neutral { background: var(--surface); color: var(--text); }\n.btn.neutral:hover { background: var(--surface-hover); border-color: #5F6368; }\n.btn:disabled { opacity: 0.5; cursor: not-allowed; }\n\n.chip-btn {\n  background: var(--surface-hover); color: var(--text); border: 1px solid var(--border);\n  border-radius: 12px; padding: 1px 6px; font-size: 9px; font-weight: 600; cursor: pointer;\n}\n.chip-btn:hover { border-color: var(--accent); color: var(--accent); }\n\n.kpi-card {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 7px;\n}\n.kpi-title { font-size: 9px; color: var(--muted); font-weight: 600; }\n.kpi-val { font-size: 15px; font-weight: 700; margin-top: 2px; direction: ltr; text-align: right; color: var(--text); }\n.green-txt { color: var(--green); }\n\n.kpi-mini-stack {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; font-size: 9.5px;\n}\n.mini-line { display: flex; justify-content: space-between; color: var(--muted); }\n.mini-line strong { color: var(--text); font-weight: 600; }\n\n.arch-pill {\n  background: transparent; border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 4px; font-size: 8.5px; font-weight: 600; text-align: center; color: var(--green);\n}\n\n.match-result { font-size: 9.5px; font-weight: 600; margin-top: 4px; min-height: 12px; }\n.match-ok { color: var(--green); }\n.match-short { color: var(--danger); }\n.match-extra { color: var(--warn); }\n\n.list-box { display: flex; flex-direction: column; gap: 5px; }\n.rec-item {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 5px; border-right: 3px solid var(--accent);\n}\n.rec-item.kind-dup { background: rgba(242, 139, 130, 0.12); border-right-color: var(--danger); }\n.rec-item.kind-void { background: rgba(197, 138, 249, 0.12); border-right-color: #C58AF9; }\n.rec-item.kind-manual { background: rgba(138, 180, 248, 0.1); border-right-color: var(--accent); }\n.rec-item.kind-missing, .rec-item.kind-wrong { background: rgba(253, 214, 99, 0.1); border-right-color: var(--warn); }\n\n.rec-top { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 9.5px; gap: 3px; }\n.rec-amt { color: var(--green); font-size: 10px; white-space: nowrap; }\n.rec-item.kind-void .rec-amt { color: #D7AEFB; text-decoration: line-through; }\n.rec-meta { font-size: 8.5px; color: var(--muted); margin-top: 2px; line-height: 1.3; word-break: break-word; }\n.rec-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }\n.rec-actions button {\n  width: 100%; padding: 4px 4px; font-size: 9.5px; border-radius: 12px; border: 1px solid var(--border);\n  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;\n}\n.rec-actions button:hover { background: var(--surface-hover); border-color: var(--accent); }\n.rec-actions button.btn-v { color: var(--danger); }\n.rec-actions button.btn-r { color: var(--green); }\n\n.denom-stack { display: flex; flex-direction: column; gap: 3px; }\n.denom-item { display: flex; align-items: center; gap: 3px; font-size: 9.5px; }\n.denom-item span { width: 32px; color: var(--muted); font-weight: 600; }\n.denom-item input { flex: 1; text-align: center; padding: 3px 2px; }\n.cash-summary {\n  background: var(--input); border: 1px solid var(--border); border-radius: 6px;\n  padding: 5px; font-size: 9.5px; display: flex; flex-direction: column; gap: 2px;\n}\n\n.toast {\n  position: fixed; bottom: 24px; left: 5px; right: 5px; z-index: 99;\n  background: #303134; color: var(--text); border: 1px solid var(--border);\n  box-shadow: 0 2px 8px rgba(0,0,0,0.45);\n  border-radius: 8px; padding: 6px 6px; font-size: 9.5px; font-weight: 600; text-align: center;\n}\n\n.footer {\n  padding: 4px 5px; background: var(--bg); border-top: 1px solid var(--border);\n  text-align: center; font-size: 8.5px; color: var(--muted); font-weight: 500;\n}\n\n/* تكيف تلقائي عند تكبير عرض الشريط الجانبي بالسحب */\n@media (min-width: 210px) {  /* لوحة كروم الجانبية فقط (body.sp)؛ الشريط الملصوق يكبر بالـzoom */\n  body.sp { font-size: 12px; }\n  body.sp .logo { font-size: 13.5px; }\n  body.sp .badge { font-size: 10px; padding: 2px 7px; }\n  body.sp .tab-btn { font-size: 11px; padding: 6px 4px; }\n  body.sp .kpi-title { font-size: 10.5px; }\n  body.sp .kpi-val { font-size: 19px; }\n  body.sp .btn { font-size: 11.5px; min-height: 36px; padding: 9px 10px; }\n  body.sp .input { font-size: 11.5px; padding: 7px 8px; }\n  body.sp .rec-top { font-size: 11.5px; }\n  body.sp .rec-amt { font-size: 12px; }\n  body.sp .rec-meta { font-size: 10px; }\n  body.sp .rec-actions { flex-direction: row; }\n}\n\n/* v2.8: شريط تقدم الفحص + صف سبب الإلغاء + صف الإعدادات + زر تثبيت الموقع */\n.scan-prog { position: relative; background: var(--input); border: 1px solid var(--border); border-radius: 99px; height: 14px; overflow: hidden; }\n.scan-prog-fill { height: 100%; width: 0%; background: var(--accent-bg); transition: width 0.3s ease; }\n.scan-prog-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; color: var(--text); direction: ltr; }\n.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 9px; color: var(--muted); font-weight: 600; padding: 2px 1px; }\n.settings-row select { width: auto; padding: 3px 4px; }\n.icon-btn.pinned { color: var(--accent); border-color: rgba(138,180,248,0.4); }\n.void-row { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }\n.void-row .void-btns { display: flex; gap: 3px; }\n.void-row .void-btns button { flex: 1; padding: 4px 2px; font-size: 9px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; }\n.void-row .void-btns button.btn-confirm { color: var(--danger); }\n.void-row .void-btns button:hover { background: var(--surface-hover); border-color: var(--accent); }\n\n/* v91: زر البوابة الكبير (التبويب المثبّت في كروم صغير بطبيعته، فده بديل واضح وسهل الضغط) */\n.btn.portal {\n  background: #F9AB00; border-color: #F9AB00; color: #202124; font-weight: 800;\n  font-size: 13px; min-height: 44px; border-radius: 12px; margin: 5px 5px 0; width: calc(100% - 10px);\n  box-shadow: 0 0 0 2px rgba(249,171,0,0.25);\n}\n.btn.portal:hover { background: #FBBC04; border-color: #FBBC04; }\n.btn.portal:active { transform: scale(0.98); }\n.settings-row { font-size: 10px; }\n.settings-row select { font-size: 10.5px; min-height: 26px; }\n',
+    'sidepanel.js': 'const API = "http://127.0.0.1:47221";\nconst IS_SLIM = new URLSearchParams(location.search).get("mode") === "slim";\n\nlet state = {\n  connected: false,\n  systemSum: 0,\n  records: [],\n  units: [],\n  terminals: {},\n  isSupervisor: false,\n  metaLoaded: false,\n  initialSynced: false,\n  isProcessing: false,\n};\n\nconst $ = (id) => document.getElementById(id);\n\n// v91: تكبير كل المحتوى (الخطوط والأزرار وخانة الإجمالي) مع عرض الشريط\nconst BASE_W = 132;\nfunction fitScale() {\n  const b = document.body;\n  if (!b) return;\n  if (!IS_SLIM) { b.classList.add("sp"); return; }\n  const z = Math.max(1, Math.min(3.6, window.innerWidth / BASE_W));\n  b.style.zoom = String(z);\n  b.style.height = (window.innerHeight / z) + "px";\n}\nwindow.addEventListener("resize", fitScale);\n\n\nfunction showToast(msg, ms = 2400) {\n  const el = $("toast");\n  el.textContent = msg;\n  el.classList.remove("hidden");\n  clearTimeout(el._t);\n  el._t = setTimeout(() => el.classList.add("hidden"), ms);\n}\n\nfunction fmtMoney(n) {\n  return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n\nfunction todayISO() {\n  const d = new Date();\n  const y = d.getFullYear();\n  const m = String(d.getMonth() + 1).padStart(2, "0");\n  const day = String(d.getDate()).padStart(2, "0");\n  return `${y}-${m}-${day}`;\n}\n\nasync function apiGet(path) {\n  const r = await fetch(API + path, { cache: "no-store" });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nasync function apiPost(path, body = {}) {\n  const r = await fetch(API + path, {\n    method: "POST",\n    headers: { "Content-Type": "application/json" },\n    body: JSON.stringify(body),\n  });\n  if (!r.ok) throw new Error("HTTP " + r.status);\n  return await r.json();\n}\n\nfunction setConnected(ok, version = "") {\n  state.connected = ok;\n  const b = $("connBadge");\n  if (ok) {\n    b.textContent = "● متصل";\n    b.className = "badge online";\n    if (version) $("footVer").textContent = `A2R ${version} • Ahmed Ramadan`;\n  } else {\n    b.textContent = "● مغلق";\n    b.className = "badge offline";\n  }\n}\n\nfunction populateSelects() {\n  if (state.metaLoaded) return;\n  const fill = (sel, items, placeholder) => {\n    if (!sel) return;\n    sel.innerHTML = "";\n    const opt0 = document.createElement("option");\n    opt0.value = "";\n    opt0.textContent = placeholder;\n    sel.appendChild(opt0);\n    items.forEach((v) => {\n      const o = document.createElement("option");\n      o.value = v;\n      o.textContent = v;\n      sel.appendChild(o);\n    });\n  };\n  fill($("mUnit"), state.units, "وحدة المرور (اختياري)");\n  fill($("sumUnit"), state.units, "اختر الوحدة (إجباري)");\n  state.metaLoaded = true;\n}\n\nfunction applyStatus(d) {\n  setConnected(true, d.version || "");\n  if (d.units && d.units.length) {\n    state.units = d.units;\n    state.terminals = d.terminals || {};\n    populateSelects();\n  }\n  state.isSupervisor = !!d.is_supervisor;\n  $("kpiPrinted").textContent = String(d.printed_today || 0);\n\n  const s = d.summary || {};\n  state.systemSum = Number(s.total_sum || 0);\n  $("kpiCount").textContent = String(s.total_count || 0);\n  $("kpiSum").textContent = fmtMoney(state.systemSum);\n  $("kpiVoid").textContent = String(s.void_count || 0);\n  $("kpiDup").textContent = String(s.duplicates || 0);\n\n  const archEl = $("archStatus");\n  if (d.archive_done_today) {\n    archEl.textContent = `✓ الأرشفة مكتملة${d.archive_time ? " (" + d.archive_time + ")" : ""}`;\n    archEl.style.color = "#81C995";\n  } else {\n    archEl.textContent = "● الأرشفة جاهزة";\n    archEl.style.color = "#9AA0A6";\n  }\n\n  if (state.isSupervisor) {\n    $("archAuthRow").style.display = "none";\n    $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n  }\n\n  // شريط تقدم الفحص (v2.8)\n  state.isProcessing = !!d.is_processing;\n  const progEl = $("scanProg");\n  if (progEl) {\n    if (state.isProcessing) {\n      const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));\n      progEl.classList.remove("hidden");\n      $("scanProgFill").style.width = pct + "%";\n      $("scanProgPct").textContent = pct + "%";\n    } else {\n      progEl.classList.add("hidden");\n    }\n  }\n}\n\nasync function refreshStatus() {\n  try {\n    const d = await apiGet("/api/status");\n    applyStatus(d);\n    if (!state.initialSynced) {\n      state.initialSynced = true;\n      const cnt = Number((d.summary || {}).total_count || 0);\n      if (cnt === 0 && !d.is_processing) {\n        apiPost("/api/scan", { date: todayISO() })\n          .then(async (res) => {\n            if (res && res.ok) {\n              const d2 = await apiGet("/api/status");\n              applyStatus(d2);\n              await refreshRecords();\n            }\n          })\n          .catch(() => {});\n      }\n    }\n    return true;\n  } catch (_) {\n    setConnected(false);\n    return false;\n  }\n}\n\nasync function refreshRecords() {\n  try {\n    const d = await apiGet("/api/records");\n    state.records = d.records || [];\n    renderRecords();\n  } catch (_) {}\n}\n\nfunction renderRecords() {\n  const q = ($("recSearch").value || "").trim().toLowerCase();\n  const filt = $("recFilter").value;\n  const list = $("recList");\n  list.innerHTML = "";\n\n  let shown = 0;\n  let shownSum = 0;\n  state.records.forEach((r) => {\n    if (filt !== "all" && r.kind !== filt) return;\n    if (q) {\n      const hay = `${r.unit} ${r.plate} ${r.insured} ${r.amount} ${r.chassis} ${r.motor} ${r.file} ${r.status_text}`.toLowerCase();\n      if (!hay.includes(q)) return;\n    }\n    shown++;\n    if (!r.is_void) shownSum += Number(r.amount || 0);\n\n    const card = document.createElement("div");\n    card.className = `rec-item kind-${r.kind || "ok"}`;\n\n    const top = document.createElement("div");\n    top.className = "rec-top";\n    const title = document.createElement("span");\n    title.textContent = `#${r.idx} ${r.plate !== "-" ? r.plate : r.insured}`;\n    const amt = document.createElement("span");\n    amt.className = "rec-amt";\n    amt.textContent = fmtMoney(r.amount);\n    top.append(title, amt);\n\n    const meta = document.createElement("div");\n    meta.className = "rec-meta";\n    meta.textContent = `${r.insured} | ${r.time} · ${r.status_text}`;\n\n    const acts = document.createElement("div");\n    acts.className = "rec-actions";\n\n    const bOpen = document.createElement("button");\n    bOpen.textContent = "📄 فتح";\n    bOpen.addEventListener("click", () => apiPost("/api/open_file", { file: r.file }).catch(() => showToast("تعذر الفتح")));\n\n    const bPrint = document.createElement("button");\n    bPrint.textContent = "🖨️ طباعة";\n    bPrint.addEventListener("click", async () => {\n      try {\n        const res = await apiPost("/api/reprint", { file: r.file });\n        showToast(res.ok ? "✓ أُرسل للطابعة" : "تعذرت الطباعة");\n      } catch (_) { showToast("البرنامج مغلق"); }\n    });\n\n    const bVoid = document.createElement("button");\n    if (r.is_void) {\n      bVoid.className = "btn-r";\n      bVoid.textContent = "↩️ استرجاع";\n      bVoid.addEventListener("click", async () => {\n        try {\n          await apiPost("/api/unvoid", { file: r.file });\n          showToast("✓ تم الاسترجاع");\n          await refreshStatus();\n          await refreshRecords();\n        } catch (_) { showToast("تعذر الاسترجاع"); }\n      });\n    } else {\n      bVoid.className = "btn-v";\n      bVoid.textContent = "❌ إلغاء";\n      bVoid.addEventListener("click", () => {\n        const old = card.querySelector(".void-row");\n        if (old) { old.remove(); return; }\n        const row = document.createElement("div");\n        row.className = "void-row";\n        const inp = document.createElement("input");\n        inp.className = "input";\n        inp.placeholder = `سبب إلغاء #${r.idx} (${fmtMoney(r.amount)} ج.م)`;\n        const btns = document.createElement("div");\n        btns.className = "void-btns";\n        const bOk = document.createElement("button");\n        bOk.className = "btn-confirm";\n        bOk.textContent = "تأكيد الإلغاء";\n        const bNo = document.createElement("button");\n        bNo.textContent = "تراجع";\n        bNo.addEventListener("click", () => row.remove());\n        bOk.addEventListener("click", async () => {\n          bOk.disabled = true;\n          try {\n            await apiPost("/api/void", { file: r.file, reason: inp.value.trim() });\n            showToast("✓ تم الإلغاء");\n            await refreshStatus();\n            await refreshRecords();\n          } catch (_) {\n            showToast("تعذر الإلغاء");\n            bOk.disabled = false;\n          }\n        });\n        btns.append(bOk, bNo);\n        row.append(inp, btns);\n        card.appendChild(row);\n        inp.focus();\n      });\n    }\n\n    acts.append(bOpen, bPrint, bVoid);\n    card.append(top, meta, acts);\n    list.appendChild(card);\n  });\n\n  $("recStats").textContent = `${shown} سجل | ${fmtMoney(shownSum)} ج.م`;\n  if (!shown) {\n    const empty = document.createElement("div");\n    empty.className = "hint center mt-4";\n    empty.textContent = state.records.length ? "لا توجد نتائج" : "اضغط (⚡ فحص اليوم)";\n    list.appendChild(empty);\n  }\n}\n\nasync function loadArchiveDays() {\n  try {\n    const d = await apiGet("/api/archive/days");\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.days || []).forEach((item) => {\n      const card = document.createElement("div");\n      card.className = "rec-item" + (item.dup ? " kind-dup" : item.missing ? " kind-missing" : "");\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      top.innerHTML = `<span>📅 ${item.day}</span><span class="rec-amt">${fmtMoney(item.total)}</span>`;\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `العدد: ${item.ops} | ملغي: ${item.void} | يدوي: ${item.manual}`;\n      card.append(top, meta);\n      box.appendChild(card);\n    });\n    if (!(d.days || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد أيام مؤرشفة</div>\';\n    }\n  } catch (_) {}\n}\n\nasync function doArchiveSearch() {\n  const q = ($("archQuery").value || "").trim();\n  if (!q) return loadArchiveDays();\n  try {\n    const d = await apiGet(`/api/archive/search?q=${encodeURIComponent(q)}`);\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.results || []).forEach((r) => {\n      const card = document.createElement("div");\n      card.className = `rec-item ${r.is_void ? "kind-void" : r.is_manual ? "kind-manual" : ""}`;\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      const t1 = document.createElement("span");\n      t1.textContent = `${r.day} ${r.plate !== "-" ? r.plate : ""}`;\n      const t2 = document.createElement("span");\n      t2.className = "rec-amt";\n      t2.textContent = fmtMoney(r.amount);\n      top.append(t1, t2);\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `${r.insured} | ${r.time}`;\n      const acts = document.createElement("div");\n      acts.className = "rec-actions";\n      const bOpen = document.createElement("button");\n      bOpen.textContent = "📄 فتح الإيصال";\n      bOpen.addEventListener("click", () => apiPost("/api/open_file", { path: r.path }).catch(() => showToast("تعذر الفتح")));\n      acts.appendChild(bOpen);\n      card.append(top, meta, acts);\n      box.appendChild(card);\n    });\n    if (!(d.results || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">لا توجد نتائج</div>\';\n    }\n  } catch (_) {\n    showToast("تعذر البحث");\n  }\n}\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  fitScale();\n  const bp = $("btnPortal");\n  if (bp) bp.addEventListener("click", () => {\n    try { chrome.runtime.sendMessage({ type: "A2R_GOTO_PORTAL" }).catch(() => {}); } catch (_) {}\n  });\n  if (IS_SLIM) {\n    $("btnCloseSlim").classList.remove("hidden");\n    $("btnCloseSlim").addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_CLOSE_SIDEBAR" }, "*");\n    });\n    const pinBtn = $("btnPinSite");\n    pinBtn.classList.remove("hidden");\n    pinBtn.addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_TOGGLE_SITE" }, "*");\n    });\n    window.parent.postMessage({ type: "A2R_QUERY_SITE" }, "*");\n    window.addEventListener("message", (ev) => {\n      if (!ev || !ev.data || ev.data.type !== "A2R_SITE_STATE") return;\n      pinBtn.classList.toggle("pinned", !!ev.data.pinned);\n      pinBtn.title = ev.data.fixed\n        ? "الإضافة تعمل دائمًا على بوابة المرور"\n        : (ev.data.pinned ? "الإضافة مثبتة على هذا الموقع — اضغط للإيقاف" : "تشغيل الإضافة تلقائيًا على هذا الموقع");\n    });\n  }\n\n  // إعداد الرجوع التلقائي للبوابة (v2.8)\n  const selIdle = $("selIdle");\n  if (selIdle) {\n    try {\n      chrome.storage.local.get({ a2r_idle_sec: 40 }, (res) => {\n        if (chrome.runtime.lastError) return;\n        const v = Number(res.a2r_idle_sec);\n        let vv = isNaN(v) ? 40 : v;\n        if (vv > 60) vv = 60;\n        if (vv > 0 && vv < 5) vv = 5;\n        vv = vv > 0 ? Math.round(vv / 5) * 5 : 0;\n        selIdle.value = String(vv);\n      });\n    } catch (_) {}\n    selIdle.addEventListener("change", () => {\n      try {\n        chrome.storage.local.set({ a2r_idle_sec: Number(selIdle.value) });\n        showToast("✓ تم حفظ إعداد الرجوع التلقائي");\n      } catch (_) {}\n    });\n  }\n  let _lastAct = 0;\n  const _pingAct = () => {\n    const now = Date.now();\n    if (now - _lastAct < 2000) return;\n    _lastAct = now;\n    try { chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {}); } catch (_) {}\n    if (IS_SLIM) window.parent.postMessage({ type: "A2R_USER_ACTIVITY" }, "*");\n  };\n  ["mousedown", "keydown", "input", "wheel", "mousemove"].forEach((ev) => {\n    window.addEventListener(ev, _pingAct, { passive: true, capture: true });\n  });\n\n  document.querySelectorAll(".tab-btn").forEach((btn) => {\n    btn.addEventListener("click", () => {\n      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));\n      document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));\n      btn.classList.add("active");\n      $("tab-" + btn.dataset.tab).classList.add("active");\n      if (btn.dataset.tab === "records") refreshRecords();\n      if (btn.dataset.tab === "archive") loadArchiveDays();\n    });\n  });\n\n  // 1. فحص اليوم\n  $("btnScan").addEventListener("click", async () => {\n    const b = $("btnScan");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفحص...";\n    try {\n      const res = await apiPost("/api/scan", { date: todayISO() });\n      if (res.ok) {\n        await refreshStatus();\n        await refreshRecords();\n        showToast(`✓ ${res.total_count} عملية (${fmtMoney(res.total_sum)})`);\n      } else {\n        showToast(res.error || "لا توجد إيصالات اليوم");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق — شغّل A2R Console");\n    } finally {\n      b.disabled = false;\n      b.textContent = "⚡ فحص اليوم";\n    }\n  });\n\n  // 2. ملخص الفحص PDF\n  $("btnSummaryPdf").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n    $("summaryBox").classList.toggle("hidden");\n  });\n  $("btnSumCancel").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n  });\n  $("sumUnit").addEventListener("change", () => {\n    const tid = state.terminals[$("sumUnit").value] || "";\n    $("sumTid").textContent = tid ? `الماكينة: ${tid}` : "الماكينة: —";\n  });\n  $("btnSumPrint").addEventListener("click", async () => {\n    const unit = ($("sumUnit").value || "").trim();\n    if (!unit) return showToast("اختر الوحدة أولاً");\n    const b = $("btnSumPrint");\n    b.disabled = true;\n    b.textContent = "⏳ جاري الفتح...";\n    try {\n      const res = await apiPost("/api/summary_pdf", { unit, print: false });\n      if (res.ok) {\n        $("summaryBox").classList.add("hidden");\n        showToast("✓ تم فتح ملخص الفحص PDF");\n      } else {\n        showToast(res.error || "تعذر إنشاء الملخص");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "📄 فتح الملخص PDF";\n    }\n  });\n\n  // 3. معاملة يدوية (فتح فوري + تنفيذ بـ Enter)\n  $("btnQuickManual").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n    const box = $("manualBox");\n    box.classList.toggle("hidden");\n    if (!box.classList.contains("hidden")) {\n      setTimeout(() => { if ($("mAmount")) $("mAmount").focus(); }, 40);\n    }\n  });\n  $("btnManualCancel").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n  });\n\n  async function submitManualReceipt() {\n    const b = $("btnAddManual");\n    if (b.disabled) return;\n    const amount = ($("mAmount").value || "").trim();\n    if (!amount) return showToast("أدخل المبلغ أولاً");\n    b.disabled = true;\n    b.textContent = "⏳ جاري التنفيذ...";\n    try {\n      const res = await apiPost("/api/manual", {\n        amount,\n        insured: $("mName").value.trim(),\n        plate: $("mPlate").value.trim(),\n        unit: $("mUnit").value.trim(),\n      });\n      if (res.ok) {\n        $("mAmount").value = "";\n        $("mName").value = "";\n        $("mPlate").value = "";\n        showToast(`✓ إيصال يدوي (${fmtMoney(res.amount)})`);\n        if (res.pdf_url) {\n          try {\n            chrome.runtime.sendMessage({ type: "A2R_OPEN_TAB", url: res.pdf_url }).catch(() => {\n              window.open(res.pdf_url, "_blank");\n            });\n          } catch (_) {\n            window.open(res.pdf_url, "_blank");\n          }\n        }\n        await refreshStatus();\n        await refreshRecords();\n        $("mAmount").focus();\n      } else {\n        showToast(res.error || "مبلغ غير صالح");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = "توليد وطباعة (Enter)";\n    }\n  }\n  $("btnAddManual").addEventListener("click", submitManualReceipt);\n  ["mAmount", "mName", "mPlate", "mUnit"].forEach((id) => {\n    $(id).addEventListener("keydown", (e) => {\n      if (e.key === "Enter") {\n        e.preventDefault();\n        submitManualReceipt();\n      }\n    });\n  });\n\n  // 4. عرض السجل\n  $("btnViewRecords").addEventListener("click", () => {\n    const tabBtn = document.querySelector(\'.tab-btn[data-tab="records"]\');\n    if (tabBtn) tabBtn.click();\n  });\n\n  // 5. طباعة الأخير\n  $("btnReprintLast").addEventListener("click", async () => {\n    try {\n      const res = await apiPost("/api/reprint_last");\n      showToast(res.ok ? "✓ تمت إعادة طباعة الأخير" : (res.error || "لا يوجد إيصال اليوم"));\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  $("btnTopOpenApp").addEventListener("click", () => {\n    apiPost("/api/open_app", { mode: "show" }).catch(() => showToast("البرنامج مغلق"));\n  });\n\n  $("recSearch").addEventListener("input", renderRecords);\n  $("recFilter").addEventListener("change", renderRecords);\n\n  $("btnArchSearch").addEventListener("click", doArchiveSearch);\n  $("archQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") doArchiveSearch(); });\n  $("btnArchUnlock").addEventListener("click", async () => {\n    const pwd = ($("archPwd").value || "").trim();\n    if (!pwd) return;\n    try {\n      const res = await apiPost("/api/auth", { password: pwd });\n      if (res.ok && res.is_supervisor) {\n        state.isSupervisor = true;\n        $("archPwd").value = "";\n        $("archAuthRow").style.display = "none";\n        $("archRoleHint").textContent = "وضع المشرف — كل الأيام متاحة";\n        showToast("✓ تم تفعيل المشرف");\n        loadArchiveDays();\n      } else {\n        showToast(res.error || "كلمة المرور غير صحيحة");\n      }\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  // تحديث الحالة: يتوقف وهي مخفية، ويتسارع أثناء الفحص (v2.8)\n  let pollTimer = null;\n  function schedulePoll() {\n    clearTimeout(pollTimer);\n    if (document.hidden) return;\n    pollTimer = setTimeout(pollTick, state.isProcessing ? 1000 : 4000);\n  }\n  async function pollTick() {\n    await refreshStatus();\n    schedulePoll();\n  }\n  document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      clearTimeout(pollTimer);\n    } else {\n      refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n    }\n  });\n  refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n});\n',
 }
 _CHROME_EXT_BIN_FILES = {
     'icons/icon16.png': 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADIUlEQVR42k2TW28UZQCGn++bme7u0J3uTrft9gAptAKVQ0lqiAEhniDqhVz5C/wJeieX/gZvDCam0R/QeCAoomLDRdEEKwIttHTb0sMeOt2dmZ3z50UT9b1/nufqFTdufK7434QQeL6HEGAWDpEpEIlPJgww8kiVgvoP0QGUUigUmtBothp04haGoRHGQwyaKdcGllj388zXhxGmRabp/8Z0gFwuhxCCenOHbtZBMyRCE0TSY8yBr6OjBJUy4YhNKHuZ7G6RCI04ig4ES0vL7O232HU3GBs5TH/JJowCGvU1dD3P4YFxbve9ye7yY7L9GvXdRapDg4yMjqJHccRPt39mef0Rnr7HlYtXKZ8pMzf3Dasr20xU4OOpkxz3xrn/w0224hzf+gHTjVnOX34bGYUxYRRg22VMo0iURWzUazx89ogTM9Ncy5lszD/H3vqRD93vOGELPj2bEpBjdeUpMggCPN/FrvZRKORxWvtYlsWVNy5zcuIUr4wmzNRC7lrvUzUD3ml8z2BiYQYeCQLpeR4gKeZKGIZGp+NS7rV57613cZw6N+84zI1+QFYZxdk0mCw6fNH+lVgvcO7MqQNBmqQgFFkkcNseGBlrq5vcu3cXvVhCnH6dvqRFflux0CeZnEqIlUEYBsh2p02up4cHfz3A9V1SGZNlGff//J1uc5/CR1e5NNHg+NYifw91sXyDI9l5hJ7w7OkKuu/5CCmZeull1jZXCcKAF+vbrK3XsAcGKK/H6C9uMZYd47FnMbkAXj5D5XvQpYZsNlv4vseFmdewShau12G19hyn7RClbX678wdf3XJJcxX6exW/DCfUSiVUEOAHAeL69U+U3/U5Nn6UJ7WH7DR2qFT6cTyHnlQjGr6EZRfRqmc5vfYZdTuj2J5mc7NGoZBHzM5+qYQQpGmKs+fgpi2EBqSAbnIh8Fg8co6GbfKqucD2k2GEbmAYGlmm0MMwRCmFlJJ8IU/XKRCELkpGZLFA9aZcdObZ8grsJRaRBD2NiePo4ExCCIQQABiGQXWoShiEuN19dN2keSimqRLqST+6ITFEilIg5QHzD2xtghGyFQRPAAAAAElFTkSuQmCC',
@@ -4223,8 +8385,8 @@ def scale_pdf_to_print_width(src_pdf, target_w=None, target_h=None):
             return None
         writer = PdfWriter()
         for pg in reader.pages:
+            pg = writer.add_page(pg)   # لازم الصفحة تتسجل في الـ writer الأول قبل التعديل (pypdf 7 بيرفض scale على صفحة يتيمة)
             pg.scale_by(f)
-            writer.add_page(pg)
         os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
         dst = os.path.join(PRINT_TEMP_DIR, "s_" + os.path.basename(src_pdf))
         with open(dst, "wb") as fh:
@@ -4395,14 +8557,14 @@ class ElevateLoginGate(ctk.CTkToplevel):
 
         self.pwd_visible = False
         self.btn_eye = ctk.CTkButton(f_entry, text="👁️", width=40, height=34, corner_radius=9, command=self.toggle_eye,
-                                     fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF")
+                                     **_ghost(t, "secondary"))
         self.btn_eye.pack(side="right")
 
         self.lbl_err = ctk.CTkLabel(card, text="", height=16, text_color=t["danger"], font=(FONT_FAMILY, 10, "bold"))
         self.lbl_err.pack(pady=(2, 0))
 
         btn_enter = ctk.CTkButton(card, text=tr("btn_full_console"), font=FONT_BTN_MAIN, height=34, corner_radius=10,
-                                  fg_color=t["danger_btn"], hover_color=t["danger_btn_hover"], text_color="#FFFFFF",
+                                  **_ghost(t, "danger_btn"),
                                   command=self.check_pwd)
         btn_enter.pack(fill="x", padx=16, pady=(4, 12))
 
@@ -4466,7 +8628,7 @@ class CustomTkinterApp(ctk.CTk):
         self.current_lang = _saved_lang if _saved_lang in LANGUAGES else "en"
         CURRENT_LANG = self.current_lang
         _saved_theme = _cfg.get("theme")
-        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Modern Dark"
+        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Windows Dark"
         if "sound_muted" in _cfg:
             SOUND_MUTED = bool(_cfg.get("sound_muted"))
 
@@ -4775,7 +8937,7 @@ class CustomTkinterApp(ctk.CTk):
             _fill(a, b)
         for (pw, ph) in PRINT_PAPER_PRESETS_MM:
             ctk.CTkButton(f_pre, text=f"{_fmt_mm(pw)} × {_fmt_mm(ph)}", width=90, height=28, font=FONT_BTN_SUB,
-                          fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                          **_ghost(t, "primary"),
                           command=lambda a=pw, b=ph: _preset(a, b)).pack(side="left", padx=(0, 6))
 
         sel = {"name": _PRINT_PAPER_NAME}
@@ -4828,7 +8990,7 @@ class CustomTkinterApp(ctk.CTk):
         lbl_err.pack(anchor="w", padx=16, pady=(6, 0))
         ctk.CTkLabel(win, text=T2("المقاس بيتحفظ لليوزر الحالي وبيتطبّق على أي طباعة جاية.",
                                   "Saved for the current user and used for every next print."),
-                     font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=300, justify="left").pack(anchor="w", padx=16)
+                     font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=300, justify="left").pack(anchor="w", padx=16)
 
         def _close():
             try: win.destroy()
@@ -4924,12 +9086,10 @@ class CustomTkinterApp(ctk.CTk):
         f_fp_tools = ctk.CTkFrame(win, fg_color="transparent")
         f_fp_tools.pack(fill="x", padx=16, pady=(8, 4))
         btn_test = ctk.CTkButton(f_fp_tools, text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"), font=FONT_BTN_SUB,
-                                 height=32, corner_radius=9, fg_color=t["primary"], hover_color=t["primary_hover"],
-                                 text_color="#FFFFFF", command=_test_print)
+                                 height=32, corner_radius=9, **_ghost(t, "primary"), command=_test_print)
         btn_test.pack(side="left", fill="x", expand=True, padx=(0, 4))
         ctk.CTkButton(f_fp_tools, text=T2("⚙️ إعدادات الدرايفر", "⚙️ Driver Settings"), font=FONT_BTN_SUB,
-                      height=32, corner_radius=9, fg_color=t["secondary"], hover_color=t["secondary_hover"],
-                      text_color="#FFFFFF", command=lambda: threading.Thread(target=open_default_printer_preferences, daemon=True).start()
+                      height=32, corner_radius=9, **_ghost(t, "secondary"), command=lambda: threading.Thread(target=open_default_printer_preferences, daemon=True).start()
                       ).pack(side="right", fill="x", expand=True, padx=(4, 0))
 
         btn_save = ctk.CTkButton(win, text=T2("حفظ وتطبيق", "Save & Apply"), font=FONT_BTN_MAIN, height=36, corner_radius=10,
@@ -5045,15 +9205,19 @@ class CustomTkinterApp(ctk.CTk):
 
         self.btn_excel.pack_forget()
         self.btn_arch_full.pack_forget()
+        if getattr(self, "btn_pos_tools", None) is not None:
+            self.btn_pos_tools.pack_forget()
         self.btn_chrome.pack_forget()
         if is_supervisor:
-            self.badge_role.configure(text="● ADMIN", text_color="#EF4444")
-            self.f_role_btn.configure(border_color="#EF4444")
+            self.badge_role.configure(text="● ADMIN", text_color="#DC2626")
+            self.f_role_btn.configure(border_color="#DC2626")
+            if getattr(self, "btn_pos_tools", None) is not None:
+                self.btn_pos_tools.pack(side="left", padx=2)
             self.btn_arch_full.pack(side="left", padx=2)
             self.btn_excel.pack(side="left", padx=2)   # زر الإكسيل حصري للمشرف — كان مضروب pack_forget من غير ما يترجع
         else:
-            self.badge_role.configure(text="● USER", text_color="#10B981")
-            self.f_role_btn.configure(border_color="#10B981")
+            self.badge_role.configure(text="● USER", text_color="#059669")
+            self.f_role_btn.configure(border_color="#059669")
         self.btn_chrome.pack(side="left", padx=2)
 
         self.switch_to_full_view()
@@ -5268,7 +9432,7 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_back_to_mini.pack(side="right", padx=(6, 0))
         self.f_role_btn.pack(side="right", padx=(6, 0))
         self.b_bar.pack(fill="x", side="bottom")
-        self.body_full.pack(fill="both", expand=True, padx=8, pady=(2, 0))
+        self.body_full.pack(fill="both", expand=True, padx=6, pady=(2, 0))
 
         sc = _win_scale(self)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
@@ -5358,7 +9522,7 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_logo = ctk.CTkLabel(f_left, text="A2R", font=(FONT_FAMILY, 22, "bold"))
         self.lbl_logo.pack(side="left", padx=(0, 8))
 
-        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=116, height=27, state="readonly",
+        self.cb_theme = ctk.CTkComboBox(f_left, values=THEME_KEYS, width=132, height=27, state="readonly",
                                         font=FONT_REGULAR_BOLD, command=self.on_theme_select)
         self.cb_theme.set(self.current_theme_name)
         self.cb_theme.pack(side="left", padx=(0, 4))
@@ -5389,8 +9553,8 @@ class CustomTkinterApp(ctk.CTk):
 
         self.body_mini = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=12, border_width=1)
-        self.card_mini_status.pack(fill="x", pady=(4, 6))
+        self.card_mini_status = ctk.CTkFrame(self.body_mini, corner_radius=8, border_width=1)
+        self.card_mini_status.pack(fill="x", pady=(2, 4))
 
         f_mini_title_row = ctk.CTkFrame(self.card_mini_status, fg_color="transparent")
         f_mini_title_row.pack(fill="x", padx=12, pady=(7, 3))
@@ -5467,6 +9631,15 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_arch_full = ctk.CTkButton(row_view, fg_color="#4F46E5", hover_color="#4338CA", width=112,
                                            height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.open_archive_history)
 
+        # زر المشرف: جواه التقفيل وإيصالات الدفع بس (الباسورد التاني بيتسأل مرة واحدة عليه)
+        self.btn_pos_tools = None
+        if POS_TOOLS_AVAILABLE:
+            try:
+                self.btn_pos_tools = make_pos_tools_button(self, row_view, width=104, height=_BAR_BTN_H, corner_radius=9)
+            except Exception as _e:
+                _log_silent("pos_tools_btn", _e)
+                self.btn_pos_tools = None
+
         self.btn_chrome = ctk.CTkButton(row_view, fg_color="#334155", hover_color="#475569", width=104,
                                         height=_BAR_BTN_H, corner_radius=9, font=_BAR_FONT, text_color="#FFFFFF", command=self.open_chrome_browser)
 
@@ -5505,14 +9678,14 @@ class CustomTkinterApp(ctk.CTk):
 
         self.body_full = ctk.CTkFrame(self, fg_color="transparent")
 
-        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_top.pack(fill="x", pady=(4, 4))
+        self.card_top = ctk.CTkFrame(self.body_full, corner_radius=8, border_width=1)
+        self.card_top.pack(fill="x", pady=(2, 2))
 
         self.lbl_folder = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
-        self.lbl_folder.pack(anchor="w", padx=12, pady=(6, 2))
+        self.lbl_folder.pack(anchor="w", padx=10, pady=(4, 1))
 
         f_dir = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_dir.pack(fill="x", padx=12, pady=(0, 3))
+        f_dir.pack(fill="x", padx=10, pady=(0, 2))
 
         self.e_path = ctk.CTkEntry(f_dir, font=FONT_ENTRY, height=30, text_color="#FFFFFF")
         self.e_path.pack(side="left", fill="x", expand=True, padx=(0, 6))
@@ -5532,10 +9705,10 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_open_f.pack(side="left")
 
         self.lbl_d = ctk.CTkLabel(self.card_top, height=16, font=FONT_SECTION_LBL)
-        self.lbl_d.pack(anchor="w", padx=12, pady=(2, 2))
+        self.lbl_d.pack(anchor="w", padx=10, pady=(1, 1))
 
         f_date = ctk.CTkFrame(self.card_top, fg_color="transparent")
-        f_date.pack(fill="x", padx=12, pady=(0, 6))
+        f_date.pack(fill="x", padx=10, pady=(0, 4))
 
         today = datetime.date.today()
         self.cb_d = ctk.CTkComboBox(f_date, values=[f"{d:02d}" for d in range(1, 32)], width=56, height=30, font=FONT_REGULAR_BOLD)
@@ -5575,8 +9748,8 @@ class CustomTkinterApp(ctk.CTk):
         if self.auto_print_enabled: self.sw_autoprint.select()
         else: self.sw_autoprint.deselect()
 
-        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_dash.pack(fill="x", pady=(0, 4))
+        self.card_dash = ctk.CTkFrame(self.body_full, corner_radius=8, border_width=1)
+        self.card_dash.pack(fill="x", pady=(0, 2))
 
         dash_grid = ctk.CTkFrame(self.card_dash, fg_color="transparent")
         dash_grid.pack(fill="x", padx=10, pady=6)
@@ -5629,8 +9802,8 @@ class CustomTkinterApp(ctk.CTk):
         self.lbl_diff = ctk.CTkLabel(f_pos, text="", height=15, font=(FONT_FAMILY, 10, "bold"))
         self.lbl_diff.pack(anchor="w", pady=(2, 0))
 
-        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=12, border_width=1)
-        self.card_actions.pack(fill="x", pady=(0, 4))
+        self.card_actions = ctk.CTkFrame(self.body_full, corner_radius=8, border_width=1)
+        self.card_actions.pack(fill="x", pady=(0, 2))
 
         self.btn_run = ctk.CTkButton(self.card_actions, font=(FONT_FAMILY, 13, "bold"), height=36, corner_radius=10,
                                      text_color="#FFFFFF", command=self.start_thread)
@@ -5742,11 +9915,11 @@ class CustomTkinterApp(ctk.CTk):
         self.card_mini_status.configure(fg_color=t["card"], border_color=t["border"])
         self.b_bar.configure(fg_color=t["sub_card"])
 
-        self.lbl_folder.configure(text_color=t["text_muted"])
-        self.lbl_d.configure(text_color=t["text_muted"])
-        self.lbl_kpi1_title.configure(text_color=t["text_muted"])
-        self.lbl_kpi2_title.configure(text_color=t["text_muted"])
-        self.lbl_pos_title.configure(text_color=t["text_muted"])
+        self.lbl_folder.configure(text_color=t["accent"])
+        self.lbl_d.configure(text_color=t["accent"])
+        self.lbl_kpi1_title.configure(text_color=t["accent"])
+        self.lbl_kpi2_title.configure(text_color=t["accent"])
+        self.lbl_pos_title.configure(text_color=t["accent"])
         self.lbl_sum.configure(text_color=t["success"])
         try:
             self.lbl_cnt.configure(text_color=t["text"])
@@ -5756,6 +9929,10 @@ class CustomTkinterApp(ctk.CTk):
             self.lbl_progress_pct.configure(text_color=t["text"])
             self.lbl_current_file.configure(text_color=t["text_muted"])
             self.lbl_foot.configure(text_color=t["text_muted"])
+            self.lbl_mini_desc.configure(text_color=t["success"])
+            self.lbl_mini_counter.configure(text_color=t["text_muted"])
+            self.lbl_mini_archive.configure(text_color=t["text_muted"])
+            self.lbl_mini_foot.configure(text_color=t["text_muted"])
             for _cap, _ar, _en in getattr(self, "_bar_captions", []):
                 _cap.configure(text_color=t["text_muted"])
             self.lbl_status_count.configure(text_color=t["accent"])
@@ -5784,7 +9961,13 @@ class CustomTkinterApp(ctk.CTk):
                 if b is None:
                     continue
                 try:
-                    if role == "secondary":
+                    _tc = t.get(role + "_text")
+                    if _tc:
+                        b.configure(fg_color=t.get(role + "_fg", col),
+                                    hover_color=t.get(role + "_hoverbg", hov), border_width=1,
+                                    border_color=t.get(role + "_border", t["border"]), text_color=_tc,
+                                    text_color_disabled=t["text_muted"])
+                    elif role == "secondary":
                         b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["border"])
                     else:
                         b.configure(fg_color=col, hover_color=hov, border_width=0)
@@ -5855,6 +10038,11 @@ class CustomTkinterApp(ctk.CTk):
         self.btn_excel.configure(text=L["open_excel"])
         self.btn_arch_full.configure(text=L["arch_hist_btn"])
         self.btn_chrome.configure(text=L["open_chrome"])
+        if POS_TOOLS_AVAILABLE:
+            try:
+                refresh_pos_tools_button(self)
+            except Exception as _e:
+                _log_silent("apply_language#pos", _e)
         for _cap, _ar, _en in getattr(self, "_bar_captions", []):
             _cap.configure(text=_ar if lang == "ar" else _en)
         self._render_status_bar(getattr(self, "_status_count_val", 0), getattr(self, "_status_total_val", 0.0))
@@ -6161,9 +10349,9 @@ class CustomTkinterApp(ctk.CTk):
                          font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(pady=(12, 2))
             ctk.CTkLabel(win, text=T2("بتنقل إيصالات الأيام السابقة للأرشيف وتعمل إكسيل وملخص (عدد المعاملات والإجمالي) لكل يوم",
                                       "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
-                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
+                         font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
-            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=12, border_width=1, border_color=t["border"])
+            card = ctk.CTkFrame(win, fg_color=t["card"], corner_radius=8, border_width=1, border_color=t["border"])
             card.pack(fill="x", padx=16, pady=(0, 6))
             ctk.CTkLabel(card, text=T2("المجلد:", "Folder:"), font=(FONT_FAMILY, 10, "bold"),
                          text_color=t["text"]).pack(anchor="w", padx=12, pady=(8, 0))
@@ -6180,7 +10368,7 @@ class CustomTkinterApp(ctk.CTk):
             p_bar.grid(row=0, column=0, sticky="ew", padx=(0, 6))
             p_lbl = ctk.CTkLabel(f_prog, text="0%", font=(FONT_FAMILY, 10, "bold"), width=36, text_color=t["text"])
             p_lbl.grid(row=0, column=1)
-            s_lbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410)
+            s_lbl = ctk.CTkLabel(win, text="", font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410)
             s_lbl.pack(pady=(0, 4))
 
             st = {"busy": False}
@@ -6269,13 +10457,12 @@ class CustomTkinterApp(ctk.CTk):
 
                 threading.Thread(target=work, daemon=True).start()
 
-            btn_go = ctk.CTkButton(win, text="", font=FONT_BTN_MAIN, height=38, text_color="#FFFFFF",
-                                   fg_color=t["primary"], hover_color=t["primary_hover"], command=_start)
+            btn_go = ctk.CTkButton(win, text="", font=FONT_BTN_MAIN, height=38, **_ghost(t, "primary"), command=_start)
             btn_go.pack(fill="x", padx=16, pady=(4, 6))
 
             if _show_hist:
                 btn_hist = ctk.CTkButton(win, text=T2("📚 سجل الأرشيف", "📚 Archive History"), font=FONT_BTN_MAIN, height=38,
-                                         text_color="#FFFFFF", fg_color=t["secondary"], hover_color=t["secondary_hover"],
+                                         **_ghost(t, "secondary"),
                                          command=self.open_archive_history)
                 btn_hist.pack(fill="x", padx=16, pady=(0, 6))
 
@@ -6283,7 +10470,7 @@ class CustomTkinterApp(ctk.CTk):
                                        "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
                                     T2("📚 سجل الأرشيف متاح من زر سجل الأرشيف في الشريط السفلي",
                                        "📚 Archive history is available from the Archive History button below")),
-                         font=(FONT_FAMILY, 9), text_color=t["text_muted"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
+                         font=(FONT_FAMILY, 9), text_color=t["text"], wraplength=410, justify="center").pack(padx=16, pady=(0, 8))
 
             refresh_state()
             fit_and_center(win, self, 430, min_height=280)
@@ -6644,8 +10831,8 @@ class CustomTkinterApp(ctk.CTk):
               "load_id": 0, "cache": {}, "sel_job": None}
 
         # ---------- شريط الحالة والأدوات ----------
-        bar = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
-        bar.pack(fill="x", padx=14, pady=(12, 6))
+        bar = ctk.CTkFrame(win, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
+        bar.pack(fill="x", padx=10, pady=(8, 4))
         status_lbl = ctk.CTkLabel(bar, text="", font=(FONT_FAMILY, 10, "bold"), text_color=t["accent"])
         status_lbl.pack(side="left", padx=12, pady=8)
 
@@ -6788,8 +10975,7 @@ class CustomTkinterApp(ctk.CTk):
                 try: dlg.destroy()
                 except Exception as _e: _log_silent("open_rearchive#destroy", _e)
                 run_rearchive(days, ask=(mode != "all"))
-            ctk.CTkButton(dlg, text=T2("▶ ابدأ", "▶ Start"), font=FONT_BTN_MAIN, height=34, fg_color=t["primary"],
-                          hover_color=t["primary_hover"], text_color="#FFFFFF", command=go).pack(fill="x", padx=16, pady=(14, 0))
+            ctk.CTkButton(dlg, text=T2("▶ ابدأ", "▶ Start"), font=FONT_BTN_MAIN, height=34, **_ghost(t, "primary"), command=go).pack(fill="x", padx=16, pady=(14, 0))
 
         # ---------- تكبير / ملء الشاشة / تصغير ----------
         fs = {"on": False}
@@ -6830,30 +11016,30 @@ class CustomTkinterApp(ctk.CTk):
                 finally: more_menu.grab_release()
 
             btn_more = ctk.CTkButton(bar, text=T2("⚙️ المزيد ▾", "⚙️ More ▾"), font=FONT_BTN_SUB, width=110, height=30,
-                                     fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF", command=show_more)
+                                     **_ghost(t, "secondary"), command=show_more)
             btn_more.pack(side="right", padx=4, pady=6)
             ctk.CTkButton(bar, text=T2("🗖 تكبير", "🗖 Zoom"), font=FONT_BTN_SUB, width=90, height=30,
-                          fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                          **_ghost(t, "secondary"),
                           command=toggle_zoom).pack(side="right", padx=4, pady=6)
             ctk.CTkButton(bar, text=T2("🔄 تحديث + نسخ", "🔄 Refresh + Backup"), font=FONT_BTN_SUB, width=150, height=30,
-                          fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                          **_ghost(t, "primary"),
                           command=lambda: run_maintenance(True)).pack(side="right", padx=4, pady=6)
         else:
             ctk.CTkButton(bar, text=T2("🗖 تكبير", "🗖 Zoom"), font=FONT_BTN_SUB, width=90, height=30,
-                          fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                          **_ghost(t, "secondary"),
                           command=toggle_zoom).pack(side="right", padx=4, pady=6)
             rb["btn"] = ctk.CTkButton(bar, text=T2("♻️ إعادة أرشفة الكل", "♻️ Re-archive all"), font=FONT_BTN_SUB, width=160,
-                                      height=30, fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                                      height=30, **_ghost(t, "primary"),
                                       command=lambda: run_rearchive(None, ask=False, silent=True))
             rb["btn"].pack(side="right", padx=4, pady=6)
             ctk.CTkLabel(bar, text=T2(f"📅 عرض آخر {USER_DAYS} أيام", f"📅 Last {USER_DAYS} days"),
-                         font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"]).pack(side="left", padx=8)
+                         font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(side="left", padx=8)
 
         # ---------- ستايل الجداول ----------
         apply_tree_style(t, 28)
 
         def make_tree(parent, columns, headers, widths):
-            fr = ctk.CTkFrame(parent, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+            fr = ctk.CTkFrame(parent, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
             fr.pack(fill="both", expand=True, padx=2, pady=(4, 2))
             tree = ttk.Treeview(fr, columns=columns, show="headings", style="A2R.Treeview")
             for c in columns:
@@ -6873,7 +11059,7 @@ class CustomTkinterApp(ctk.CTk):
                             segmented_button_selected_color=t["primary"], segmented_button_selected_hover_color=t["primary_hover"],
                             segmented_button_unselected_color=t["card"], segmented_button_unselected_hover_color=t["border"],
                             text_color="#FFFFFF")
-        tv.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        tv.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         TAB_DAYS = T2("📅 الأيام والمعاملات", "📅 Days & Transactions")
         TAB_SEARCH = T2("🔎 بحث عام في الأرشيف", "🔎 Global Search")
         tab_days = tv.add(TAB_DAYS)
@@ -6907,8 +11093,7 @@ class CustomTkinterApp(ctk.CTk):
             day_q.delete(0, "end")
             cb_month.set(ALL)
             apply_days()
-        ctk.CTkButton(f1, text="✖", width=34, height=28, font=FONT_BTN_SUB, fg_color=t["secondary"], hover_color=t["secondary_hover"],
-                      text_color="#FFFFFF", command=clear_filters).pack(side="left", padx=4)
+        ctk.CTkButton(f1, text="✖", width=34, height=28, font=FONT_BTN_SUB, **_ghost(t, "secondary"), command=clear_filters).pack(side="left", padx=4)
 
         day_cols = ("date", "ops", "total")
         day_hdr = {"date": T2("التاريخ", "Date"), "ops": T2("المعاملات", "Tx"), "total": T2("إجمالي المبلغ", "Total")}
@@ -6916,7 +11101,7 @@ class CustomTkinterApp(ctk.CTk):
         sum_lbl = ctk.CTkLabel(left, text="", font=(FONT_FAMILY, 11, "bold"), text_color=t["accent"], justify="left")
         sum_lbl.pack(anchor="w", padx=8, pady=(2, 0))
         ctk.CTkLabel(left, text=T2("🟥 يوم فيه مكرر    🟨 يوم فيه ناقص", "🟥 has duplicates   🟨 has incomplete"),
-                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w", padx=8, pady=(0, 2))
+                     font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w", padx=8, pady=(0, 2))
 
         sort_state = {"col": "date", "rev": True}
         def sort_days(col):
@@ -6977,7 +11162,7 @@ class CustomTkinterApp(ctk.CTk):
         for e in (day_q,): e.bind("<KeyRelease>", apply_days)
 
         # ---------- اليمين: بطاقة اليوم المختار ----------
-        hdr = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
+        hdr = ctk.CTkFrame(right, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["accent"])
         hdr.pack(fill="x", pady=(2, 0))
         day_title = ctk.CTkLabel(hdr, text=T2("👈 اختار يوم من القائمة لعرض معاملاته", "👈 Pick a day from the list"),
                                  font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"])
@@ -6987,12 +11172,12 @@ class CustomTkinterApp(ctk.CTk):
         cards.pack(fill="x", pady=(6, 2))
         card_lbls = {}
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
+            ctk.CTkFrame(f, width=3, height=26, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(6, 4), pady=4)
             inner = ctk.CTkFrame(f, fg_color="transparent")
-            inner.pack(side="left", fill="both", expand=True, pady=4)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            inner.pack(side="left", fill="both", expand=True, pady=2)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w")
             lb = ctk.CTkLabel(inner, text="-", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
@@ -7078,10 +11263,9 @@ class CustomTkinterApp(ctk.CTk):
         btn_row = ctk.CTkFrame(right, fg_color="transparent")
         btn_row.pack(fill="x", pady=(4, 2))
         def _b(text, kind, cmd, w=140):
-            _fg, _hv = theme_btn_colors(t, kind)
-            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
-                          text_color="#FFFFFF", width=w, height=32, command=cmd).pack(side="left", padx=(0, 6), pady=2)
-        if is_admin: _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", d_excel, 125)
+            make_themed_button(btn_row, t, kind, text=text, font=FONT_BTN_SUB, corner_radius=8,
+                               width=w, height=32, command=cmd).pack(side="left", padx=(0, 6), pady=2)
+        if is_admin: _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "success", d_excel, 125)
         _b(T2("📄 إيصال السمري", "📄 Summary receipt"), "primary", d_summary, 135)
         if is_admin:
             _b(T2("📂 فولدر اليوم", "📂 Day folder"), "quiet", d_folder, 115)
@@ -7089,7 +11273,7 @@ class CustomTkinterApp(ctk.CTk):
                lambda: run_rearchive([st["iso"]] if st["iso"] else []), 145)
 
         # ---------- بحث وفلتر معاملات اليوم ----------
-        search_row = ctk.CTkFrame(right, corner_radius=12, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row = ctk.CTkFrame(right, corner_radius=8, height=46, fg_color=t["card"], border_width=1, border_color=t["border"])
         search_row.pack(fill="x", pady=(4, 4))
         tx_q = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=280,
                             text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -7111,7 +11295,7 @@ class CustomTkinterApp(ctk.CTk):
         tx_count.pack(side="right", padx=14)
 
         # ---------- جدول معاملات اليوم ----------
-        tree_frame = ctk.CTkFrame(right, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame = ctk.CTkFrame(right, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, pady=(0, 2))
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
         headers = {
@@ -7292,7 +11476,7 @@ class CustomTkinterApp(ctk.CTk):
         day_tree.bind("<Button-3>", _dpop)
 
         # ================= تبويب البحث العام المتقدم (FTS5 + فلاتر) =================
-        f2_card = ctk.CTkFrame(tab_search, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        f2_card = ctk.CTkFrame(tab_search, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
         f2_card.pack(fill="x", pady=(2, 4))
 
         f2 = ctk.CTkFrame(f2_card, fg_color="transparent")
@@ -7328,7 +11512,7 @@ class CustomTkinterApp(ctk.CTk):
             do_search()
 
         ctk.CTkButton(f2, text=T2("✖ مسح", "✖ Clear"), width=74, height=32, corner_radius=8, font=FONT_BTN_SUB,
-                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "secondary"),
                       command=clear_search_filters).pack(side="left")
 
         f2b = ctk.CTkFrame(f2_card, fg_color="transparent")
@@ -7342,13 +11526,13 @@ class CustomTkinterApp(ctk.CTk):
         style_combo(cb_s_unit, t)
         cb_s_unit.pack(side="left", padx=(0, 8))
 
-        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        ctk.CTkLabel(f2b, text=T2("من:", "From:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(0, 3))
         e_s_from = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
                                 text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_s_from.pack(side="left", padx=(0, 8))
         attach_context_menu(e_s_from)
 
-        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left", padx=(0, 3))
+        ctk.CTkLabel(f2b, text=T2("إلى:", "To:"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left", padx=(0, 3))
         e_s_to = ctk.CTkEntry(f2b, placeholder_text="DD-MM-YYYY", width=105, height=28, font=FONT_ENTRY,
                               text_color=t["text"], fg_color=t["input"], border_color=t["border"])
         e_s_to.pack(side="left", padx=(0, 10))
@@ -7494,23 +11678,23 @@ class CustomTkinterApp(ctk.CTk):
         win.configure(fg_color=t["bg"])
 
         if not live:
-            hdr = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["accent"])
-            hdr.pack(fill="x", padx=14, pady=(12, 0))
+            hdr = ctk.CTkFrame(win, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["accent"])
+            hdr.pack(fill="x", padx=10, pady=(8, 0))
             ctk.CTkLabel(hdr, text=T2(f"📅 أرشيف يوم {day_txt}", f"📅 Archive day {day_txt}"),
                          font=(FONT_FAMILY, 14, "bold"), text_color=t["accent"]).pack(side="left", padx=14, pady=8)
 
         # ---------- كروت الإحصائيات ----------
         cards = ctk.CTkFrame(win, fg_color="transparent")
-        cards.pack(fill="x", padx=10, pady=(8, 2))
+        cards.pack(fill="x", padx=8, pady=(6, 2))
         card_lbls = {}
 
         def mk_card(key, title, color):
-            f = ctk.CTkFrame(cards, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+            f = ctk.CTkFrame(cards, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
             f.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkFrame(f, width=4, height=32, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(8, 6), pady=6)
+            ctk.CTkFrame(f, width=3, height=26, corner_radius=2, fg_color=color).pack(side="left", fill="y", padx=(6, 4), pady=4)
             inner = ctk.CTkFrame(f, fg_color="transparent")
-            inner.pack(side="left", fill="both", expand=True, pady=4)
-            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text_muted"]).pack(anchor="w")
+            inner.pack(side="left", fill="both", expand=True, pady=2)
+            ctk.CTkLabel(inner, text=title, font=(FONT_FAMILY, 9, "bold"), text_color=t["text"]).pack(anchor="w")
             lb = ctk.CTkLabel(inner, text="0", font=(FONT_FAMILY, 15, "bold"), text_color=color)
             lb.pack(anchor="w")
             card_lbls[key] = lb
@@ -7522,8 +11706,8 @@ class CustomTkinterApp(ctk.CTk):
         mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
 
         # ---------- البحث والفلاتر ----------
-        search_row = ctk.CTkFrame(win, corner_radius=12, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
-        search_row.pack(fill="x", padx=14, pady=(6, 4))
+        search_row = ctk.CTkFrame(win, corner_radius=8, height=52, fg_color=t["card"], border_width=1, border_color=t["border"])
+        search_row.pack(fill="x", padx=10, pady=(4, 2))
 
         search_entry = ctk.CTkEntry(search_row, placeholder_text=tr("search_placeholder"), font=FONT_ENTRY, width=300,
                                     text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -7554,7 +11738,7 @@ class CustomTkinterApp(ctk.CTk):
 
         # ---------- الأزرار ----------
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
-        btn_row.pack(fill="x", padx=14, pady=(0, 2))
+        btn_row.pack(fill="x", padx=10, pady=(0, 2))
 
         def _sel_rec():
             sel = tree.selection()
@@ -7617,26 +11801,25 @@ class CustomTkinterApp(ctk.CTk):
             else: messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
 
         def _b(text, kind, cmd, w=115):
-            _fg, _hv = theme_btn_colors(t, kind)
-            ctk.CTkButton(btn_row, text=text, font=FONT_BTN_SUB, fg_color=_fg, hover_color=_hv, corner_radius=8,
-                          text_color="#FFFFFF", width=w, height=30, command=cmd).pack(side="left", padx=(0, 6), pady=2)
+            make_themed_button(btn_row, t, kind, text=text, font=FONT_BTN_SUB, corner_radius=8,
+                               width=w, height=30, command=cmd).pack(side="left", padx=(0, 6), pady=2)
 
         _b(tr("open_pdf_btn"), "primary", open_selected)
-        _b(tr("btn_reprint"), "quiet", reprint_selected, 105)
+        _b(tr("btn_reprint"), "warn", reprint_selected, 105)
         _b(T2("📂 فتح الفولدر", "📂 Open folder"), "quiet", open_folder, 125)
         if live:
             _b(tr("btn_void_sel"), "danger", cancel_selected, 110)
-            _b(tr("btn_restore_sel"), "quiet", restore_selected_void)
+            _b(tr("btn_restore_sel"), "success", restore_selected_void)
         else:
-            _b(T2("📄 ملخص اليوم", "📄 Day summary"), "quiet", open_day_summary, 125)
-            _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "quiet", export_day_excel, 125)
+            _b(T2("📄 ملخص اليوم", "📄 Day summary"), "tool", open_day_summary, 125)
+            _b(T2("📊 إكسيل اليوم", "📊 Day Excel"), "success", export_day_excel, 125)
 
         ctk.CTkLabel(win, text=T2("🟥 مكرر   🟨 ناقص   🟧 وحدة أخرى   🟪 ملغي (مخصوم)   •   دبل كليك لفتح الإيصال",
                                   "🟥 Duplicate   🟨 Incomplete   🟧 Other unit   🟪 Void   •   double-click to open receipt"),
                      font=(FONT_FAMILY, 10, "bold"), text_color=t["text"]).pack(anchor="w", padx=16)
 
-        tree_frame = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
-        tree_frame.pack(fill="both", expand=True, padx=14, pady=(2, 14))
+        tree_frame = ctk.CTkFrame(win, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=(2, 10))
 
         columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
         headers = {
@@ -7763,7 +11946,7 @@ class CustomTkinterApp(ctk.CTk):
 
         row_u = ctk.CTkFrame(card_box, fg_color="transparent")
         row_u.pack(fill="x", padx=14, pady=(10, 6))
-        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(side="left")
+        ctk.CTkLabel(row_u, text=tr("unit_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(side="left")
 
         # قايمة الوحدات = الوحدات اللي في إيصالات اليوم نفسها (الأكتر أولًا)، والاختيار إجباري (قراءة فقط، مفيش كتابة حرة).
         # لو مفيش ولا وحدة اتقرت من الإيصالات (إيصالات يدوية بس مثلًا) بنرجع لقايمة الوحدات الكاملة عشان المستخدم ميتعلقش.
@@ -7808,7 +11991,7 @@ class CustomTkinterApp(ctk.CTk):
         for lbl_t, val_t, val_c, val_sz in details:
             row = ctk.CTkFrame(card_box, fg_color="transparent")
             row.pack(fill="x", padx=14, pady=3)
-            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text_muted"]).pack(side="left")
+            ctk.CTkLabel(row, text=lbl_t, font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
             ctk.CTkLabel(row, text=val_t, font=(FONT_FAMILY, val_sz, "bold"), text_color=val_c).pack(side="right")
 
         tot_box = ctk.CTkFrame(card_box, corner_radius=10, fg_color=t["input"], border_width=1, border_color=t["border"])
@@ -7822,11 +12005,11 @@ class CustomTkinterApp(ctk.CTk):
         b_bar.pack(fill="x", padx=14, pady=(0, 12))
 
         ctk.CTkButton(b_bar, text=T2("إغلاق", "Close"), width=80, height=34, corner_radius=9, font=FONT_BTN_SUB,
-                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "secondary"),
                       command=modal.destroy).pack(side="right", padx=(6, 0))
 
         ctk.CTkButton(b_bar, text=tr("export_pdf"), width=110, height=34, corner_radius=9, font=FONT_BTN_SUB,
-                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "primary"),
                       command=lambda: self.export_pdf_summary(parent=modal)).pack(side="right", padx=6)
 
         if self.is_supervisor:
@@ -7872,17 +12055,17 @@ class CustomTkinterApp(ctk.CTk):
         e_a.pack(fill="x", padx=14)
         attach_context_menu(e_a)
 
-        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         e_name = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
         e_name.pack(fill="x", padx=14)
         attach_context_menu(e_name)
 
-        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_plate_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         e_p = ctk.CTkEntry(card, font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"], height=34)
         e_p.pack(fill="x", padx=14)
         attach_context_menu(e_p)
 
-        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("manual_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_u, t)
         cb_u.set("")
@@ -7962,7 +12145,7 @@ class CustomTkinterApp(ctk.CTk):
                                 text_color="#FFFFFF", height=38, corner_radius=10, command=save)
         btn_gen.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=82, height=38, corner_radius=10,
-                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "secondary"),
                       command=win.destroy).pack(side="right")
         fit_and_center(win, self, 370, min_height=320, focus_widget=e_a)
 
@@ -7985,14 +12168,14 @@ class CustomTkinterApp(ctk.CTk):
         card = ctk.CTkFrame(win, corner_radius=14, fg_color=t["card"], border_width=1, border_color=t["border"])
         card.pack(fill="both", expand=True, padx=14, pady=(12, 8))
 
-        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(card, text=tr("slip_name_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(12, 2))
         cb_employee = SafeArabicComboBox(card, values=[""] + EMPLOYEES_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_employee, t)
         cb_employee.set("")
         cb_employee.pack(fill="x", padx=14)
         attach_context_menu(cb_employee)
 
-        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text_muted"]).pack(anchor="w", padx=14, pady=(8, 2))
+        ctk.CTkLabel(card, text=tr("slip_unit_lbl"), font=FONT_SECTION_LBL, text_color=t["text"]).pack(anchor="w", padx=14, pady=(8, 2))
         cb_u = SafeArabicComboBox(card, values=[""] + UNITS_LIST, font=FONT_REGULAR_BOLD, height=34)
         style_combo(cb_u, t)
         cb_u.set("")
@@ -8054,7 +12237,7 @@ class CustomTkinterApp(ctk.CTk):
                       fg_color=t["warn_btn"], hover_color=t["warn_btn_hover"], text_color="#FFFFFF",
                       command=do_p).pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkButton(f_btns, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, width=80, height=36, corner_radius=10,
-                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "secondary"),
                       command=win.destroy).pack(side="right")
         fit_and_center(win, self, 355, min_height=260, focus_widget=cb_employee)
 
@@ -8098,7 +12281,7 @@ class CustomTkinterApp(ctk.CTk):
             win.destroy()
 
         ctk.CTkButton(win, text=T2("✅ تأكيد وعمل الإيصال", "✅ Confirm & create receipt"), font=FONT_BTN_MAIN, height=34,
-                      fg_color=t["primary"], hover_color=t["primary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "primary"),
                       command=ok).pack(fill="x", padx=16, pady=(12, 4))
         ctk.CTkButton(win, text=T2("إلغاء", "Cancel"), font=FONT_BTN_SUB, height=28, fg_color=t["border"],
                       hover_color=t["card"], text_color=t["text"], command=win.destroy).pack(fill="x", padx=16, pady=(0, 10))
@@ -8267,7 +12450,7 @@ class CustomTkinterApp(ctk.CTk):
         entries = {}
         sub_lbls = {}
 
-        sum_card = ctk.CTkFrame(win, corner_radius=12, fg_color=t["card"], border_width=1, border_color=t["border"])
+        sum_card = ctk.CTkFrame(win, corner_radius=8, fg_color=t["card"], border_width=1, border_color=t["border"])
         sum_card.pack(fill="x", padx=16, pady=(0, 8))
         lbl_tot_cash = ctk.CTkLabel(sum_card, text=tr("cash_tot_lbl", sum=0), font=(FONT_FAMILY, 11, "bold"), text_color=t["success"])
         lbl_combined_total = ctk.CTkLabel(sum_card, text=tr("cash_comb_lbl", sum=0), font=(FONT_FAMILY, 13, "bold"), text_color=t["text"])
@@ -8316,7 +12499,7 @@ class CustomTkinterApp(ctk.CTk):
             r = ctk.CTkFrame(frame_box, fg_color="transparent")
             r.pack(fill="x", padx=12, pady=(8 if idx_d == 0 else 2, 8 if idx_d == len(denoms) - 1 else 2))
             ctk.CTkLabel(r, text=tr("cash_denom_lbl", d=d), width=95, anchor="w", font=(FONT_FAMILY, 11, "bold"), text_color=t["text"]).pack(side="left")
-            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text_muted"])
+            lbl_s = ctk.CTkLabel(r, text="= 0", width=95, anchor="e", font=(FONT_FAMILY, 10, "bold"), text_color=t["text"])
             lbl_s.pack(side="right", padx=(6, 0))
             sub_lbls[d] = lbl_s
             e = ctk.CTkEntry(r, width=90, height=28, justify="center", font=FONT_ENTRY, text_color=t["text"], fg_color=t["input"], border_color=t["border"])
@@ -8351,7 +12534,7 @@ class CustomTkinterApp(ctk.CTk):
                                   height=38, command=apply_and_close)
         btn_apply.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkButton(f_btns, text=T2("تصفير", "Reset"), font=FONT_BTN_SUB, width=80, height=38, corner_radius=10,
-                      fg_color=t["secondary"], hover_color=t["secondary_hover"], text_color="#FFFFFF",
+                      **_ghost(t, "secondary"),
                       command=clear_cash).pack(side="right")
         win.bind("<Return>", apply_and_close)
         fit_and_center(win, self, 405, min_height=470, focus_widget=e_manual_cash)
