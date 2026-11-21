@@ -1,108 +1,314 @@
-name: Build A2R Console Lite (Windows exe)
-
-on:
+# Replace .github/workflows/build.yml with this identical file on main, lite, and lite2.
+# Install on main FIRST. Pushes publish directly to Releases. No manual tag needed.
+name: Build A2R Console - branch releases
+'on':
   push:
-    branches: [lite, lite2]
-    tags: ['lite-v*']
-  workflow_dispatch:
-
+    branches:
+    - main
+    - lite
+    - lite2
+  workflow_dispatch: {}
 permissions:
   contents: write
-
+  actions: write
+concurrency:
+  group: a2r-console-release-and-cleanup
+  cancel-in-progress: false
 jobs:
   build:
+    if: github.ref_type == 'branch' && contains(fromJSON('["main","lite","lite2"]'), github.ref_name)
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: ${{ github.ref_name == 'main' && 'requirements.txt' || 'requirements-lite.txt' }}
+    - name: Read branch and APP_VERSION safely
+      shell: python
+      run: |
+        import ast
+        import os
+        import re
+        from pathlib import Path
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements-lite.txt
+        branch = os.environ['GITHUB_REF_NAME']
+        if os.environ['GITHUB_REF_TYPE'] != 'branch' or branch not in ('main', 'lite', 'lite2'):
+            raise SystemExit('Run this workflow on main, lite or lite2, not a tag.')
+        module = ast.parse(Path('collect.py').read_text(encoding='utf-8-sig'))
+        versions = []
+        for node in module.body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'APP_VERSION' for t in node.targets):
+                versions.append(ast.literal_eval(node.value))
+        if len(versions) != 1 or not isinstance(versions[0], str):
+            raise SystemExit('Expected exactly one literal APP_VERSION in collect.py')
+        version = versions[0]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', version):
+            raise SystemExit('APP_VERSION contains unsafe filename characters')
+        name = f'A2R_Console_{branch}_{version}_build{os.environ["GITHUB_RUN_NUMBER"]}'
+        tag = f'console-{branch}-{version}-r{os.environ["GITHUB_RUN_ID"]}-a{os.environ["GITHUB_RUN_ATTEMPT"]}'
+        with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+            f.write(f'APP_VERSION={version}\nEXE_NAME={name}\nRELEASE_TAG={tag}\n')
+        print(f'Building {name}.exe')
+    - name: Install full-app dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      if: github.ref_name == 'main'
+    - name: Install lite dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-lite.txt
+      if: github.ref_name != 'main'
+    - name: Install Tesseract and stage it for bundling
+      shell: pwsh
+      run: |
+        choco install tesseract -y --no-progress
+        $src = $null
+        foreach ($c in 'C:\Program Files\Tesseract-OCR','C:\Program Files (x86)\Tesseract-OCR') {
+          if (Test-Path (Join-Path $c 'tesseract.exe')) { $src = $c; break }
+        }
+        if (-not $src) { Write-Error "tesseract.exe not found after install"; exit 1 }
+        New-Item -ItemType Directory -Force -Path tesseract | Out-Null
+        Copy-Item -Path (Join-Path $src '*') -Destination tesseract -Recurse -Force
+        # keep only the English model to keep the exe small
+        Get-ChildItem tesseract\tessdata -File -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -ne 'eng.traineddata' -and $_.Name -ne 'pdf.ttf' } | Remove-Item -Force
+        Get-ChildItem tesseract -Filter 'unins*' -ErrorAction SilentlyContinue | Remove-Item -Force
+        if (-not (Test-Path 'tesseract\tesseract.exe')) { Write-Error "tesseract\tesseract.exe missing"; exit 1 }
+        if (-not (Test-Path 'tesseract\tessdata\eng.traineddata')) { Write-Error "eng.traineddata missing"; exit 1 }
+        & .\tesseract\tesseract.exe --version
+      if: github.ref_name == 'main'
+    - name: Verify OCR libraries are installed
+      run: python -c "from rapidocr_onnxruntime import RapidOCR; import pypdfium2, onnxruntime; RapidOCR(); print('OCR OK')"
+      if: github.ref_name == 'main'
+    - name: Verify POS engine libraries
+      run: python -c "import cv2, numpy, pypdf, openpyxl, PIL, pypdfium2; print('POS libs OK', cv2.__version__)"
+      if: github.ref_name == 'main'
+    - name: Verify required files
+      shell: pwsh
+      run: |
+        foreach ($f in 'collect.py','app.ico','pdftotext.exe') {
+          if (-not (Test-Path $f)) { Write-Error "Missing required file: $f"; exit 1 }
+        }
+        if (-not (Test-Path 'SumatraPDF.exe')) {
+          Write-Warning "SumatraPDF.exe not found: silent 57x90 printing will fall back to default printing."
+        }
+    - name: Verify libraries
+      run: python -c "import customtkinter, PIL, pystray, openpyxl, reportlab, arabic_reshaper, bidi, pypdf; print('Lite libs
+        OK')"
+      if: github.ref_name != 'main'
+    - name: Syntax check
+      run: python -m py_compile collect.py
+    - name: Build full exe
+      shell: pwsh
+      run: |
+        $pyArgs = @(
+          '--clean','--noconsole','--onefile',
+          '--icon=app.ico',
+          '--add-binary','pdftotext.exe;.',
+          '--add-data','app.ico;.',
+          '--add-data','tesseract;tesseract',
+          '--collect-all','customtkinter',
+          '--collect-all','reportlab',
+          '--collect-all','arabic_reshaper',
+          '--collect-all','bidi',
+          '--collect-all','pystray',
+          '--collect-all','PIL',
+          '--collect-all','rapidocr_onnxruntime',
+          '--collect-all','onnxruntime',
+          '--collect-all','pypdfium2',
+          '--hidden-import','pystray._win32',
+          '--hidden-import','cv2',
+          '--hidden-import','numpy',
+          '--hidden-import','pypdf',
+          '--hidden-import','openpyxl',
+          '--hidden-import','hmac',
+          '--name',$env:EXE_NAME
+        )
+        if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
+        # قالب إكسيل التقفيل (الاسكندريه 00.xlsx): لو موجود في الريبو بيتضم جوه الـ exe تلقائياً
+        $tpl = Get-ChildItem -File -Filter '*00.xlsx' | Where-Object { $_.Name -notlike '~*' } | Select-Object -First 1
+        if ($tpl) { Write-Host "Bundling template: $($tpl.Name)"; $pyArgs += @('--add-data', ($tpl.Name + ';.')) }
+        else { Write-Warning "Closing template (*00.xlsx) not found in repo root: users must pick it from the Closing window." }
+        $pyArgs += 'collect.py'
+        python -m PyInstaller @pyArgs
+      if: github.ref_name == 'main'
+    - name: Build lite exe
+      shell: pwsh
+      run: |
+        $pyArgs = @(
+          '--clean','--noconsole','--onefile',
+          '--icon=app.ico',
+          '--add-binary','pdftotext.exe;.',
+          '--add-data','app.ico;.',
+          '--collect-all','customtkinter',
+          '--collect-all','reportlab',
+          '--collect-all','arabic_reshaper',
+          '--collect-all','bidi',
+          '--collect-all','pystray',
+          '--collect-all','PIL',
+          '--hidden-import','pystray._win32',
+          '--hidden-import','pypdf',
+          '--hidden-import','openpyxl',
+          '--hidden-import','hmac',
+          '--name',$env:EXE_NAME
+        )
+        if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
+        $pyArgs += 'collect.py'
+        python -m PyInstaller @pyArgs
+      if: github.ref_name != 'main'
+    - name: Publish in Releases and keep latest two per branch
+      shell: python
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        import json
+        import os
+        import re
+        import subprocess
+        from pathlib import Path
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-lite.txt
+        BRANCHES = ('main', 'lite', 'lite2')
 
-      - name: Verify libraries
-        run: python -c "import customtkinter, PIL, pystray, openpyxl, reportlab, arabic_reshaper, bidi, pypdf; print('Lite libs OK')"
+        def gh(*args):
+            p = subprocess.run(['gh', *args], check=True, capture_output=True, text=True, encoding='utf-8')
+            return p.stdout
 
-      - name: Verify required files
-        shell: pwsh
-        run: |
-          foreach ($f in 'collect.py','app.ico','pdftotext.exe') {
-            if (-not (Test-Path $f)) { Write-Error "Missing required file: $f"; exit 1 }
-          }
-          if (-not (Test-Path 'SumatraPDF.exe')) {
-            Write-Warning "SumatraPDF.exe not found: silent 57x90 printing will fall back to default printing."
-          }
+        def api(path, method='GET', **fields):
+            args = ['api', path, '--method', method]
+            for key, value in fields.items():
+                if isinstance(value, bool):
+                    args += ['-F', f'{key}={str(value).lower()}']
+                else:
+                    args += ['-f', f'{key}={value}']
+            result = gh(*args)
+            return json.loads(result) if result.strip() else None
 
-      - name: Syntax check
-        run: python -m py_compile collect.py
+        def pages(path, key=None):
+            result = []
+            page = 1
+            while True:
+                data = api(f'{path}?per_page=100&page={page}')
+                items = data[key] if key else data
+                result.extend(items)
+                if len(items) < 100:
+                    return result
+                page += 1
 
-      - name: Build exe with PyInstaller
-        shell: pwsh
-        run: |
-          $pyArgs = @(
-            '--clean','--noconsole','--onefile',
-            '--icon=app.ico',
-            '--add-binary','pdftotext.exe;.',
-            '--add-data','app.ico;.',
-            '--collect-all','customtkinter',
-            '--collect-all','reportlab',
-            '--collect-all','arabic_reshaper',
-            '--collect-all','bidi',
-            '--collect-all','pystray',
-            '--collect-all','PIL',
-            '--hidden-import','pystray._win32',
-            '--hidden-import','pypdf',
-            '--hidden-import','openpyxl',
-            '--hidden-import','hmac',
-            '--name','A2R_Console_Lite'
-          )
-          if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
-          $pyArgs += 'collect.py'
-          python -m PyInstaller @pyArgs
+        def release_branch(release):
+            # Conflicting branch evidence is never guessed away.
+            evidence = set()
+            body = release.get('body') or ''
+            name = release.get('name') or ''
+            tag = release.get('tag_name') or ''
+            for match in re.finditer(r'^Branch:\s*(main|lite2|lite)\s*$', body, re.M):
+                evidence.add(match.group(1))
+            match = re.search(r'\((main|lite2|lite)\)$', name)
+            if match:
+                evidence.add(match.group(1))
+            match = re.match(r'^console-(main|lite2|lite)-', tag)
+            if match:
+                evidence.add(match.group(1))
+            # Original full-app tags had no branch in the release notes.
+            if not evidence and re.fullmatch(r'v\d[\w.-]*', tag):
+                if any(a.get('name') == 'A2R_Console.exe' for a in release.get('assets', [])):
+                    evidence.add('main')
+            return next(iter(evidence)) if len(evidence) == 1 else None
 
-      # نسخة احتياطية من الـ exe تتحمّل من صفحة الـ Run نفسها حتى لو نشر الـ Release فشل
-      - name: Upload exe as workflow artifact
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: A2R_Console_Lite
-          path: dist/A2R_Console_Lite.exe
-          retention-days: 1
+        def ready(release):
+            return not release.get('draft') and any(
+                a.get('name', '').lower().endswith('.exe') and a.get('state') == 'uploaded' and a.get('size', 0) > 0
+                for a in release.get('assets', [])
+            )
 
-      - name: Publish GitHub Release (manual tag lite-v*)
-        if: startsWith(github.ref, 'refs/tags/lite-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/A2R_Console_Lite.exe
+        def plan(releases):
+            groups = {branch: [] for branch in BRANCHES}
+            for release in releases:
+                branch = release_branch(release)
+                if branch and ready(release):
+                    groups[branch].append(release)
+            for group in groups.values():
+                group.sort(key=lambda r: (r.get('published_at') or r.get('created_at') or '', r['id']), reverse=True)
+            return groups
 
-      # بتنشر باسم lite-رقم عشان متتداخلش مع Releases النسخة الكاملة (build-رقم) ومتاخدش مكان "Latest"
-      - name: Publish GitHub Release (automatic)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: lite-${{ github.run_number }}
-          name: A2R Console Lite build ${{ github.run_number }} (${{ github.ref_name }})
-          target_commitish: ${{ github.sha }}
-          make_latest: false
-          body: |
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-          files: dist/A2R_Console_Lite.exe
+        def main():
+            repo = os.environ['GITHUB_REPOSITORY']
+            branch = os.environ['GITHUB_REF_NAME']
+            tag = os.environ['RELEASE_TAG']
+            exe = Path('dist') / (os.environ['EXE_NAME'] + '.exe')
+            if not exe.is_file() or exe.stat().st_size == 0:
+                raise SystemExit('No complete exe to publish. Nothing has been deleted.')
+            notes = '\n'.join([
+                f'Branch: {branch}',
+                f'Version: {os.environ["APP_VERSION"]}',
+                f'Commit: {os.environ["GITHUB_SHA"]}',
+                f'Build: {os.environ["GITHUB_RUN_NUMBER"]}',
+                'Download the exe below. Only the newest two successful releases per branch are kept.',
+                '<!-- a2r-console-branch-releases-v1 -->',
+            ])
+            notes_path = Path(os.environ['RUNNER_TEMP']) / 'a2r-release-notes.txt'
+            notes_path.write_text(notes, encoding='utf-8')
+            # Stage as draft so an incomplete upload never displaces a working release.
+            release = api(f'repos/{repo}/releases', 'POST', tag_name=tag,
+                          target_commitish=os.environ['GITHUB_SHA'], draft=True,
+                          name=f'A2R Console | {branch} | {os.environ["APP_VERSION"]} | build {os.environ["GITHUB_RUN_NUMBER"]}',
+                          body=notes, make_latest='false')
+            gh('release', 'upload', tag, str(exe), '--repo', repo)
+            release = api(f'repos/{repo}/releases/{release["id"]}')
+            matching = [a for a in release['assets'] if a['name'] == exe.name and a['state'] == 'uploaded' and a['size'] == exe.stat().st_size]
+            if len(matching) != 1:
+                raise SystemExit('Release upload verification failed. Old releases have NOT been deleted.')
+            release = api(f'repos/{repo}/releases/{release["id"]}', 'PATCH', draft=False, make_latest='true' if branch == 'main' else 'false')
+            if not ready(release):
+                raise SystemExit('Release publication verification failed. Nothing has been deleted.')
+            print(f'Published: {release["html_url"]}')
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                f.write(f'## {branch}: {os.environ["APP_VERSION"]}\n\n[Download release]({release["html_url"]})\n\n')
+            releases = pages(f'repos/{repo}/releases')
+            groups = plan(releases)
+            if not any(r['id'] == release['id'] for r in groups[branch][:2]):
+                raise SystemExit('New release was not among the newest two. Refusing cleanup.')
+            errors = []
+            for source_branch, group in groups.items():
+                if len(group) < 2:
+                    print(f'{source_branch}: fewer than two working releases; leaving old data alone.')
+                    continue
+                print(f'{source_branch}: keeping ' + ', '.join(r['tag_name'] for r in group[:2]))
+                for old in group[2:]:
+                    try:
+                        # Delete the release/assets, not Git tags or source history.
+                        api(f'repos/{repo}/releases/{old["id"]}', 'DELETE')
+                        print(f'Deleted old release: {old["tag_name"]}')
+                    except subprocess.CalledProcessError as exc:
+                        errors.append(f'Release {old["id"]}: {exc.stderr}')
+            # Remove old downloadable console artifacts only after their branch has
+            # two working releases. Never delete run logs, caches, or unrelated files.
+            artifacts = pages(f'repos/{repo}/actions/artifacts', 'artifacts')
+            for artifact in artifacts:
+                source_branch = (artifact.get('workflow_run') or {}).get('head_branch')
+                group = groups.get(source_branch, [])
+                if artifact.get('name') not in ('A2R_Console', 'A2R_Console_Lite') or len(group) < 2:
+                    continue
+                cutoff = group[0].get('published_at') or ''
+                if not cutoff or (artifact.get('created_at') or '9999') > cutoff:
+                    continue
+                try:
+                    api(f'repos/{repo}/actions/artifacts/{artifact["id"]}', 'DELETE')
+                    print(f'Deleted old console artifact: {artifact["id"]} ({source_branch})')
+                except subprocess.CalledProcessError as exc:
+                    errors.append(f'Artifact {artifact["id"]}: {exc.stderr}')
+            for r in releases:
+                if not r.get('draft') and not release_branch(r):
+                    print(f'::warning::Unclassified release {r["id"]} was preserved. Check it manually.')
+            if errors:
+                raise SystemExit('The new release is published, but cleanup was incomplete:\n' + '\n'.join(errors))
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                f.write('Cleanup finished: latest two downloadable releases per known branch retained. Git tags/source history preserved.\n')
 
-      - name: Keep only the newest 10 lite releases
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $repo = '${{ github.repository }}'
-          $rels = gh release list --repo $repo --limit 100 --json tagName,createdAt | ConvertFrom-Json | Where-Object { $_.tagName -like 'lite-*' } | Sort-Object createdAt -Descending
-          $rels | Select-Object -Skip 10 | ForEach-Object { gh release delete $_.tagName --repo $repo --cleanup-tag --yes }
+        if __name__ == '__main__':
+            main()
