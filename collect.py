@@ -781,7 +781,7 @@ def _ghost(t, role):
                 "hover_color": t.get(role + "_hoverbg", t[role + "_hover"]),
                 "border_width": 1, "border_color": t.get(role + "_border", t["border"]),
                 "text_color": t[role + "_text"], "text_color_disabled": t["text_muted"]}
-    return {"fg_color": t[role], "hover_color": t[role + "_hover"], "text_color": "#FFFFFF"}
+    return {"fg_color": t[role], "hover_color": t[role + "_hover"], "border_width": 0, "border_color": t["border"], "text_color": "#FFFFFF", "text_color_disabled": t["text_muted"]}
 
 def make_themed_button(parent, t, kind="quiet", **kw):
     role = _KIND_ROLE.get(kind, "secondary")
@@ -4520,7 +4520,7 @@ class CustomTkinterApp(ctk.CTk):
         self.current_lang = _saved_lang if _saved_lang in LANGUAGES else "en"
         CURRENT_LANG = self.current_lang
         _saved_theme = _cfg.get("theme")
-        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Windows Dark"
+        self.current_theme_name = _saved_theme if _saved_theme in THEMES else "Modern Dark"
         if "sound_muted" in _cfg:
             SOUND_MUTED = bool(_cfg.get("sound_muted"))
 
@@ -5541,15 +5541,13 @@ class CustomTkinterApp(ctk.CTk):
 
         self.lbl_status_count = ctk.CTkLabel(status_row, text="", height=16,
                                              font=(FONT_FAMILY, 9, "bold"), text_color="#38BDF8")
-        self.lbl_status_count.pack(side="left")
 
         self.lbl_status_sum = ctk.CTkLabel(status_row, text="", height=16,
                                            font=(FONT_FAMILY, 9, "bold"), text_color="#00FF66")
-        self.lbl_status_sum.pack(side="left", padx=(12, 0))
 
         self.lbl_foot = ctk.CTkLabel(status_row, text=f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria", height=16,
                                 font=(FONT_FAMILY, 9, "bold"), text_color="#FFFFFF")
-        self.lbl_foot.pack(side="right")
+        self.lbl_foot.pack(fill="x", expand=True, anchor="center")
 
         self._status_count_val = 0
         self._status_total_val = 0.0
@@ -5847,9 +5845,13 @@ class CustomTkinterApp(ctk.CTk):
                                     border_color=t.get(role + "_border", t["border"]), text_color=_tc,
                                     text_color_disabled=t["text_muted"])
                     elif role == "secondary":
-                        b.configure(fg_color=col, hover_color=hov, border_width=1, border_color=t["border"])
+                        b.configure(fg_color=col, hover_color=hov, border_width=1,
+                                    border_color=t["border"], text_color="#FFFFFF",
+                                    text_color_disabled=t["text_muted"])
                     else:
-                        b.configure(fg_color=col, hover_color=hov, border_width=0)
+                        b.configure(fg_color=col, hover_color=hov, border_width=0,
+                                    border_color=t["border"], text_color="#FFFFFF",
+                                    text_color_disabled=t["text_muted"])
                 except Exception as e:
                     log_exception("apply_button_role:" + a, e)
 
